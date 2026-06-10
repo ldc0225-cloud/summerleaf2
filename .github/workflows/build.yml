@@ -1,4 +1,4 @@
-name: Buildozer Android APK
+name: Build Android APK
 
 on:
   push:
@@ -6,32 +6,24 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  build-android:
+    name: Build for Android
+    runs-on: ubuntu-latest
 
     steps:
-    - name: 1. 소스코드 가져오기
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: 2. 파이썬 환경 세팅
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Build with Buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
+        id: buildozer
+        with:
+          command: buildozer android debug
+          workdir: .
+          buildozer_version: stable
 
-    - name: 3. 자바 및 안드로이드 필수 패키지 통설치
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libltdl-dev libffi-dev libssl-dev autoconf automake libtool pkg-config cmake git openjdk-17-jdk unzip zip
-        pip install --upgrade pip
-        pip install Cython==0.29.33 buildozer
-
-    - name: 4. Buildozer 엔진으로 APK 직접 굽기
-      run: |
-        rm -rf .buildozer bin ~/.buildozer
-        
-        # [치트키] 시스템 환경 변수에 구글 라이선스 자동 동의 마스터 키 고정
-        export ANDROID_HOME=/home/runner/.buildozer/android/platform/android-sdk
-        export AUTO_ACCEPT_ANDROID_LICENSES=yaml
-        
-        # 빌드 시작
-        buildozer android debug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: summerleaf2-debug-apk
+          path: ${{ steps.buildozer.outputs.filename }}
