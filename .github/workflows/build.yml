@@ -28,5 +28,10 @@ jobs:
     - name: 4. Buildozer 엔진으로 APK 직접 굽기
       run: |
         rm -rf .buildozer bin ~/.buildozer
-        # yes 명령어 대신 Buildozer 자체 공식 안드로이드 약관 동의 옵션 사용
-        buildozer android debug --auto-accept-licenses
+        
+        # [치트키] 시스템 환경 변수에 구글 라이선스 자동 동의 마스터 키 고정
+        export ANDROID_HOME=/home/runner/.buildozer/android/platform/android-sdk
+        export AUTO_ACCEPT_ANDROID_LICENSES=yaml
+        
+        # 빌드 시작
+        buildozer android debug
