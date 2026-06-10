@@ -28,4 +28,6 @@ jobs:
     - name: 4. Buildozer 엔진으로 APK 직접 굽기
       run: |
         rm -rf .buildozer bin ~/.buildozer
-        buildozer android debug
+        # 구글 라이선스 자동 동과 치트키 주입
+        export ANDROID_LICENSES_ONLY=1
+        yes | buildozer android debug
