@@ -21,13 +21,11 @@ jobs:
     - name: 3. 자바 및 안드로이드 필수 패키지 통설치
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libltdl-dev libffi-dev libssl-dev autoconf automake libtool pkg-config cmake git openjdk-17-aid unzip zip
+        sudo apt-get install -y build-essential libltdl-dev libffi-dev libssl-dev autoconf automake libtool pkg-config cmake git openjdk-17-jdk unzip zip
         pip install --upgrade pip
         pip install Cython==0.29.33 buildozer
 
     - name: 4. Buildozer 엔진으로 APK 직접 굽기
       run: |
-        # 로컬 빌더 폭주 버그 원천 차단용 초기화
         rm -rf .buildozer bin ~/.buildozer
-        # 강제 슛
         buildozer android debug
