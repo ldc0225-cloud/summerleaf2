@@ -7,19 +7,27 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 버그 없는 검증된 환경 고정
+    runs-on: ubuntu-22.04
 
     steps:
     - name: 1. 소스코드 가져오기
       uses: actions/checkout@v4
 
-    - name: 2. 시스템 필수 패키지 세팅
+    - name: 2. 파이썬 환경 세팅
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 3. 자바 및 안드로이드 필수 패키지 통설치
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libltdl-dev libffi-dev libssl-dev autoconf automake libtool pkg-config cmake git
+        sudo apt-get install -y build-essential libltdl-dev libffi-dev libssl-dev autoconf automake libtool pkg-config cmake git openjdk-17-aid unzip zip
+        pip install --upgrade pip
+        pip install Cython==0.29.33 buildozer
 
-    - name: 3. 순정 Buildozer 엔진으로 APK 굽기
-      uses: jbcreations/buildozer-action@v2  # 현재 가장 안정적인 공식 대체 부품
-      with:
-        workdir: .
-        buildozer_version: stable
+    - name: 4. Buildozer 엔진으로 APK 직접 굽기
+      run: |
+        # 로컬 빌더 폭주 버그 원천 차단용 초기화
+        rm -rf .buildozer bin ~/.buildozer
+        # 강제 슛
+        buildozer android debug
