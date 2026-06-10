@@ -1,3 +1,5 @@
+import android_fix  # Android asset-path shim; must run before any asset load
+
 CONFIG = {
     # --- Render output mode ---
     # UPSCALE_320: 320x240 논리 렌더 → 정수배(기본 2x)로 640x480 출력
