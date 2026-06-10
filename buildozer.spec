@@ -1,0 +1,18 @@
+[app]
+title = Summerleaf2
+package.name = summerleaf2
+package.domain = org.test
+source.dir = .
+source.include_exts = py,png,jpg,jpeg,ttf,otf,ttc,wav,mp3,json
+version = 0.1
+requirements = python3==3.10.12,pygame,sdl2_image,sdl2_mixer,sdl2_ttf
+orientation = portrait
+osx.kivy_version = 2.1.0
+fullscreen = 1
+android.archs = armeabi-v7a, arm64-v8a
+android.allow_backup = True
+android.ndk = 25b
+
+[buildozer]
+log_level = 2
+warn_on_root = 1

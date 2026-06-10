@@ -1,0 +1,431 @@
+{
+    "LOCAL": {
+        "ev_town_test_": {
+            "map_id": "bg_town",
+            "title": "our hometown",
+            "steps": [],
+            "result": {
+                "mainprogress": ""
+            }
+        },
+        "ev_jjangpu_gotothetown": {
+            "title": "go to the town",
+            "steps": [
+                { "type": "FADEOUT", "val": 1.0 },
+                { "type": "MAP", "target": "bg_town", "pos": [206, 350], "dir": "left" },
+                { "type": "WAIT", "val": 2.0 },
+                { "type": "FADEIN", "val": 1.0 }
+            ],
+            "result": {
+                "mainprogress": ""
+            },
+            "map_id": "bg_jjangpu"
+        },
+        "ev_town_gotothejjangpu": {
+            "title": "go to the jjangpu",
+            "steps": [
+                { "type": "FADEOUT", "val": 1.0 },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "MAP", "target": "bg_jjangpu", "pos": [667, 1338], "dir": "left" },
+                { "type": "FADEIN", "val": 1.0 }
+            ],
+            "result": {
+                "mainprogress": ""
+            },
+            "map_id": "bg_town"
+        },
+        "ev_jjangpu2_test": {
+            "title": "go to the test",
+            "steps": [
+                { "type": "FADEOUT", "val": 1.0 },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "MAP", "target": "bg_jjangpu_test", "pos": [667, 1338], "dir": "left" },
+                { "type": "FADEIN", "val": 1.0 }
+            ],
+            "result": {
+                "mainprogress": ""
+            },
+            "map_id": "bg_jjangpu"
+        },
+        "ev_jjangpu_bench": {
+            "title": "벤치에서 시간 보내기",
+            "steps": [
+                { "type": "MOVE", "target": "player", "pos": [528, 2128], "dir": "right", "move_anim": "seating", "force": true, "wait": true },
+                { "type": "ACTION_ANIM", "target": "player", "anim": "seat_idle", "mode": "hold", "release": "stop", "val": 1.0, "loop": true, "dir": "right" },
+                { "type": "WAIT", "val": 3.0 },
+                { "type": "CAMERA", "mode": "fixed", "smooth": true, "duration_sec": 0.5, "x": 762.0, "y": 1942.0 },
+                { "type": "TILT", "on": true, "strength": 0.9778, "duration_sec": 1.0 },
+                { "type": "ZOOM", "on": false, "strength": 0.0, "duration_sec": 0.5 },
+                { "type": "WAIT", "val": 2.0 },
+                { "type": "SAY", "who": "player", "show_name": false, "text": "당근\n아 봄날 좋구나~" },
+                { "type": "EVT_STOP_BEGIN", "action": "break_loop" },
+                { "type": "LOOP_START" },
+                { "type": "LOOP_END" },
+                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 0.9 },
+                { "type": "CAMERA", "mode": "follow_player", "smooth": false, "duration_sec": 0.5 },
+                { "type": "TILT", "on": false, "strength": 0.0, "duration_sec": 1.0 },
+                { "type": "MOVE", "target": "player", "pos": [570, 2132], "dir": "right", "force": true, "move_anim": "jump" }
+            ],
+            "result": {
+                "mainprogress": ""
+            },
+            "map_id": "bg_jjangpu"
+        },
+        "ev_jjangpu_swing": {
+            "title": "그네타기",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "start_swing_ride" }
+            ],
+            "result": {
+                "mainprogress": ""
+            },
+            "map_id": "bg_jjangpu"
+        },
+        "ev_jjangpu_tutorial_010500": {
+            "title": "짱짱어린이집 마당",
+            "steps": [
+                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.0 },
+                { "type": "PLACE", "target": "player", "pos": [596, 2003], "dir": "right", "appear": "fade" },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "SAY", "text": "mainprogress 가 010100으로 돌아갑니다." },
+                { "type": "PLACE", "target": "player", "action": "remove" },
+                { "type": "FADEOUT", "val": 3.0 },
+                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.0 },
+                { "type": "FADEIN", "val": 3.0 }
+            ],
+            "result": {
+                "mainprogress": "010100"
+            },
+            "map_id": "bg_jjangpu"
+        },
+        "ev_test": {
+            "title": "ev_test",
+            "steps": [
+                { "type": "MOVE", "target": "player", "pos": [640, 2080], "dir": "left" },
+                { "type": "ANIM_ONCE", "name": "escape01", "pos": [688, 2096] }
+            ],
+            "result": {
+                "mainprogress": ""
+            },
+            "map_id": "bg_jjangpu"
+        }
+    },
+    "GLOBAL": {
+        "ev_hotkey_restart": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 D: 세이브 삭제 후 재시작",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "restart_delete_save" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_fullscreen": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 F: 전체화면 토글",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "toggle_fullscreen" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_mask": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 M: 이벤트존 마스크 표시",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "toggle_show_mask" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_overlay": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 O: HUD 오버레이",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "toggle_show_overlay" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_tilt": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 L: 틸트 데모",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "toggle_tilt_demo" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_shear": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 K: 쉬어 디버그",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "toggle_shear_debug" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_jump_shadow": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 F9: 점프 그림자 모드",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "toggle_jump_shadow" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_zoom_cycle": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 Z: 줌 순환",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "cycle_zoom_debug" }
+            ],
+            "result": {}
+        },
+        "ev_wateringcan_putdown": {
+            "title": "물뿌리개 내려놓기",
+            "steps": [
+                { "type": "CARRY", "action": "put", "holder": "player", "target": "wateringcan1", "pos": [753, 1941], "wait": true },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "SAY", "text": "물뿌리개에 물을 다시 채웠어요", "val": 0.0 },
+                { "type": "CHANGE", "target": "wateringcan1", "to": "wateringcan2" },
+                { "type": "WAIT", "val": 1.0 }
+            ],
+            "result": {
+                "progress_wateringcan": 1001
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual"
+        },
+        "ev_wateringcan_action": {
+            "title": "물뿌리개 사용 (꽃 등 binding)",
+            "steps": [
+                { "type": "CHANGE", "target": "wateringcan2", "to": "wateringcan3" },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "SAY", "text": "물뿌리개로 물을 주었어요", "val": 0.0 },
+                { "type": "CHANGE", "target": "wateringcan3", "to": "wateringcan1" },
+                { "type": "WAIT", "val": 1.0 }
+            ],
+            "result": {
+                "progress_wateringcan": 1003
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual"
+        },
+        "ev_wateringcan_pickup": {
+            "title": "물뿌리개 들기",
+            "steps": [
+                { "type": "CARRY", "action": "pick", "holder": "player", "target": "wateringcan2", "wait": true }
+            ],
+            "result": {
+                "progress_wateringcan": 1002
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "priority": 100
+        },
+        "ev_hotkey_cloud": {
+            "title": "핫키 구름",
+            "steps": [
+                { "type": "FX", "kind": "cloud_shadow", "on": true, "dir": "RANDOM" }
+            ],
+            "result": {},
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "priority": 100
+        },
+        "ev_fx_toggle": {
+            "title": "핫키 fx",
+            "steps": [],
+            "result": {},
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "priority": 100
+        },
+        "ev_flower1_1": {
+            "title": "FLOWER1 (들꽃과의 첫 만남)",
+            "steps": [
+                { "type": "SAY", "text": "도와줘.. 꽃을 땅에 심고 물을 주지 않으면.. 죽고 말 거야..", "bubble_target": "flower1_" },
+                { "type": "SAY", "text": "앗 그래그래~ 어디다 심으면 좋을까!!", "bubble_target": "player" },
+                { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 896.0, "y": 2176.0, "smooth": true, "duration_sec": 0.5 },
+                { "type": "PLACE", "target": "here01", "pos": [896, 2208], "dir": "left" },
+                { "type": "WAIT", "val": 2.0 },
+                { "type": "CAMERA", "mode": "follow_player", "slot": "default", "smooth": true, "duration_sec": 0.5 },
+                { "type": "CARRY", "action": "pick", "holder": "player", "target": "flower1_", "wait": true }
+            ],
+            "result": {
+                "progress_flower1_1": 1002
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "priority": 100
+        },
+        "ev_gl_demo_02": {
+            "title": "1. 데모플레이",
+            "steps": [
+                { "type": "CURSOR_VISIBLE", "val": 0 },
+                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.0 },
+                { "type": "MUSIC_PLAY", "music": "우리들의날은아름다워", "fade_in": 1.0, "queue": true, "loop": true, "volume": 0.8 },
+                { "type": "MAP", "target": "bg_jjangpu", "dir": "right" },
+                { "type": "MOVE", "target": "player", "pos": [1090, 1828], "dir": "right", "instant": true },
+                { "type": "PLACE", "target": "c10", "pos": [1090, 1862], "dir": "right" },
+                { "type": "PLACE", "target": "cc1", "pos": [1088, 1890], "dir": "right" },
+                { "type": "WAIT", "val": 0.4 },
+                { "type": "FADEIN", "val": 1.0 },
+                { "type": "FOLLOW_START", "follower": "c10", "leader": "player", "dist": 40, "speed": 0.5 },
+                { "type": "FOLLOW_START", "follower": "cc1", "leader": "c10", "dist": 40, "speed": 0.5 },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "OVERLAY_UI", "action": "show", "content": "text", "text": "짱짱어드벤처", "font": "logo", "size": 100, "color": "255,255,255", "overlay_id": "TITLE01", "anchor": "center", "margin_x": 0, "margin_y": 0, "mode": "fade", "scroll_enter": "left", "appear": 1.5, "hold": 4.0, "disappear": 1.5 },
+                { "type": "INTERVAL", "val": 5.0 },
+                { "type": "OVERLAY_UI", "action": "show", "content": "text", "text": "짱짱어드벤처", "font": "logo", "size": 40, "color": "255,255,255", "overlay_id": "TITLE02", "anchor": "top_right", "margin_x": 20, "margin_y": 10, "mode": "scroll", "scroll_enter": "left", "appear": 1.0, "hold": 2.0, "disappear": 0.5, "hold_forever": true, "persist": true },
+                { "type": "EVT_STOP_BEGIN", "action": "break_loop" },
+                { "type": "LOOP_START" },
+                { "type": "LOOP_END" },
+                { "type": "OVERLAY_UI", "action": "remove", "appear": 1.0, "hold": 2.0, "disappear": 2.0, "overlay_id": "TITLE01" },
+                { "type": "OVERLAY_UI", "action": "remove", "appear": 1.0, "hold": 2.0, "disappear": 2.0, "overlay_id": "TITLE02" },
+                { "type": "FOLLOW_STOP" },
+                { "type": "FADEOUT", "val": 1.0 },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "CURSOR_VISIBLE", "val": 1.0 }
+            ],
+            "result": {},
+            "map_id": "__GLOBAL__",
+            "work_map": "bg_jjangpu",
+            "trigger": "auto",
+            "condition": "gamestart == 1",
+            "priority": 20
+        },
+        "ev_flower1_2": {
+            "title": "FLOWER1 바닥에 심기",
+            "steps": [
+                { "type": "SAY", "text": "여기에 심어야겠어!", "bubble_target": "player" },
+                { "type": "PLACE", "target": "here01", "dir": "left", "action": "remove" },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "CARRY", "action": "put", "holder": "player", "target": "flower1_", "pos": [896, 2176], "wait": true },
+                { "type": "PLACE", "target": "flower1_", "dir": "left", "appear": "fade", "action": "remove" },
+                { "type": "PLACE", "target": "flower_fairy1", "pos": [896, 2176], "dir": "left", "appear": "fade" }
+            ],
+            "result": {
+                "progress_flower1_1": 1003
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "priority": 100
+        },
+        "ev_flower1_3": {
+            "title": "FLOWER1 물 줘서 살리기",
+            "steps": [
+                { "type": "MOVE", "target": "player", "pos": [880, 2176], "dir": "right" },
+                { "type": "MOVE", "target": "player", "dir": "right" },
+                { "type": "CALL_EVENT", "target": "ev_wateringcan_action" },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "ACTION_ANIM", "target": "flower_fairy1", "anim": "jump", "mode": "hold", "release": "idle", "val": 1.0, "dir": "left" }
+            ],
+            "result": {
+                "progress_flower1_1": 1004
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "condition": "progress_flower1_1==1003",
+            "priority": 100
+        },
+        "ev_intro_scene": {
+            "title": "0. 인트로",
+            "steps": [
+                { "type": "CURSOR_VISIBLE", "val": 0 },
+                { "type": "PLAYER_VISIBLE", "val": 0 },
+                { "type": "FADEOUT", "val": 1.0 },
+                { "type": "WAIT", "val": 1.0 }
+            ],
+            "result": {},
+            "map_id": "__GLOBAL__",
+            "work_map": "bg_title",
+            "trigger": "auto",
+            "condition": "gamestart == 0",
+            "priority": 10
+        },
+        "ev_gl_post_demo_mainprogress_sample": {
+            "title": "2. 첫 만남",
+            "steps": [
+                { "type": "SAY", "who": "carrot", "text": "테스트 중입니다" },
+                { "type": "FADEOUT", "val": 1.0 },
+                { "type": "WAIT", "val": 2.0 },
+                { "type": "PLACE", "target": "carrot", "pos": [560, 2320], "dir": "left" },
+                { "type": "PLACE", "target": "player", "pos": [560, 2352], "dir": "left" },
+                { "type": "FADEIN", "val": 1.0 },
+                { "type": "MOVE", "target": "carrot", "pos": [ [560, 2144], [560, 2112] ], "dir": "right", "speed": 1.0, "move_sync": "demo_walk" },
+                { "type": "MOVE", "target": "player", "pos": [ [560, 2144], [592, 2112] ], "dir": "right", "speed": 1.0, "move_sync": "demo_walk" },
+                { "type": "PLACE", "target": "player", "pos": [592, 2112], "dir": "left" },
+                { "type": "SAY", "text": "여름아, 잘 다녀 올 수 있지?", "bubble_target": "carrot" },
+                { "type": "SAY", "text": "아..엄마 같이 들어가서 놀자~~", "bubble_target": "player" },
+                { "type": "SAY", "text": "그건 안 돼 여 ㄹ..", "auto": true, "val": 2.0, "bubble_target": "carrot" },
+                { "type": "SAY", "text": "알았어! 다녀올게~ 와하하하~", "bubble_target": "player" },
+                { "type": "CAMERA", "mode": "follow_player", "smooth": true, "duration_sec": 0.5 },
+                { "type": "MOVE", "target": "player", "pos": [560, 1922], "dir": "left", "speed": 2.0, "wait": true, "move_anim": "run" },
+                { "type": "PLACE", "target": "player", "dir": "left", "appear": "fade", "action": "remove" },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "CAMERA", "mode": "follow_entity", "smooth": true, "duration_sec": 0.3, "target": "carrot" },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "SAY", "text": "에휴..말썽쟁이~", "bubble_target": "carrot" },
+                { "type": "WAIT", "val": 0.5 },
+                { "type": "CAMERA", "mode": "lock_here", "smooth": true, "duration_sec": 1 },
+                { "type": "MOVE", "target": "carrot", "pos": [560, 2352], "dir": "left", "wait": true },
+                { "type": "PLACE", "target": "carrot", "dir": "left", "action": "remove" },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "ZOOM", "on": false, "strength": 0.0, "duration_sec": 1.0 },
+                { "type": "CAMERA", "mode": "fixed", "smooth": true, "duration_sec": 1.5, "x": 736.0, "y": 2208.0 },
+                { "type": "TILT", "on": true, "strength": 0.9778, "duration_sec": 1.5 },
+                { "type": "SHEAR", "on": true, "strength": 1.0, "duration_sec": 1.5 },
+                { "type": "WAIT", "val": 3.0 },
+                { "type": "ANIM_ONCE", "name": "escape01", "pos": [544, -120], "dir": "left", "height": 50.0 },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 752.0, "y": 1920.0, "smooth": true, "duration_sec": 0.5 },
+                { "type": "TILT", "on": true, "strength": 0.5, "duration_sec": 1.0 },
+                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.0 },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "PLACE", "target": "escape02", "pos": [496, 1232], "dir": "left", "layer": 2 },
+                { "type": "MOVE", "target": "escape02", "pos": [800, 2016], "dir": "left", "wait": true, "speed": 5.0 },
+                { "type": "PLACE", "target": "escape02", "dir": "left", "action": "remove" },
+                { "type": "ANIM_ONCE", "name": "escape03", "pos": [800, 2016] },
+                { "type": "PLACE", "target": "flower1_", "pos": [800, 1986], "dir": "left", "appear": "fade" },
+                { "type": "WAIT", "val": 2.0 },
+                { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 560.0, "y": 1920.0, "smooth": true, "duration_sec": 0.5 },
+                { "type": "PLACE", "target": "player", "pos": [560, 1920], "dir": "left", "appear": "fade" },
+                { "type": "CAMERA", "mode": "follow_player", "smooth": true, "duration_sec": 0.5 },
+                { "type": "WAIT", "val": 1.0 },
+                { "type": "SAY", "text": "앗 엄마 나 장난감 놓고 왔어!!", "val": 0.0, "bubble_target": "player" },
+                { "type": "SAY", "text": "......", "val": 0.0, "bubble_target": "player" },
+                { "type": "SAY", "text": "엄마.. 가 버렸어..", "val": 0.0, "bubble_target": "player" },
+                { "type": "MOVE", "target": "player", "dir": "right" },
+                { "type": "SAY", "text": "어? 못 보던 풀인데..?", "val": 0.0, "bubble_target": "player" },
+                { "type": "MOVE", "target": "player", "pos": [688, 1984], "dir": "right", "speed": 3.0 },
+                { "type": "TILT", "on": false, "strength": 0.0, "duration_sec": 1.5 },
+                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.5 }
+            ],
+            "result": {
+                "mainprogress": "010200",
+                "progress_flower1_1": 1001
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "auto",
+            "condition": "mainprogress == 010100",
+            "priority": 25
+        }
+    },
+    "SYNC": {
+        "sync_flower_restore": {
+            "title": "요정1",
+            "work_map": "bg_jjangpu",
+            "condition": "progress_flower1_1 >= 1004",
+            "priority": 10,
+            "steps": [
+                { "type": "PLACE", "target": "flower_fairy1", "pos": [896, 2176], "dir": "left" }
+            ],
+            "result": {
+                "mainprogress": ""
+            }
+        }
+    },
+    "FRAGMENTS": {}
+}

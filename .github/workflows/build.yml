@@ -1,0 +1,30 @@
+name: Buildozer Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 1. 소스코드 가져오기
+      uses: actions/checkout@v4
+
+    - name: 2. 빌드 환경 자동 세팅
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 3. 시스템 필수 패키지 설치
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libltdl-dev libffi-dev libssl-dev autoconf automake libtool pkg-config cmake
+
+    - name: 4. 검증된 안정 버전 Buildozer로 APK 굽기
+      uses: Artemish/buildozer-action@v1
+      with:
+        workdir: .
+        buildozer_version: stable

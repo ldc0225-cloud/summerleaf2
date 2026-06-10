@@ -1,0 +1,705 @@
+{
+  "textbox01": {
+    "path": "images/ui/textbox01.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "UI"
+  },
+  "slot_toybox": {
+    "type": "slot",
+    "match_id": "TOY",
+    "collision": false,
+    "category": "슬롯"
+  },
+  "slot_field": {
+    "type": "slot",
+    "match_id": "CROP",
+    "collision": false,
+    "category": "슬롯"
+  },
+  "wateringcan1": {
+    "path": "images/object/wateringcan1.png",
+    "is_holdable": true,
+    "collision": false,
+    "match_id": "TOY",
+    "category": "들 수 있는 물건",
+    "interact": {
+      "enabled": false,
+      "range": 40.0
+    }
+  },
+  "wateringcan2": {
+    "path": "images/object/wateringcan2.png",
+    "is_holdable": true,
+    "collision": false,
+    "match_id": "TOY",
+    "category": "들 수 있는 물건",
+    "interact": {
+      "enabled": true,
+      "range": 16.0,
+      "bindings": [
+        {
+          "condition": "progress_wateringcan == 1001",
+          "event_id": "ev_wateringcan_pickup",
+          "priority": 100
+        }
+      ]
+    }
+  },
+  "wateringcan3": {
+    "path": "images/object/wateringcan3.png",
+    "is_holdable": true,
+    "collision": false,
+    "match_id": "TOY",
+    "category": "들 수 있는 물건",
+    "interact": {
+      "enabled": false,
+      "range": 40.0
+    }
+  },
+  "flower1_": {
+    "path": "images/object/flower1_",
+    "is_holdable": true,
+    "collision": false,
+    "match_id": "TOY",
+    "category": "들 수 있는 물건",
+    "interact": {
+      "enabled": true,
+      "range": 16.0,
+      "bindings": [
+        {
+          "condition": "progress_flower1_1 == 1001",
+          "event_id": "ev_flower1_1",
+          "priority": 10
+        }
+      ]
+    }
+  },
+  "here01": {
+    "path": "images/fx/here01",
+    "is_holdable": false,
+    "collision": false,
+    "category": "fx효과",
+    "interact": {
+      "enabled": true,
+      "range": 32.0,
+      "offset": [
+        0.0,
+        -32.0
+      ],
+      "bindings": [
+        {
+          "condition": "progress_flower1_1 == 1002",
+          "event_id": "ev_flower1_2",
+          "priority": 10
+        }
+      ]
+    }
+  },
+  "pot": {
+    "path": "images/object/pot.png",
+    "is_holdable": true,
+    "collision": true,
+    "match_id": "TOY",
+    "category": "들 수 있는 물건"
+  },
+  "jjangpu2_house": {
+    "path": "images/object/jjangpu/jjangpu2_house.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_house2": {
+    "path": "images/object/jjangpu/jjangpu2_house2.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_houseroof": {
+    "path": "images/object/jjangpu/jjangpu2_houseroof.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_wall": {
+    "path": "images/object/jjangpu/jjangpu2_wall.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_stair": {
+    "path": "images/object/jjangpu/jjangpu2_stair.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_column": {
+    "path": "images/object/jjangpu/jjangpu2_column.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_fence1": {
+    "path": "images/object/jjangpu/jjangpu2_fence1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_fence2": {
+    "path": "images/object/jjangpu/jjangpu2_fence2.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_fence3": {
+    "path": "images/object/jjangpu/jjangpu2_fence3.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_fence4": {
+    "path": "images/object/jjangpu/jjangpu2_fence4.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_fence5": {
+    "path": "images/object/jjangpu/jjangpu2_fence5.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench1-1": {
+    "path": "images/object/jjangpu/jjangpu2_bench1-1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench1-2": {
+    "path": "images/object/jjangpu/jjangpu2_bench1-2.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench1-3": {
+    "path": "images/object/jjangpu/jjangpu2_bench1-3.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench1-4": {
+    "path": "images/object/jjangpu/jjangpu2_bench1-4.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench2-1": {
+    "path": "images/object/jjangpu/jjangpu2_bench2-1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench2-2": {
+    "path": "images/object/jjangpu/jjangpu2_bench2-2.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench2-3": {
+    "path": "images/object/jjangpu/jjangpu2_bench2-3.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench2-4": {
+    "path": "images/object/jjangpu/jjangpu2_bench2-4.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench3-1": {
+    "path": "images/object/jjangpu/jjangpu2_bench3-1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench3-2": {
+    "path": "images/object/jjangpu/jjangpu2_bench3-2.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench3-3": {
+    "path": "images/object/jjangpu/jjangpu2_bench3-3.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_bench3-4": {
+    "path": "images/object/jjangpu/jjangpu2_bench3-4.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "pole1": {
+    "path": "images/object/jjangpu/pole1.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "swing1": {
+    "path": "images/object/swing1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "그네류"
+  },
+  "swing2": {
+    "path": "images/object/swing2.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "그네류"
+  },
+  "swing3": {
+    "path": "images/object/swing3.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "그네류"
+  },
+  "squidgame": {
+    "path": "images/object/squidgame.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "그네류"
+  },
+  "TV": {
+    "path": "images/object/TV.png",
+    "is_holdable": false,
+    "collision": true,
+    "category": "가구류"
+  },
+  "bed": {
+    "path": "images/object/bed.png",
+    "is_holdable": false,
+    "collision": true,
+    "category": "가구류"
+  },
+  "ac": {
+    "path": "images/object/ac.png",
+    "is_holdable": false,
+    "collision": true,
+    "category": "가구류"
+  },
+  "shower": {
+    "path": "images/object/shower.png",
+    "is_holdable": false,
+    "collision": true,
+    "category": "가구류"
+  },
+  "tree1": {
+    "path": "images/object/tree1.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree2": {
+    "path": "images/object/tree2.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree3": {
+    "path": "images/object/tree3.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree4": {
+    "path": "images/object/tree4.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree5": {
+    "path": "images/object/tree5.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree6": {
+    "path": "images/object/tree6.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree7": {
+    "path": "images/object/tree7.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree8": {
+    "path": "images/object/tree8.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "tree9": {
+    "path": "images/object/tree9.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "나무류"
+  },
+  "vehicle1": {
+    "path": "images/object/vehicle1.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle1-1": {
+    "path": "images/object/vehicle1-1.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle2": {
+    "path": "images/object/vehicle2.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle2-1": {
+    "path": "images/object/vehicle2-1.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle3": {
+    "path": "images/object/vehicle3.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle3-1": {
+    "path": "images/object/vehicle3-1.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle1shadow": {
+    "path": "images/object/vehicle1shadow.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle2shadow": {
+    "path": "images/object/vehicle2shadow.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "vehicle3shadow": {
+    "path": "images/object/vehicle3shadow.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "category": "차량류"
+  },
+  "bush1": {
+    "path": "images/object/bush1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "bush2": {
+    "path": "images/object/bush2.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "bush3": {
+    "path": "images/object/bush3.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "bush4": {
+    "path": "images/object/bush4.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "bush5": {
+    "path": "images/object/bush5.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "plant1": {
+    "path": "images/object/plant1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "plant2": {
+    "path": "images/object/plant2.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "plant3": {
+    "path": "images/object/plant3.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "plant4": {
+    "path": "images/object/plant4.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "plant5": {
+    "path": "images/object/plant5.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower1": {
+    "path": "images/object/flower1/flower1_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower2": {
+    "path": "images/object/flower2/flower2_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower3": {
+    "path": "images/object/flower3/flower3_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower4": {
+    "path": "images/object/flower4/flower4_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower5": {
+    "path": "images/object/flower5/flower5_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower6": {
+    "path": "images/object/flower6/flower6_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower7": {
+    "path": "images/object/flower7/flower7_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "flower8": {
+    "path": "images/object/flower8/flower8_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "vane": {
+    "path": "images/object/vane/vane_0.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "tile01": {
+    "path": "images/object/tile01.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "타일류"
+  },
+  "faucet": {
+    "path": "images/object/faucet.png",
+    "is_holdable": false,
+    "collision": true,
+    "category": "타일류",
+    "interact": {
+      "enabled": true,
+      "range": 16.0,
+      "bindings": [
+        {
+          "condition": "progress_wateringcan >= 1002",
+          "event_id": "ev_wateringcan_putdown",
+          "priority": 100
+        }
+      ]
+    }
+  },
+  "jump_key_pad": {
+    "path": "images/object/tile01.png",
+    "is_holdable": false,
+    "collision": false,
+    "jump_pad": true,
+    "category": "미니게임"
+  },
+  "sky_clean": {
+    "path": "images/object/background/sky_clean.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "mountain1": {
+    "path": "images/object/background/mountain1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "mountain2": {
+    "path": "images/object/background/mountain2.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "fog1": {
+    "path": "images/object/background/fog1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "fog2": {
+    "path": "images/object/background/fog2.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "cloud1": {
+    "path": "images/object/background/cloud1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "cloud2": {
+    "path": "images/object/background/cloud2.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "cloud3": {
+    "path": "images/object/background/cloud3.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "apartment1": {
+    "path": "images/object/background/apartment1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "escape01": {
+    "path": "images/event/escape01",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "escape02": {
+    "path": "images/event/escape02",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "escape03": {
+    "path": "images/event/escape03",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  }
+}

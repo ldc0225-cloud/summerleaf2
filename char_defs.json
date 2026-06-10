@@ -1,0 +1,159 @@
+{
+  "carrot": {
+    "jump_max_gap": 30
+  },
+  "broccoli": {
+    "jump_max_gap": 30
+  },
+  "summer": {
+    "jump_max_gap": 30
+  },
+  "babydino": {
+    "jump_max_gap": 30
+  },
+  "dog": {
+    "jump_max_gap": 30
+  },
+  "c1": {
+    "jump_max_gap": 30,
+    "mask_nav": true
+  },
+  "c2": {
+    "jump_max_gap": 30,
+    "mask_nav": true
+  },
+  "c3": {
+    "jump_max_gap": 30
+  },
+  "c4": {
+    "jump_max_gap": 30
+  },
+  "c5": {
+    "jump_max_gap": 30
+  },
+  "c6": {
+    "jump_max_gap": 30
+  },
+  "c7": {
+    "jump_max_gap": 30
+  },
+  "c8": {
+    "jump_max_gap": 30
+  },
+  "c9": {
+    "jump_max_gap": 30
+  },
+  "c10": {
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "display_name": "여름이",
+    "interact": {
+      "enabled": true,
+      "range": 52.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    },
+    "talk": {
+      "lines": [
+        {
+          "id": "line1",
+          "when": "progress_c10_talk == 0",
+          "say": {
+            "who": "c10",
+            "text": "안녕! 여기는 짱푸 공원이야. 처음 왔구나?",
+            "show_name": true
+          },
+          "after": {
+            "progress_c10_talk": 1,
+            "progress_c10_affinity": 5
+          }
+        },
+        {
+          "id": "line2",
+          "when": "progress_c10_affinity >= 10",
+          "say": {
+            "who": "c10",
+            "text": "너랑 이야기하는 건 재밌어. 또 놀자!",
+            "show_name": true
+          },
+          "after": {
+            "progress_c10_affinity": 15
+          }
+        },
+        {
+          "id": "line3",
+          "when": "mainprogress == 010100",
+          "say": {
+            "who": "c10",
+            "text": "저기 벤치에 앉으면 쉬기 좋아.",
+            "show_name": true
+          }
+        },
+        {
+          "id": "line4",
+          "when": "progress_c10_talk == 1",
+          "say": {
+            "who": "c10",
+            "text": "오늘도 산책이야? 날씨가 좋네.",
+            "show_name": true
+          }
+        }
+      ],
+      "fallback": {
+        "say": {
+          "text": "…",
+          "show_name": false
+        }
+      }
+    }
+  },
+  "cc1": {
+    "jump_max_gap": 30
+  },
+  "cc2": {
+    "jump_max_gap": 30
+  },
+  "cc3": {
+    "jump_max_gap": 30
+  },
+  "cc4": {
+    "jump_max_gap": 30
+  },
+  "fairy1": {
+    "jump_max_gap": 30
+  },
+  "flower_fairy1": {
+    "jump_max_gap": 30,
+    "display_name": "flower_fairy1",
+    "interact": {
+      "enabled": true,
+      "range": 16.0,
+      "bindings": [
+        {
+          "condition": "progress_flower1_1==1003",
+          "event_id": "ev_flower1_3",
+          "priority": 100
+        }
+      ],
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    },
+    "talk": {
+      "lines": [
+        {
+          "id": "line1",
+          "say": {
+            "who": "flower_fairy1",
+            "text": "물..이.. 필요해.....",
+            "show_name": true
+          },
+          "when": "progress_flower1_1 == 1003"
+        }
+      ]
+    }
+  }
+}
