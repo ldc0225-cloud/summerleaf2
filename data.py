@@ -15,7 +15,7 @@ CONFIG = {
     # --- 가변 해상도(자동 출력 모드 전환) ---
     # 기본은 640x480(NATIVE_640). world_zoom이 2.0에 "완료"되면 320x240(UPSCALE_320)로 바꾸고
     # world_zoom은 1.0으로 리셋해서 체감 줌(시야)을 유지하면서 후처리 스케일 비용을 줄인다.
-    "AUTO_OUTPUT_MODE_ENABLED": False,
+    "AUTO_OUTPUT_MODE_ENABLED": True,
     "AUTO_OUTPUT_MODE_ON_WORLD_ZOOM": 2.0,
     "AUTO_OUTPUT_MODE_OFF_WORLD_ZOOM": 1.0,
     "AUTO_OUTPUT_MODE_COOLDOWN_MS": 900,
@@ -23,8 +23,9 @@ CONFIG = {
 
     # 논리 해상도(게임 내부 좌표 기준)
     "WIDTH": 640, "HEIGHT": 480, "FPS": 30,
-    # UI 아이콘(말풍선·이모트·존 클릭 FX): 논리 px = 에셋 px (NATIVE_640 기준 1:1)
+    # UI 아이콘(말풍선·이모트·존 클릭 FX): 논리 px = 에셋 px (NATIVE_640 기준 1:1, 고정 참조)
     "UI_LAYOUT_WIDTH": 640,
+    "UI_LAYOUT_BASE_WIDTH": 640,
     # 텍스트박스·폰트·RECT_*_320 값만 320 설계 기준 → WIDTH/320 으로 스케일
     "UI_TEXT_REFERENCE_WIDTH": 320,
 
@@ -130,6 +131,8 @@ CONFIG = {
     "SAY_UI_FADE_ENABLED": True,
     "SAY_UI_FADE_IN_SEC": 0.2,
     "SAY_UI_FADE_OUT_SEC": 0.2,
+    # PLACE/MOVE appear=fade 알파 보간 시간(초). 예전 5px/프레임@60fps ≈ 0.85초.
+    "APPEAR_FADE_SEC": 0.85,
     # 같은 이벤트 안에서 SAY가 연속일 때: 박스 페이드아웃/인 없이 다음 대사만 갱신
     "SAY_CHAIN_WITHIN_EVENT": True,
     # 색상

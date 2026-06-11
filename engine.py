@@ -3,6 +3,19 @@ import heapq
 from collections import deque
 
 from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES
+try:
+    from android_fix import resolve_asset_dir, resolve_asset_path
+except Exception:
+    def resolve_asset_path(path):
+        return path
+
+    def resolve_asset_dir(rel_dir):
+        try:
+            if os.path.isdir(rel_dir):
+                return rel_dir
+        except Exception:
+            pass
+        return None
 from flow import evaluate_event_step_condition, evaluate_global_condition
 from render_align import (
     blit_topleft_bottom_center,
@@ -846,21 +859,22 @@ def _scan_music_library():
     assets/musics 폴더를 스캔해서 {display_name: abs_path} 형태로 반환.
     - display_name: 확장자 제거 파일명
     """
-    base_dir = os.path.join("assets", "musics")
     out = {}
-    try:
-        if not os.path.isdir(base_dir):
-            return out
-        for fn in sorted(os.listdir(base_dir)):
-            if not fn:
-                continue
-            low = fn.lower()
-            if not (low.endswith(".mp3") or low.endswith(".ogg") or low.endswith(".wav")):
-                continue
-            name = os.path.splitext(fn)[0]
-            out[name] = os.path.join(base_dir, fn)
-    except Exception:
-        return out
+    for rel in (os.path.join("assets", "musics"), os.path.join("assets", "music")):
+        base_dir = resolve_asset_dir(rel)
+        if not base_dir:
+            continue
+        try:
+            for fn in sorted(os.listdir(base_dir)):
+                if not fn:
+                    continue
+                low = fn.lower()
+                if not (low.endswith(".mp3") or low.endswith(".ogg") or low.endswith(".wav")):
+                    continue
+                name = os.path.splitext(fn)[0]
+                out[name] = os.path.join(base_dir, fn)
+        except Exception:
+            continue
     return out
 
 
@@ -954,6 +968,14 @@ class MusicManager:
         self.current_path = None
         self._queued = None  # dict or None: {"name":..., "fade_in_ms":..., "loop":..., "volume":...}
         self._paused = False
+        try:
+            n = len(self.library)
+            if n <= 0:
+                print("[MUSIC] library empty (check assets/musics in APK)")
+            else:
+                print(f"[MUSIC] library: {n} track(s)")
+        except Exception:
+            pass
 
     def refresh_library(self):
         self.library = _scan_music_library()
@@ -978,7 +1000,11 @@ class MusicManager:
         path = self.library.get(name)
         if not path:
             return False
+        path = resolve_asset_path(path)
         try:
+            if not os.path.isfile(path):
+                print(f"[MUSIC] file missing: {path}")
+                return False
             pygame.mixer.music.load(path)
             if volume is not None and volume != "":
                 pygame.mixer.music.set_volume(max(0.0, min(1.0, float(volume))))
@@ -4619,10 +4645,13 @@ class EventManager:
         self._emote_overlay = None  # dict: see _execute_step EMOTE
         self.fade_alpha = 0      # 현재 검은 투명도
         self.fade_target = 0     # 목표 투명도 (0 or 255)
-        self.fade_t0_ms = 0      # 페이드 시작 시각
+        self.fade_t0_ms = 0      # 페이드 시작 시각(레거시)
         self.fade_duration_ms = 0  # 0이면 시간 기반 페이드 비활성
+        self.fade_duration_sec = 0.0
+        self.fade_elapsed_sec = 0.0
         self.fade_start_alpha = 0.0  # fade_t0_ms 시점의 알파
         self.is_fading = False   # 현재 페이드 연출 중인가?
+        self._say_ui_fade_elapsed = 0.0
         self._pending_fade_in_after_fadeout_sec = None  # 페이드아웃 완료 직후 페이드인(초)
         self.active_effects = [] # 현재 화면에 떠 있는 이펙트들
         self._effect_wait_ref = None  # EFFECT wait:true — 재생 끝날 때까지 next_step 보류
@@ -4794,10 +4823,14 @@ class EventManager:
         if ds <= 0.0:
             self.fade_alpha = tgt
             self.fade_duration_ms = 0
+            self.fade_duration_sec = 0.0
+            self.fade_elapsed_sec = 0.0
             self.is_fading = False
             return
         self.fade_start_alpha = float(self.fade_alpha)
         self.fade_t0_ms = pygame.time.get_ticks()
+        self.fade_duration_sec = float(ds)
+        self.fade_elapsed_sec = 0.0
         self.fade_duration_ms = max(1, int(round(ds * 1000.0)))
         self.is_fading = True
 
@@ -5056,19 +5089,13 @@ class EventManager:
             fout_sec = float(CONFIG.get("SAY_UI_FADE_OUT_SEC", 0.5) or 0.5)
         except Exception:
             fout_sec = 0.5
-        fin_ms = max(0, min(5000, int(fin_sec * 1000)))
-        fout_ms = max(0, min(5000, int(fout_sec * 1000)))
         ph = getattr(self, "_say_ui_fade_phase", None) or "visible"
-        try:
-            now_a = int(pygame.time.get_ticks())
-        except Exception:
-            now_a = 0
-        t0a = int(getattr(self, "_say_ui_fade_t0_ms", now_a) or now_a)
-        if ph == "in" and fin_ms > 0:
-            u = (now_a - t0a) / float(fin_ms)
+        el = float(getattr(self, "_say_ui_fade_elapsed", 0.0) or 0.0)
+        if ph == "in" and fin_sec > 0:
+            u = el / float(fin_sec)
             return int(round(255 * max(0.0, min(1.0, u))))
-        if ph == "out" and fout_ms > 0:
-            u = (now_a - t0a) / float(fout_ms)
+        if ph == "out" and fout_sec > 0:
+            u = el / float(fout_sec)
             return int(round(255 * max(0.0, min(1.0, 1.0 - u))))
         if ph == "out":
             return 0
@@ -5326,19 +5353,13 @@ class EventManager:
                     fout_sec = float(CONFIG.get("SAY_UI_FADE_OUT_SEC", 0.5) or 0.5)
                 except Exception:
                     fout_sec = 0.5
-                fin_ms = max(0, min(5000, int(fin_sec * 1000)))
-                fout_ms = max(0, min(5000, int(fout_sec * 1000)))
                 ph = getattr(self, "_say_ui_fade_phase", None) or "visible"
-                try:
-                    now_a = int(pygame.time.get_ticks())
-                except Exception:
-                    now_a = 0
-                t0a = int(getattr(self, "_say_ui_fade_t0_ms", now_a) or now_a)
-                if ph == "in" and fin_ms > 0:
-                    u = (now_a - t0a) / float(fin_ms)
+                el = float(getattr(self, "_say_ui_fade_elapsed", 0.0) or 0.0)
+                if ph == "in" and fin_sec > 0:
+                    u = el / float(fin_sec)
                     say_alpha = int(round(255 * max(0.0, min(1.0, u))))
-                elif ph == "out" and fout_ms > 0:
-                    u = (now_a - t0a) / float(fout_ms)
+                elif ph == "out" and fout_sec > 0:
+                    u = el / float(fout_sec)
                     say_alpha = int(round(255 * max(0.0, min(1.0, 1.0 - u))))
                 elif ph == "out":
                     say_alpha = 0
@@ -5653,6 +5674,7 @@ class EventManager:
             if fade_en and fin_ms > 0:
                 self._say_ui_fade_phase = "in"
                 self._say_ui_fade_t0_ms = int(now) if now else 0
+                self._say_ui_fade_elapsed = 0.0
                 ig2 = int(now) + fin_ms if now else 0
                 self._say_ignore_input_until_ms = max(int(self._say_ignore_input_until_ms or 0), ig2)
             else:
@@ -5711,15 +5733,11 @@ class EventManager:
         self._say_bubble = None
         self.next_step()
 
-    def _tick_say_ui_fade(self):
+    def _tick_say_ui_fade(self, dt_sec=1.0 / 60.0):
         if not bool(getattr(self, "is_talking", False)):
             return
         ph = getattr(self, "_say_ui_fade_phase", None)
         if ph not in ("in", "out"):
-            return
-        try:
-            now = int(pygame.time.get_ticks())
-        except Exception:
             return
         try:
             fade_en = bool(CONFIG.get("SAY_UI_FADE_ENABLED", True))
@@ -5739,15 +5757,17 @@ class EventManager:
             fout_sec = float(CONFIG.get("SAY_UI_FADE_OUT_SEC", 0.5) or 0.5)
         except Exception:
             fout_sec = 0.5
-        fin_ms = max(0, min(5000, int(fin_sec * 1000)))
-        fout_ms = max(0, min(5000, int(fout_sec * 1000)))
-        t0 = int(getattr(self, "_say_ui_fade_t0_ms", 0) or 0)
+        fin_sec = max(0.0, min(5.0, float(fin_sec)))
+        fout_sec = max(0.0, min(5.0, float(fout_sec)))
+        self._say_ui_fade_elapsed = float(getattr(self, "_say_ui_fade_elapsed", 0.0) or 0.0)
+        self._say_ui_fade_elapsed += max(0.0, float(dt_sec))
+        el = float(self._say_ui_fade_elapsed)
         if ph == "in":
-            if fin_ms <= 0 or now >= t0 + fin_ms:
+            if fin_sec <= 0.0 or el >= fin_sec:
                 self._say_ui_fade_phase = "visible"
             return
         if ph == "out":
-            if fout_ms <= 0 or now >= t0 + fout_ms:
+            if fout_sec <= 0.0 or el >= fout_sec:
                 self._say_finish_after_fade_out()
             return
 
@@ -5817,6 +5837,7 @@ class EventManager:
             if fade_en and fout_ms > 0:
                 self._say_ui_fade_phase = "out"
                 self._say_ui_fade_t0_ms = int(now) if now else 0
+                self._say_ui_fade_elapsed = 0.0
             else:
                 self._say_finish_after_fade_out()
             return
@@ -5830,15 +5851,19 @@ class EventManager:
         # escape에서 속도 복구용 (가장 최근 프레임 엔티티 풀)
         self._active_entities = [player] + list(npcs) + list(objs)
         self._last_camera = camera
-        # 0. 화면 전체 페이드 (검은 화면) — FADEIN/FADEOUT의 val은 초(duration)
-        if self.is_fading and self.fade_duration_ms > 0:
-            now = pygame.time.get_ticks()
-            u = (now - int(self.fade_t0_ms)) / float(self.fade_duration_ms)
+        # 0. 화면 전체 페이드 (검은 화면) — FADEIN/FADEOUT의 val은 초(duration), dt_sec 기준
+        if self.is_fading and float(getattr(self, "fade_duration_sec", 0.0) or 0.0) > 0.0:
+            self.fade_elapsed_sec = float(getattr(self, "fade_elapsed_sec", 0.0) or 0.0)
+            self.fade_elapsed_sec += max(0.0, float(dt_sec))
+            dur = max(1e-6, float(self.fade_duration_sec))
+            u = self.fade_elapsed_sec / dur
             if u >= 1.0:
                 completed_tgt = int(max(0, min(255, int(self.fade_target))))
                 self.fade_alpha = completed_tgt
                 self.is_fading = False
                 self.fade_duration_ms = 0
+                self.fade_duration_sec = 0.0
+                self.fade_elapsed_sec = 0.0
                 pend = getattr(self, "_pending_fade_in_after_fadeout_sec", None)
                 if pend is not None and completed_tgt >= 250:
                     self._pending_fade_in_after_fadeout_sec = None
@@ -5860,7 +5885,7 @@ class EventManager:
         except Exception:
             pass
         try:
-            self._tick_say_ui_fade()
+            self._tick_say_ui_fade(dt_sec)
         except Exception:
             pass
         try:
@@ -5941,7 +5966,7 @@ class EventManager:
 
         # 그 다음 체크 로직으로 넘어감
         if self.is_busy:
-            self._check_completion(player, camera, npcs, objs)
+            self._check_completion(player, camera, npcs, objs, dt_sec=dt_sec)
             return
 
         # 2. 다음 단계 실행 (ZOOM/TILT/SHEAR/CAMERA·CONDITION은 연속 burst 가능)
@@ -7218,9 +7243,13 @@ class EventManager:
                         # 기본: assets/musics (프로젝트 표준)
                         cand = os.path.join("assets", "musics", music)
                         # 구형 호환: assets/music
-                        if not os.path.exists(cand):
+                        if not os.path.isfile(resolve_asset_path(cand)):
                             cand = os.path.join("assets", "music", music)
-                        music = cand
+                        music = resolve_asset_path(cand)
+                    else:
+                        music = resolve_asset_path(music)
+                    if not os.path.isfile(music):
+                        raise FileNotFoundError(music)
                     pygame.mixer.music.load(music)
                     pygame.mixer.music.play(-1)
                     self.active_screen["music"] = music
@@ -7290,7 +7319,7 @@ class EventManager:
             self.next_step()
 
 
-    def _check_completion(self, player, camera, npcs, objs):
+    def _check_completion(self, player, camera, npcs, objs, dt_sec=1.0 / 60.0):
         """현재 진행 중인 타입에 따라 완료되었는지 확인"""
         step = self.active_event[self.step_idx]
         s_type = step["type"]
@@ -7303,11 +7332,21 @@ class EventManager:
             
             if target:
                 is_remove = (step.get("action") == "remove")
-                # 1. 알파값 업데이트
+                try:
+                    appear_sec = float(
+                        step.get("appear_sec")
+                        if step.get("appear_sec") is not None
+                        else CONFIG.get("APPEAR_FADE_SEC", 0.85)
+                    )
+                except Exception:
+                    appear_sec = 0.85
+                appear_sec = max(0.05, float(appear_sec))
+                delta = (255.0 / appear_sec) * max(0.0, float(dt_sec))
+                # 1. 알파값 업데이트 (실시간 기준)
                 if is_remove:
-                    target.alpha = max(0, target.alpha - 5)
+                    target.alpha = max(0, int(target.alpha) - int(round(delta)))
                 else:
-                    target.alpha = min(255, target.alpha + 5)
+                    target.alpha = min(255, int(target.alpha) + int(round(delta)))
                 
                 # 2. 완료 체크
                 if (not is_remove and target.alpha >= 255) or (is_remove and target.alpha <= 0):

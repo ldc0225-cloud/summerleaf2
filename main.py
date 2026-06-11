@@ -27,6 +27,7 @@ from field_runtime import (
     tilt_shear_effective,
     apply_pending_camera_command,
     ui_layout_scale,
+    scale_ui_text_px,
     try_start_hotkey_global_event,
     apply_dev_runtime_command,
     timed_effect_finished,
@@ -690,10 +691,16 @@ def _player_feet_screen_xy_like_draw(px, py, cam_draw_x, cam_draw_y, z, y_transf
 
 def main():
     log_line("=== launch ===")
+    # Android/SDL: init 전 pre_init이 없으면 mixer가 무음이거나 play()가 실패하는 경우가 있다.
+    try:
+        if not pygame.get_init():
+            pygame.mixer.pre_init(44100, -16, 2, 2048)
+    except Exception:
+        pass
     pygame.init()
     try:
         if not pygame.mixer.get_init():
-            pygame.mixer.init()
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
     except Exception as e:
         print(f"[MUSIC] mixer init failed: {e}")
         log_line(f"[MUSIC] mixer init failed: {e}")
@@ -748,10 +755,13 @@ def main():
             scale_factor = int(upscale_factor)
 
         lw, lh = int(CONFIG["WIDTH"]), int(CONFIG["HEIGHT"])
+        # UI_LAYOUT_WIDTH는 NATIVE_640 기준 고정(320 모드에서 pushbutton·말풍선 0.5× 스케일).
         try:
-            CONFIG["UI_LAYOUT_WIDTH"] = int(lw)
+            CONFIG["UI_LAYOUT_WIDTH"] = int(
+                CONFIG.get("UI_LAYOUT_BASE_WIDTH", CONFIG.get("UI_LAYOUT_WIDTH", 640)) or 640
+            )
         except Exception:
-            pass
+            CONFIG["UI_LAYOUT_WIDTH"] = 640
         try:
             base_off = float(CONFIG.get("CAMERA_FOLLOW_OFFSET_Y_PX", 0) or 0)
             CONFIG["CAMERA_FOLLOW_OFFSET_Y_PX_EFFECTIVE"] = float(base_off) / max(
@@ -1271,8 +1281,9 @@ def main():
         now_ms = pygame.time.get_ticks()
         if (now_ms - int(last_auto_switch_ms)) < int(auto_switch_cooldown_ms):
             return
+        prev_sf = float(scale_factor)
         _apply_output_mode(mode="NATIVE_640", fullscreen=fullscreen_on)
-        _after_resolution_change()
+        _after_resolution_change(prev_scale_factor=prev_sf)
         auto_res_zoom_mul = 1.0
         try:
             _preserve_cam_world_center(cam, bg_w, bg_h)
@@ -1281,11 +1292,18 @@ def main():
         last_auto_switch_ms = int(now_ms)
 
     def _after_resolution_change(*, prev_scale_factor=1):
-        """해상도 전환 후: 카메라/커서/캐시 정리 + 커서/카메라 오프셋 스케일 보정."""
+        """해상도 전환 후: 카메라/커서/캐시·서피스 정리 + 커서/카메라 오프셋 스케일 보정."""
+        nonlocal fade_overlay_surf, world_zoom_tmp, font
         try:
             cam.width, cam.height = int(CONFIG["WIDTH"]), int(CONFIG["HEIGHT"])
         except Exception:
             pass
+        try:
+            CONFIG["UI_LAYOUT_WIDTH"] = int(
+                CONFIG.get("UI_LAYOUT_BASE_WIDTH", CONFIG.get("UI_LAYOUT_WIDTH", 640)) or 640
+            )
+        except Exception:
+            CONFIG["UI_LAYOUT_WIDTH"] = 640
         # 카메라 follow 오프셋을 물리 기준으로 유지(UPSCALE_320면 논리 px이 절반 효과)
         try:
             base_off = float(CONFIG.get("CAMERA_FOLLOW_OFFSET_Y_PX", 0) or 0)
@@ -1317,6 +1335,26 @@ def main():
         try:
             if hasattr(cam, "image_cache") and isinstance(cam.image_cache, dict):
                 cam.image_cache.clear()
+        except Exception:
+            pass
+        try:
+            lw_r = int(CONFIG["WIDTH"])
+            lh_r = int(CONFIG["HEIGHT"])
+            fade_overlay_surf = pygame.Surface((lw_r, lh_r))
+        except Exception:
+            pass
+        world_zoom_tmp = None
+        try:
+            for _ok, _ov in list(overlay_cache.items()):
+                if str(_ok).endswith("_surf"):
+                    overlay_cache[_ok] = None
+                elif _ok in ("debug_text", "perf_text", "bgm_text", "rss_text", "cache_text"):
+                    overlay_cache[_ok] = ""
+            overlay_cache["zone_labels"] = {}
+        except Exception:
+            pass
+        try:
+            font = get_ui_font(max(6, int(round(10.0 * float(CONFIG["WIDTH"]) / 640.0))))
         except Exception:
             pass
 
@@ -1389,6 +1427,33 @@ def main():
             return float(st.get("b_h", 0.0) or 0.0)
         except Exception:
             return 0.0
+
+    def _is_primary_action_key(key):
+        return key in (pygame.K_a, pygame.K_SPACE, pygame.K_RETURN)
+
+    def _swing_ride_on_primary_press():
+        """ride 중 A/Space/Enter/좌클릭 동일: 점프 홀드 시작 또는 펌프."""
+        nonlocal swing_jump_hold_active, swing_jump_hold_started_ms, swing_jump_hold_press_ratio
+        if swing_ride_mode != "ride":
+            return False
+        if bool(swing_jump_ready) and (not swing_jump_hold_active):
+            stx = _swing_seat_state()
+            if stx is not None:
+                try:
+                    dn = float(stx.get("depth_n", 0.0) or 0.0)
+                    dpk = float(stx.get("depth_peak_n", 0.0) or 0.0)
+                except Exception:
+                    dn, dpk = 0.0, 0.0
+                if float(dpk) > 1e-6:
+                    swing_jump_hold_active = True
+                    swing_jump_hold_started_ms = int(pygame.time.get_ticks())
+                    swing_jump_hold_press_ratio = float(dn) / float(dpk)
+                    return True
+        try:
+            swing_ride_pump_times.append(float(pygame.time.get_ticks()) / 1000.0)
+        except Exception:
+            pass
+        return True
 
     # 디버그: 0 키로 플레이어 캐릭터 순환 (CHAR_ASSETS 등록 순서)
     player_cycle_names = [k for k in (CHAR_ASSETS or {}).keys()]
@@ -2334,30 +2399,8 @@ def main():
                     sx0, sy0 = float(seat_xy[0]), float(seat_xy[1])
                     try:
                         if math.hypot(float(world_x) - sx0, float(world_y) - sy0) <= float(swing_click_r):
-                            if swing_ride_mode == "ride":
-                                # ride 중 좌석 클릭은:
-                                # - 뒤 정점(점프 준비)에서 "홀드 시작" 또는
-                                # - 그 외에는 펌프 입력
-                                if bool(swing_jump_ready) and (not swing_jump_hold_active):
-                                    stx = _swing_seat_state()
-                                    if stx is not None:
-                                        try:
-                                            dn = float(stx.get("depth_n", 0.0) or 0.0)
-                                            dpk = float(stx.get("depth_peak_n", 0.0) or 0.0)
-                                        except Exception:
-                                            dn, dpk = 0.0, 0.0
-                                        if float(dpk) > 1e-6:
-                                            swing_jump_hold_active = True
-                                            swing_jump_hold_started_ms = int(pygame.time.get_ticks())
-                                            swing_jump_hold_press_ratio = float(dn) / float(dpk)
-                                            continue
-                                try:
-                                    swing_ride_pump_times.append(float(pygame.time.get_ticks()) / 1000.0)
-                                except Exception:
-                                    pass
-                                continue
-                            # (구 방식) 클릭으로 탑승 시작은 옵션으로만 유지
-                            if bool(CONFIG.get("SWING_CLICK_TO_RIDE_ENABLED", False)):
+                            # (구 방식) 클릭으로 탑승 시작은 옵션으로만 유지 (ride 중은 아래 공통 처리)
+                            if swing_ride_mode != "ride" and bool(CONFIG.get("SWING_CLICK_TO_RIDE_ENABLED", False)):
                                 swing_ride_mode = "approach"
                                 swing_ride_power = 0.0
                                 swing_ride_theta_amp = 0.0
@@ -2382,14 +2425,8 @@ def main():
                                 continue
                     except Exception:
                         pass
-                # ride 중 마우스 클릭은 키(A)와 동일하게 "점프 드래그 시작"에만 사용한다.
-                # 그 외 클릭으로 이동/상호작용이 발동하면 탑승 상태와 충돌해 이상 동작이 생길 수 있음.
-                if swing_ride_mode == "ride":
-                    # 좌석 밖 클릭도 pump로 처리(마우스 연타로도 가속)
-                    try:
-                        swing_ride_pump_times.append(float(pygame.time.get_ticks()) / 1000.0)
-                    except Exception:
-                        pass
+                # ride 중 좌클릭 = A/Space/Enter (점프 홀드 또는 펌프, 좌석 근접 불필요)
+                if _swing_ride_on_primary_press():
                     continue
                 
                 # ui_cursor는 "UI 좌표"(논리 px)를 기억한다. (UI는 월드 줌 영향을 받지 않음)
@@ -2478,27 +2515,10 @@ def main():
                     except Exception:
                         pass
 
-                # 그네 점프(간소화): 뒤 정점에서 키 누르기 시작 -> 앞 정점에서 키 떼면 점프
-                if event.key in (pygame.K_a, pygame.K_SPACE, pygame.K_RETURN):
-                    if swing_ride_mode == "ride" and bool(swing_jump_ready) and (not swing_jump_hold_active):
-                        stx = _swing_seat_state()
-                        if stx is not None:
-                            try:
-                                dn = float(stx.get("depth_n", 0.0) or 0.0)
-                                dpk = float(stx.get("depth_peak_n", 0.0) or 0.0)
-                            except Exception:
-                                dn, dpk = 0.0, 0.0
-                            if float(dpk) > 1e-6:
-                                swing_jump_hold_active = True
-                                swing_jump_hold_started_ms = int(pygame.time.get_ticks())
-                                swing_jump_hold_press_ratio = float(dn) / float(dpk)
-                                continue
-                    # ride 상태에선 A/Space/Enter는 기본적으로 펌프 입력
-                    if swing_ride_mode == "ride" and event.key in (pygame.K_a, pygame.K_SPACE, pygame.K_RETURN):
-                        try:
-                            swing_ride_pump_times.append(float(pygame.time.get_ticks()) / 1000.0)
-                        except Exception:
-                            pass
+                if _is_primary_action_key(event.key):
+                    if swing_ride_mode in ("approach", "mount"):
+                        continue
+                    if _swing_ride_on_primary_press():
                         continue
 
                     # --- Request 3 확장: 키 입력도 클릭과 동일하게(그네 탑승 포함) ---
@@ -2621,7 +2641,7 @@ def main():
             # 그네 점프 릴리즈(키/마우스): 앞 정점에서 떼면 점프
             if swing_ride_mode == "ride" and swing_jump_hold_active:
                 release = False
-                if event.type == pygame.KEYUP and event.key in (pygame.K_a, pygame.K_SPACE, pygame.K_RETURN):
+                if event.type == pygame.KEYUP and _is_primary_action_key(event.key):
                     release = True
                 if event.type == pygame.MOUSEBUTTONUP and getattr(event, "button", None) == 1:
                     release = True
@@ -4644,11 +4664,24 @@ def main():
 
         # (레거시) 대화창 UI
         if bool(CONFIG.get("SAY_DEBUG_LEGACY_BOX", False)) and ui.show_overlay_text and ev_mgr.is_talking:
-            dialog_rect = pygame.Rect(50, CONFIG["HEIGHT"] - 130, CONFIG["WIDTH"] - 100, 100)
+            try:
+                _dlg_sw = int(CONFIG["WIDTH"])
+                _dlg_sh = int(CONFIG["HEIGHT"])
+            except Exception:
+                _dlg_sw, _dlg_sh = 640, 480
+            _dlg_m = int(round(scale_ui_text_px(50, screen_w=_dlg_sw)))
+            _dlg_h = int(round(scale_ui_text_px(100, screen_w=_dlg_sw)))
+            _dlg_top = int(round(scale_ui_text_px(130, screen_w=_dlg_sw)))
+            _dlg_tx = int(round(scale_ui_text_px(70, screen_w=_dlg_sw)))
+            _dlg_ty1 = _dlg_sh - int(round(scale_ui_text_px(120, screen_w=_dlg_sw)))
+            _dlg_ty2 = _dlg_sh - int(round(scale_ui_text_px(95, screen_w=_dlg_sw)))
+            dialog_rect = pygame.Rect(
+                _dlg_m, _dlg_sh - _dlg_top, max(1, _dlg_sw - _dlg_m * 2), _dlg_h
+            )
             pygame.draw.rect(render_surf, (0, 0, 0, 200), dialog_rect)
             pygame.draw.rect(render_surf, (255, 255, 255), dialog_rect, 2)
-            render_surf.blit(font.render(ev_mgr.current_who, True, (255, 255, 0)), (70, CONFIG["HEIGHT"] - 120))
-            render_surf.blit(font.render(ev_mgr.current_text, True, (255, 255, 255)), (70, CONFIG["HEIGHT"] - 95))
+            render_surf.blit(font.render(ev_mgr.current_who, True, (255, 255, 0)), (_dlg_tx, _dlg_ty1))
+            render_surf.blit(font.render(ev_mgr.current_text, True, (255, 255, 255)), (_dlg_tx, _dlg_ty2))
 
         # 디버그/오버레이 텍스트는 1초에 1번만 갱신해서 비용을 줄인다.
         now_ov = time.time()
@@ -4736,8 +4769,12 @@ def main():
                     overlay_cache["perf_surf"] = None
 
             if ui.show_overlay_text:
+                try:
+                    fps_show = int(round(float(clock.get_fps())))
+                except Exception:
+                    fps_show = 0
                 debug_text = (
-                    f"Prog: {flow.save_data.get('mainprogress')} | Pos: ({int(player.pos[0])}, {int(player.pos[1])})"
+                    f"FPS: {fps_show} | Pos: ({int(player.pos[0])}, {int(player.pos[1])})"
                 )
                 if overlay_cache["rss_mb"] is not None:
                     debug_text += f" | RSS:{float(overlay_cache['rss_mb']):.0f}MB"
@@ -4785,14 +4822,22 @@ def main():
 
         # 디버그 정보 표시(렌더는 매 프레임, 텍스트 생성/렌더만 1초에 1번)
         if ui.show_overlay_text:
+            try:
+                _ov_x = max(4, int(CONFIG["WIDTH"]) - int(round(300.0 * float(CONFIG["WIDTH"]) / 640.0)))
+            except Exception:
+                _ov_x = 20
+            try:
+                _ov_bgm_y = int(CONFIG["HEIGHT"]) - int(round(scale_ui_text_px(28, screen_w=int(CONFIG["WIDTH"]))))
+            except Exception:
+                _ov_bgm_y = int(CONFIG["HEIGHT"]) - 28
             if overlay_cache.get("debug_surf") is not None:
-                render_surf.blit(overlay_cache["debug_surf"], (CONFIG["WIDTH"] - 300, 20))
+                render_surf.blit(overlay_cache["debug_surf"], (_ov_x, 20))
             if overlay_cache.get("perf_surf") is not None:
-                render_surf.blit(overlay_cache["perf_surf"], (CONFIG["WIDTH"] - 300, 34))
+                render_surf.blit(overlay_cache["perf_surf"], (_ov_x, 34))
             if overlay_cache.get("cache_surf") is not None:
-                render_surf.blit(overlay_cache["cache_surf"], (CONFIG["WIDTH"] - 300, 48))
+                render_surf.blit(overlay_cache["cache_surf"], (_ov_x, 48))
             if overlay_cache.get("bgm_surf") is not None:
-                render_surf.blit(overlay_cache["bgm_surf"], (70, CONFIG["HEIGHT"] - 28))
+                render_surf.blit(overlay_cache["bgm_surf"], (int(round(scale_ui_text_px(70, screen_w=int(CONFIG["WIDTH"])))), _ov_bgm_y))
         else:
             if bool(CONFIG.get("SHOW_RSS_OVERLAY_WHEN_OFF", False)):
                 if overlay_cache.get("rss_surf") is not None:

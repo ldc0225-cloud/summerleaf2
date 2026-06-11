@@ -37,6 +37,22 @@ def _to_abs(path):
     return path
 
 
+def resolve_asset_path(path):
+    """상대 에셋 경로 → 실제 파일시스템 절대 경로(Android p4a cwd 기준). 없으면 원본 반환."""
+    return _to_abs(path)
+
+
+def resolve_asset_dir(rel_dir):
+    """디렉터리가 존재하면 절대 경로, 없으면 None."""
+    p = resolve_asset_path(rel_dir)
+    try:
+        if p and os.path.isdir(p):
+            return p
+    except Exception:
+        pass
+    return None
+
+
 def _wrap(func):
     def wrapper(*args, **kwargs):
         if args:
