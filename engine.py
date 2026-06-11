@@ -1028,8 +1028,15 @@ class MusicManager:
             # 라이브러리 갱신 후 재시도
             self.refresh_library()
         if name not in self.library:
-            print(f"[MUSIC] unknown track: {name}")
-            return False
+            # Android/Windows 빌드에서 한글 파일명이 깨지면 events.json 이름과 library 키가 어긋난다.
+            # 트랙이 1곡뿐이면 그 곡으로 폴백(실기기 logcat에서 확인된 케이스).
+            if len(self.library) == 1:
+                fallback = next(iter(self.library))
+                print(f"[MUSIC] name miss ({name!r}) -> sole track {fallback!r}")
+                name = fallback
+            else:
+                print(f"[MUSIC] unknown track: {name}")
+                return False
         try:
             busy = bool(pygame.mixer.music.get_busy())
         except Exception:
