@@ -1,4 +1,4 @@
-import android_fix  # Android asset-path shim; must run before any asset load
+import android_fix  # noqa: F401  # Android asset-path shim; must run before any asset load
 
 CONFIG = {
     # --- Render output mode ---
@@ -8,6 +8,8 @@ CONFIG = {
     "OUTPUT_MODE": "NATIVE_640",  # "UPSCALE_320" | "NATIVE_640"
     "UPSCALE_FACTOR": 2,           # UPSCALE_320에서만 사용(정수배)
     "FULLSCREEN": False,
+    # Android: 기기 해상도에 맞춰 640x480 비율 유지 스케일(레터박스). main.py가 런타임에 자동 적용.
+    "ANDROID_DISPLAY_FIT": True,
 
 
     # --- 가변 해상도(자동 출력 모드 전환) ---

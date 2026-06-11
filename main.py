@@ -157,31 +157,137 @@ def perf_profile_log(msg: str):
         pass
 
 
-def _embed_phys_to_logical_xy(px, py):
+def _is_android_runtime():
+    try:
+        if "android" in sys.platform:
+            return True
+    except Exception:
+        pass
+    return bool(os.environ.get("ANDROID_ARGUMENT") or os.environ.get("ANDROID_PRIVATE"))
+
+
+def _sync_display_fit_config(lw, lh, pw, ph):
+    """Android 등: 논리 해상도를 물리 화면에 비율 유지로 맞춘 present/입력 파라미터."""
+    try:
+        lw_i, lh_i = int(lw), int(lh)
+        pw_i, ph_i = int(pw), int(ph)
+    except Exception:
+        lw_i, lh_i, pw_i, ph_i = 0, 0, 0, 0
+    CONFIG["_PHYSICAL_WIDTH"] = pw_i
+    CONFIG["_PHYSICAL_HEIGHT"] = ph_i
+    use_fit = (
+        _is_android_runtime()
+        and bool(CONFIG.get("ANDROID_DISPLAY_FIT", True))
+        and lw_i > 0
+        and lh_i > 0
+        and pw_i > 0
+        and ph_i > 0
+        and (pw_i != lw_i or ph_i != lh_i)
+    )
+    if not use_fit:
+        CONFIG["_DISPLAY_FIT_ENABLED"] = False
+        return
+    scale = min(pw_i / float(lw_i), ph_i / float(lh_i))
+    sw = max(1, int(round(lw_i * scale)))
+    sh = max(1, int(round(lh_i * scale)))
+    CONFIG["_DISPLAY_FIT_ENABLED"] = True
+    CONFIG["_DISPLAY_FIT_SCALE"] = float(scale)
+    CONFIG["_DISPLAY_OFFSET_X"] = int((pw_i - sw) // 2)
+    CONFIG["_DISPLAY_OFFSET_Y"] = int((ph_i - sh) // 2)
+    CONFIG["_DISPLAY_SCALED_W"] = sw
+    CONFIG["_DISPLAY_SCALED_H"] = sh
+
+
+def _embed_phys_to_logical_xy(px, py, *, scale_factor=1):
     """
-    EMBEDDED_LIGHTWEIGHT: pygame mouse / event positions are in physical display pixels,
-    while the game camera and blits use CONFIG WIDTH/HEIGHT (logical framebuffer).
-    Map with integer math using stored physical vs logical sizes (not hard-coded 2).
+    물리 화면 좌표 → 논리 렌더 좌표.
+    Android display-fit(레터박스) 또는 UPSCALE 정수배 출력을 역변환한다.
     """
     try:
-        pw = int(CONFIG.get("_PHYSICAL_WIDTH", 0) or 0)
-        ph = int(CONFIG.get("_PHYSICAL_HEIGHT", 0) or 0)
         lw = int(CONFIG.get("WIDTH", 0) or 0)
         lh = int(CONFIG.get("HEIGHT", 0) or 0)
     except Exception:
-        return int(px), int(py)
-    if pw <= 0 or ph <= 0 or lw <= 0 or lh <= 0 or (pw == lw and ph == lh):
         return int(px), int(py)
     try:
         ix = int(px)
         iy = int(py)
     except Exception:
         ix, iy = 0, 0
+    if lw <= 0 or lh <= 0:
+        return ix, iy
+
+    if bool(CONFIG.get("_DISPLAY_FIT_ENABLED", False)):
+        try:
+            ox = int(CONFIG.get("_DISPLAY_OFFSET_X", 0) or 0)
+            oy = int(CONFIG.get("_DISPLAY_OFFSET_Y", 0) or 0)
+            sw = int(CONFIG.get("_DISPLAY_SCALED_W", lw) or lw)
+            sh = int(CONFIG.get("_DISPLAY_SCALED_H", lh) or lh)
+        except Exception:
+            ox, oy, sw, sh = 0, 0, lw, lh
+        sw = max(1, sw)
+        sh = max(1, sh)
+        rx = ix - ox
+        ry = iy - oy
+        rx = max(0, min(sw - 1, rx))
+        ry = max(0, min(sh - 1, ry))
+        lx = rx * lw // sw
+        ly = ry * lh // sh
+        return max(0, min(lw - 1, lx)), max(0, min(lh - 1, ly))
+
+    try:
+        sf = int(scale_factor)
+    except Exception:
+        sf = 1
+    if sf > 1:
+        return max(0, min(lw - 1, ix // sf)), max(0, min(lh - 1, iy // sf))
+
+    try:
+        pw = int(CONFIG.get("_PHYSICAL_WIDTH", 0) or 0)
+        ph = int(CONFIG.get("_PHYSICAL_HEIGHT", 0) or 0)
+    except Exception:
+        pw, ph = 0, 0
+    if pw <= 0 or ph <= 0 or (pw == lw and ph == lh):
+        return ix, iy
     lx = ix * lw // pw
     ly = iy * lh // ph
-    lx = max(0, min(lw - 1, lx))
-    ly = max(0, min(lh - 1, ly))
-    return lx, ly
+    return max(0, min(lw - 1, lx)), max(0, min(lh - 1, ly))
+
+
+def _present_draw_surf_to_screen(screen, draw_surf, *, scale_factor, present_tmp):
+    """논리 프레임(draw_surf)을 물리 screen에 출력."""
+    if bool(CONFIG.get("_DISPLAY_FIT_ENABLED", False)):
+        try:
+            sw = int(CONFIG.get("_DISPLAY_SCALED_W", draw_surf.get_width()))
+            sh = int(CONFIG.get("_DISPLAY_SCALED_H", draw_surf.get_height()))
+            ox = int(CONFIG.get("_DISPLAY_OFFSET_X", 0) or 0)
+            oy = int(CONFIG.get("_DISPLAY_OFFSET_Y", 0) or 0)
+        except Exception:
+            screen.blit(draw_surf, (0, 0))
+            return
+        screen.fill((0, 0, 0))
+        tmp = present_tmp[0]
+        if tmp is None or tmp.get_width() != sw or tmp.get_height() != sh:
+            tmp = pygame.Surface((sw, sh))
+            present_tmp[0] = tmp
+        try:
+            pygame.transform.scale(draw_surf, (sw, sh), tmp)
+        except Exception:
+            tmp = pygame.transform.scale(draw_surf, (sw, sh))
+            present_tmp[0] = tmp
+        screen.blit(tmp, (ox, oy))
+        return
+    if scale_factor != 1:
+        try:
+            pw = int(screen.get_width())
+            ph = int(screen.get_height())
+            pygame.transform.scale(draw_surf, (pw, ph), screen)
+        except Exception:
+            screen.blit(
+                pygame.transform.scale(draw_surf, (screen.get_width(), screen.get_height())),
+                (0, 0),
+            )
+    else:
+        screen.blit(draw_surf, (0, 0))
 
 
 def _blit_bg_view_scaled(dst, bg, cam_origin_x, cam_origin_y, zoom):
@@ -607,8 +713,11 @@ def main():
         upscale_factor = 2
     upscale_factor = max(1, min(6, upscale_factor))
     fullscreen_on = bool(CONFIG.get("FULLSCREEN", False))
+    if _is_android_runtime():
+        fullscreen_on = True
     scale_factor = 1
     last_frame_logical = None  # 해상도 전환 시 1프레임 블랙 방지용
+    present_scale_tmp = [None]  # Android display-fit present 버퍼
 
     # 자동 가변 해상도 전환(옵션): 월드 줌 2x "완료" 시 320x240 업스케일로 전환 + 줌 1x로 리맵
     auto_res_enabled = bool(CONFIG.get("AUTO_OUTPUT_MODE_ENABLED", False))
@@ -650,9 +759,15 @@ def main():
             )
         except Exception:
             pass
-        physical_w, physical_h = int(lw * scale_factor), int(lh * scale_factor)
         flags = pygame.FULLSCREEN if fullscreen_on else 0
-        screen = pygame.display.set_mode((physical_w, physical_h), flags)
+        if _is_android_runtime() and bool(CONFIG.get("ANDROID_DISPLAY_FIT", True)):
+            screen = pygame.display.set_mode((0, 0), flags)
+            physical_w, physical_h = screen.get_size()
+            _sync_display_fit_config(lw, lh, physical_w, physical_h)
+        else:
+            physical_w, physical_h = int(lw * scale_factor), int(lh * scale_factor)
+            screen = pygame.display.set_mode((physical_w, physical_h), flags)
+            _sync_display_fit_config(lw, lh, physical_w, physical_h)
         # 새 줌 시스템: "오버레이 제외 최종 출력물"을 통째로 scale 하므로,
         # 출력 모드와 무관하게 항상 논리 해상도 Surface에 렌더링하고 마지막에만 screen으로 blit한다.
         draw_surf = pygame.Surface((lw, lh))
@@ -666,13 +781,9 @@ def main():
                     pygame.transform.scale(lf, (lw, lh), draw_surf)
                 except Exception:
                     draw_surf.blit(pygame.transform.scale(lf, (lw, lh)), (0, 0))
-                if scale_factor != 1:
-                    try:
-                        pygame.transform.scale(draw_surf, (physical_w, physical_h), screen)
-                    except Exception:
-                        screen.blit(pygame.transform.scale(draw_surf, (physical_w, physical_h)), (0, 0))
-                else:
-                    screen.blit(draw_surf, (0, 0))
+                _present_draw_surf_to_screen(
+                    screen, draw_surf, scale_factor=scale_factor, present_tmp=present_scale_tmp
+                )
                 pygame.display.flip()
         except Exception:
             pass
@@ -694,7 +805,8 @@ def main():
     # - PC에선 커서가 보이는 게 디버그/조작에 유리
     # - rg35xx 같은 마우스 없는 기기(EMBEDDED_LIGHTWEIGHT)는 소프트웨어 커서(ui_cursor) 사용
     try:
-        pygame.mouse.set_visible(bool(not CONFIG.get("EMBEDDED_LIGHTWEIGHT", False)))
+        hide_mouse = bool(CONFIG.get("EMBEDDED_LIGHTWEIGHT", False)) or _is_android_runtime()
+        pygame.mouse.set_visible(not hide_mouse)
     except Exception:
         pass
     clock = pygame.time.Clock()
@@ -2173,14 +2285,7 @@ def main():
                 # 그네 타기 중: approach/mount는 클릭 이동 막기. ride는 점프 드래그를 위해 클릭을 받는다.
                 if swing_ride_mode in ("approach", "mount"):
                     continue
-                mx, my = event.pos
-                # 물리 → 논리 좌표 변환(업스케일 모드일 때만)
-                if scale_factor != 1:
-                    try:
-                        mx = int(mx) // int(scale_factor)
-                        my = int(my) // int(scale_factor)
-                    except Exception:
-                        pass
+                mx, my = _embed_phys_to_logical_xy(event.pos[0], event.pos[1], scale_factor=scale_factor)
 
                 # 렌더 변환 캐시 기반 역변환(틸트+줌+쉬어를 항상 렌더와 동일하게 복원)
                 if render_xform_for_input:
@@ -2288,10 +2393,7 @@ def main():
                     continue
                 
                 # ui_cursor는 "UI 좌표"(논리 px)를 기억한다. (UI는 월드 줌 영향을 받지 않음)
-                try:
-                    ui_cursor[0], ui_cursor[1] = int(event.pos[0]) // int(scale_factor), int(event.pos[1]) // int(scale_factor)
-                except Exception:
-                    ui_cursor[0], ui_cursor[1] = int(mx), int(my)
+                ui_cursor[0], ui_cursor[1] = int(mx), int(my)
                 
                 # 보정된 world_x, world_y를 player에게 전달합니다.
                 # (기본 handle_input 구조에 맞춰 target_pos로 쓰이게 수정)
@@ -4783,13 +4885,9 @@ def main():
         # 최종 프레임: 논리 해상도(draw_surf) → 물리 화면(screen)
         # NATIVE_640(scale_factor==1)에서도 draw_surf는 별도 Surface이므로 반드시 blit해야 한다.
         t_pr0 = _pnow() if perf_enabled else None
-        if scale_factor != 1:
-            try:
-                pygame.transform.scale(draw_surf, (physical_w, physical_h), screen)
-            except Exception:
-                screen.blit(pygame.transform.scale(draw_surf, (physical_w, physical_h)), (0, 0))
-        else:
-            screen.blit(draw_surf, (0, 0))
+        _present_draw_surf_to_screen(
+            screen, draw_surf, scale_factor=scale_factor, present_tmp=present_scale_tmp
+        )
         if perf_enabled and t_pr0 is not None:
             _padd("present", _pnow() - t_pr0)
 
