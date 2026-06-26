@@ -81,6 +81,36 @@
             },
             "map_id": "bg_jjangpu"
         },
+        "ev_jjangpu_fishing": {
+            "title": "호숫가 낚시",
+            "steps": [
+                { "type": "MOVE", "target": "player", "pos": [592, 1012], "dir": "down", "force": true, "wait": true },
+                { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 555.0, "y": 1104.0, "smooth": true, "duration_sec": 0.5 },
+                { "type": "INTERVAL", "val": 1.0 },
+                { "type": "OVERLAY_UI", "action": "show", "content": "button", "text": "낚시 그만두기", "font": "default", "size": 14, "color": "255,255,255", "overlay_id": "fishing_exit", "anchor": "right", "margin_x": 10, "margin_y": 36, "clickable": true, "click_action": "stop_fishing", "persist": true, "hold_forever": true, "mode": "fade", "appear": 0.15, "disappear": 0.2 },
+                { "type": "DEV_CMD", "cmd": "start_fishing", "pond": "jjangpu_water1", "await_tap": true }
+            ],
+            "result": {
+                "mainprogress": ""
+            },
+            "map_id": "bg_jjangpu"
+        },
+        "ev_frog_minigame_trial": {
+            "title": "개구리 씨앗 잡기 (시험)",
+            "steps": [
+                { "type": "SAY", "who": "player", "text": "좌우(←→ 또는 A/D)로 바구니를 움직여 초록 씨앗을 잡아 보자!", "bubble_target": "player" },
+                { "type": "MINIGAME_PLAY", "game": "raindodge", "goal": 5, "time_limit": 45 },
+                { "type": "CONDITION", "condition": "progress_frog_minigame_win == 1" },
+                { "type": "SAY", "who": "player", "text": "해냈다! 요정의 씨앗을 손에 넣었다.", "bubble_target": "player" },
+                { "type": "CONDITION_SKIP" },
+                { "type": "SAY", "who": "player", "text": "아쉽다… 다시 도전해 볼까?", "bubble_target": "player" }
+            ],
+            "result": {
+                "progress_frog_minigame_tried": 1,
+                "mainprogress": ""
+            },
+            "map_id": "bg_jjangpu"
+        },
         "ev_jjangpu_tutorial_010500": {
             "title": "짱짱어린이집 마당",
             "steps": [
@@ -244,12 +274,12 @@
             "priority": 100
         },
         "ev_flower1_1": {
-            "title": "FLOWER1 (들꽃과의 첫 만남)",
+            "title": "FLOWER1 1 (들꽃과의 첫 만남)",
             "steps": [
                 { "type": "SAY", "text": "도와줘.. 꽃을 땅에 심고 물을 주지 않으면.. 죽고 말 거야..", "bubble_target": "flower1_" },
-                { "type": "SAY", "text": "앗 그래그래~ 어디다 심으면 좋을까!!", "bubble_target": "player" },
-                { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 896.0, "y": 2176.0, "smooth": true, "duration_sec": 0.5 },
-                { "type": "PLACE", "target": "here01", "pos": [896, 2208], "dir": "left" },
+                { "type": "SAY", "text": "앗.. 일단 살리고 봐야겠어!! 어디에 심지?", "bubble_target": "player" },
+                { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 664.0, "y": 2168.0, "smooth": true, "duration_sec": 0.5 },
+                { "type": "PLACE", "target": "here01", "pos": [664, 2168], "dir": "left" },
                 { "type": "WAIT", "val": 2.0 },
                 { "type": "CAMERA", "mode": "follow_player", "slot": "default", "smooth": true, "duration_sec": 0.5 },
                 { "type": "CARRY", "action": "pick", "holder": "player", "target": "flower1_", "wait": true }
@@ -273,6 +303,7 @@
                 { "type": "PLACE", "target": "cc1", "pos": [1088, 1890], "dir": "right" },
                 { "type": "WAIT", "val": 0.4 },
                 { "type": "FADEIN", "val": 1.0 },
+                { "type": "EVT_STOP_BEGIN", "action": "break_loop" },
                 { "type": "FOLLOW_START", "follower": "c10", "leader": "player", "dist": 40, "speed": 0.5 },
                 { "type": "FOLLOW_START", "follower": "cc1", "leader": "c10", "dist": 40, "speed": 0.5 },
                 { "type": "WAIT", "val": 1.0 },
@@ -297,14 +328,14 @@
             "priority": 20
         },
         "ev_flower1_2": {
-            "title": "FLOWER1 바닥에 심기",
+            "title": "FLOWER1 2 바닥에 심기",
             "steps": [
                 { "type": "SAY", "text": "여기에 심어야겠어!", "bubble_target": "player" },
                 { "type": "PLACE", "target": "here01", "dir": "left", "action": "remove" },
                 { "type": "WAIT", "val": 1.0 },
-                { "type": "CARRY", "action": "put", "holder": "player", "target": "flower1_", "pos": [896, 2176], "wait": true },
+                { "type": "CARRY", "action": "put", "holder": "player", "target": "flower1_", "pos": [660, 2146], "wait": true },
                 { "type": "PLACE", "target": "flower1_", "dir": "left", "appear": "fade", "action": "remove" },
-                { "type": "PLACE", "target": "flower_fairy1", "pos": [896, 2176], "dir": "left", "appear": "fade" }
+                { "type": "TUNE", "target": "flower_fairy1", "visible": true }
             ],
             "result": {
                 "progress_flower1_1": 1003
@@ -314,13 +345,15 @@
             "priority": 100
         },
         "ev_flower1_3": {
-            "title": "FLOWER1 물 줘서 살리기",
+            "title": "FLOWER1 3 물 줘서 살리기",
             "steps": [
-                { "type": "MOVE", "target": "player", "pos": [880, 2176], "dir": "right" },
+                { "type": "CONDITION", "condition": "progress_wateringcan == 1002" },
+                { "type": "MOVE", "target": "player", "pos": [631, 2138], "dir": "right" },
                 { "type": "MOVE", "target": "player", "dir": "right" },
                 { "type": "CALL_EVENT", "target": "ev_wateringcan_action" },
                 { "type": "WAIT", "val": 1.0 },
-                { "type": "ACTION_ANIM", "target": "flower_fairy1", "anim": "jump", "mode": "hold", "release": "idle", "val": 1.0, "dir": "left" }
+                { "type": "ACTION_ANIM", "target": "flower_fairy1", "anim": "walk", "mode": "hold", "release": "walk", "dir": "left" },
+                { "type": "CONDITION_SKIP" }
             ],
             "result": {
                 "progress_flower1_1": 1004
@@ -378,7 +411,7 @@
                 { "type": "TILT", "on": true, "strength": 0.9778, "duration_sec": 1.5 },
                 { "type": "SHEAR", "on": true, "strength": 1.0, "duration_sec": 1.5 },
                 { "type": "WAIT", "val": 3.0 },
-                { "type": "ANIM_ONCE", "name": "escape01", "pos": [544, -120], "dir": "left", "height": 50.0 },
+                { "type": "ANIM_ONCE", "name": "escape01", "pos": [544, -200], "dir": "left", "height": 0.0 },
                 { "type": "WAIT", "val": 1.0 },
                 { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 752.0, "y": 1920.0, "smooth": true, "duration_sec": 0.5 },
                 { "type": "TILT", "on": true, "strength": 0.5, "duration_sec": 1.0 },
@@ -398,7 +431,7 @@
                 { "type": "SAY", "text": "......", "val": 0.0, "bubble_target": "player" },
                 { "type": "SAY", "text": "엄마.. 가 버렸어..", "val": 0.0, "bubble_target": "player" },
                 { "type": "MOVE", "target": "player", "dir": "right" },
-                { "type": "SAY", "text": "어? 못 보던 풀인데..?", "val": 0.0, "bubble_target": "player" },
+                { "type": "SAY", "text": "어.. 저 빛은 뭐지..", "val": 0.0, "bubble_target": "player" },
                 { "type": "MOVE", "target": "player", "pos": [688, 1984], "dir": "right", "speed": 3.0 },
                 { "type": "TILT", "on": false, "strength": 0.0, "duration_sec": 1.5 },
                 { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.5 }
@@ -411,21 +444,21 @@
             "trigger": "auto",
             "condition": "mainprogress == 010100",
             "priority": 25
-        }
-    },
-    "SYNC": {
-        "sync_flower_restore": {
-            "title": "요정1",
-            "work_map": "bg_jjangpu",
-            "condition": "progress_flower1_1 >= 1004",
-            "priority": 10,
+        },
+        "ev_flower1_4": {
+            "title": "FLOWER1 4 요정 등장",
             "steps": [
-                { "type": "PLACE", "target": "flower_fairy1", "pos": [896, 2176], "dir": "left" }
+                { "type": "CHANGE", "target": "flower_fairy1", "to": "fairy1" }
             ],
             "result": {
-                "mainprogress": ""
-            }
+                "progress_flower1_1": 1005
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "condition": "progress_flower1_1==1004",
+            "priority": 100
         }
     },
+    "SYNC": {},
     "FRAGMENTS": {}
 }

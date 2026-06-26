@@ -1,4 +1,10 @@
-"""NPC 타입 정의(char_defs) + 맵 인스턴스 + interact(bindings) / talk(progress 대사)."""
+"""
+NPC·엔티티 정의(char_defs / object_defs via flow.build_obj_def)와 런타임 행동.
+
+- build_npc_def / attach_npc_from_entry — 타입+맵 인스턴스 병합
+- talk (when/after) · interact bindings — progress 조건 (flow.py 와 공유)
+- spawn_state / progress_apply — apply_map_progress_states (load_map·이벤트 종료 후)
+"""
 from __future__ import annotations
 
 import copy
@@ -35,6 +41,14 @@ def build_npc_def(name: str, world_entry: Optional[dict] = None) -> dict:
         merged["behavior"] = _deep_merge(merged.get("behavior") or {}, entry["behavior"])
     if entry.get("interact"):
         merged["interact"] = _deep_merge(merged.get("interact") or {}, entry["interact"])
+    if base.get("spawn_state") or entry.get("spawn_state"):
+        merged["spawn_state"] = _deep_merge(
+            base.get("spawn_state") or {}, entry.get("spawn_state") or {}
+        )
+    if entry.get("progress_apply"):
+        merged["progress_apply"] = list(entry["progress_apply"])
+    elif base.get("progress_apply"):
+        merged["progress_apply"] = list(base["progress_apply"])
     return merged
 
 
@@ -55,6 +69,7 @@ def attach_npc_from_entry(npc, world_entry: dict):
     entry = world_entry or {}
     npc.instance_id = str(entry.get("instance_id") or f"{name}@{int(npc.pos[0])}_{int(npc.pos[1])}")
     npc.char_def = build_npc_def(name, entry)
+    npc._world_entry = dict(entry)
     from data import CHAR_ASSETS
 
     attach_interact_spec(npc, CHAR_ASSETS.get(name, {}), entry)
@@ -281,6 +296,265 @@ def apply_talk_after(after: Any, flow, npc) -> None:
     flow.save_game(save.get("current_map", ""), save.get("player_pos", [0, 0]))
 
 
+# ---------------------------------------------------------------------------
+# [Progress 상태] spawn_state / progress_apply — char_defs·object_defs·world_data
+#
+# 세이브의 progress_* 를 기준으로 NPC·오브젝트의 보이기/애니/외형을 맞춥니다.
+# talk.lines(when) · interact.bindings(condition) 와 같은 조건식·우선순위 규칙을 재사용합니다.
+#
+# 적용 시점 (호출부):
+#   - flow.load_map 직후
+#   - main: 이벤트 종료 후 ev_mgr._progress_refresh_pending
+#   - flow.try_start_interact_event: binding 인라인(state/after, event_id 없음)
+#
+# JSON 필드:
+#   spawn_state   — 맵 스폰 직후 초기값 (progress_apply 보다 먼저)
+#   progress_apply — [{ "when": "progress_x == 1", "visible": true, ... }] 첫 매칭 규칙
+#   bindings[].state / bindings[].after — 클릭 시 즉시 상태·progress (apply_talk_after 재사용)
+# ---------------------------------------------------------------------------
+
+
+def entity_progress_def(entity) -> dict:
+    """런타임 NPC(char_def) 또는 오브젝트(obj_def) 병합 정의."""
+    cdef = getattr(entity, "char_def", None)
+    if isinstance(cdef, dict):
+        return cdef
+    odef = getattr(entity, "obj_def", None)
+    if isinstance(odef, dict):
+        return odef
+    return {}
+
+
+def pick_progress_rule(rules: list, ctx: dict) -> Optional[dict]:
+    """progress_apply 에서 when/condition 첫 매칭 — pick_talk_line 과 동일 순회."""
+    for row in rules or []:
+        if not isinstance(row, dict):
+            continue
+        cond = row.get("when")
+        if cond is None:
+            cond = row.get("condition")
+        if eval_talk_when(cond, ctx):
+            return row
+    return None
+
+
+def _coerce_visible(val) -> bool:
+    if isinstance(val, str):
+        return val.strip().lower() not in ("0", "false", "f", "no", "n", "off", "")
+    return bool(val)
+
+
+def _entity_set_visible(entity, visible: bool) -> None:
+    if hasattr(entity, "is_visible"):
+        entity.is_visible = bool(visible)
+    elif hasattr(entity, "visible"):
+        entity.visible = bool(visible)
+
+
+def _apply_char_anim(entity, patch: dict) -> None:
+    """ACTION_ANIM hold/once 와 동일 규칙으로 play_anim 호출."""
+    anim = (patch.get("anim") or patch.get("state") or "").strip()
+    if not anim:
+        return
+    pa = getattr(entity, "play_anim", None)
+    if not callable(pa):
+        if hasattr(entity, "state"):
+            entity.state = anim.lower()
+        return
+    mode = str(patch.get("anim_mode") or patch.get("mode") or "hold").strip().lower()
+    release = str(patch.get("anim_release") or patch.get("release") or "idle").strip().lower()
+    if mode == "once":
+        try:
+            dur_s = float(patch.get("anim_duration") or patch.get("duration") or 1.0)
+        except (TypeError, ValueError):
+            dur_s = 1.0
+        duration_ms = int(max(0.05, dur_s) * 1000.0)
+        loop = bool(patch.get("anim_loop", False))
+        pa(anim, duration_ms=duration_ms, loop=loop, release=release)
+    else:
+        pa(anim, duration_ms=0, loop=True, release=release)
+    ua = getattr(entity, "update_anim", None)
+    if callable(ua):
+        ua()
+
+
+def apply_char_type_retarget(entity, new_key: str) -> bool:
+    """CHANGE / change_to 후 char_defs·interact·가시성 동기화."""
+    key = str(new_key or "").strip()
+    if not key or key not in CHAR_ASSETS:
+        return False
+    entry = getattr(entity, "_world_entry", None) or {}
+    was_visible = bool(getattr(entity, "is_visible", True))
+    entity.char_def = build_npc_def(key, entry)
+    attach_interact_spec(entity, CHAR_ASSETS.get(key, {}), entry)
+    if was_visible:
+        entity.is_visible = True
+    reset_entity_motion_on_change(entity)
+    return True
+
+
+def apply_object_type_retarget(entity, new_key: str) -> bool:
+    """CHANGE / change_to 후 object_defs 동기화."""
+    from data import OBJ_ASSETS
+    from flow import build_obj_def
+
+    key = str(new_key or "").strip()
+    if not key or key not in OBJ_ASSETS:
+        return False
+    info = OBJ_ASSETS.get(key, {}) or {}
+    entry = getattr(entity, "_world_entry", None) or {}
+    was_visible = bool(getattr(entity, "is_visible", True))
+    entity.obj_def = build_obj_def(key, entry)
+    attach_interact_spec(entity, info, entry)
+    if was_visible:
+        entity.is_visible = True
+    reset_entity_motion_on_change(entity)
+    return True
+
+
+def reset_entity_motion_on_change(entity) -> None:
+    """change_to / CHANGE 직후 이동 경로·AI·표시 상태를 idle 로 정리."""
+    sm = getattr(entity, "stop_moving", None)
+    if callable(sm):
+        try:
+            sm(preserve_anim_override=True)
+        except TypeError:
+            try:
+                sm()
+            except Exception:
+                pass
+        except Exception:
+            pass
+    else:
+        if hasattr(entity, "path"):
+            entity.path = []
+        if hasattr(entity, "pos") and hasattr(entity, "target"):
+            try:
+                entity.target = list(entity.pos)
+            except Exception:
+                pass
+
+    if hasattr(entity, "event_waypoints"):
+        entity.event_waypoints = None
+
+    if hasattr(entity, "state"):
+        entity.state = "idle"
+
+    if hasattr(entity, "behavior_spec"):
+        ndef = entity_progress_def(entity)
+        spec = dict(ndef.get("behavior") or getattr(entity, "behavior_spec", None) or {})
+        spec["mode"] = "idle"
+        entity.behavior_spec = spec
+
+    if hasattr(entity, "_bh_state"):
+        entity._bh_state = {
+            "patrol_idx": 0,
+            "wait_until_ms": 0,
+            "wander_next_ms": 0,
+            "wander_target": None,
+        }
+
+    frames = getattr(entity, "frames", None)
+    if frames:
+        entity.frame_idx = 0
+        try:
+            entity.image = frames[0]
+        except Exception:
+            pass
+
+
+def apply_state_patch(entity, patch: dict) -> bool:
+    """
+    단일 상태 패치 — TUNE/ACTION_ANIM/CHANGE 스텝과 같은 의미의 필드.
+    visible, spawn, dir, anim, change_to, behavior_mode 지원.
+    반환 True: spawn:false 로 맵 목록에서 제거해야 함.
+    """
+    if not patch or not isinstance(patch, dict):
+        return False
+
+    remove = False
+    if "spawn" in patch and not _coerce_visible(patch.get("spawn")):
+        remove = True
+        setattr(entity, "_progress_spawn_removed", True)
+
+    if "visible" in patch:
+        _entity_set_visible(entity, _coerce_visible(patch.get("visible")))
+
+    change_to = patch.get("change_to") or patch.get("to")
+    if change_to:
+        key = str(change_to).strip()
+        rt_char = getattr(entity, "retarget_char_def", None)
+        rt_obj = getattr(entity, "retarget_object_def", None)
+        changed = False
+        if callable(rt_char) and rt_char(key):
+            changed = True
+        elif callable(rt_obj) and rt_obj(key):
+            changed = True
+
+    d = (patch.get("dir") or patch.get("face") or "").strip().lower()
+    if d in ("left", "l"):
+        entity.direction = "left"
+    elif d in ("right", "r"):
+        entity.direction = "right"
+
+    bm = patch.get("behavior_mode") or patch.get("behavior")
+    if isinstance(bm, str) and bm.strip():
+        spec = getattr(entity, "behavior_spec", None)
+        if isinstance(spec, dict):
+            spec["mode"] = bm.strip().lower()
+        elif hasattr(entity, "behavior_spec"):
+            entity.behavior_spec = {"mode": bm.strip().lower()}
+
+    if patch.get("anim") or patch.get("state"):
+        _apply_char_anim(entity, patch)
+
+    return remove
+
+
+def apply_entity_progress_state(entity, save_data: dict, *, session_vars=None) -> bool:
+    """spawn_state → progress_apply 순 적용. spawn:false 면 True."""
+    ndef = entity_progress_def(entity)
+    ctx = build_eval_ctx(save_data or {}, session_vars)
+
+    spawn = ndef.get("spawn_state")
+    if isinstance(spawn, dict) and spawn:
+        if apply_state_patch(entity, spawn):
+            return True
+
+    rule = pick_progress_rule(ndef.get("progress_apply") or [], ctx)
+    if isinstance(rule, dict):
+        state = rule.get("state")
+        if isinstance(state, dict):
+            if apply_state_patch(entity, state):
+                return True
+        else:
+            row = {k: v for k, v in rule.items() if k not in ("when", "condition", "after")}
+            if apply_state_patch(entity, row):
+                return True
+    return bool(getattr(entity, "_progress_spawn_removed", False))
+
+
+def apply_map_progress_states(objs, npcs, save_data: dict, *, session_vars=None):
+    """맵 전체 NPC·오브젝트 progress 상태 일괄 적용 (load_map·이벤트 종료 후)."""
+    kept_objs = []
+    for o in objs or []:
+        if apply_entity_progress_state(o, save_data, session_vars=session_vars):
+            continue
+        if getattr(o, "_progress_spawn_removed", False):
+            continue
+        kept_objs.append(o)
+
+    kept_npcs = []
+    for n in npcs or []:
+        if apply_entity_progress_state(n, save_data, session_vars=session_vars):
+            continue
+        if getattr(n, "_progress_spawn_removed", False):
+            continue
+        kept_npcs.append(n)
+
+    return kept_objs, kept_npcs
+
+
 def _say_step_from_line(line: dict, npc) -> dict:
     say = dict(line.get("say") or {})
     if not say.get("who"):
@@ -473,4 +747,9 @@ def npc_entry_from_instance(npc) -> dict:
     inst = getattr(npc, "interact_instance", None)
     if isinstance(inst, dict) and inst:
         d["interact"] = inst
+    we = getattr(npc, "_world_entry", None) or {}
+    if isinstance(we.get("spawn_state"), dict) and we["spawn_state"]:
+        d["spawn_state"] = dict(we["spawn_state"])
+    if isinstance(we.get("progress_apply"), list) and we["progress_apply"]:
+        d["progress_apply"] = list(we["progress_apply"])
     return d

@@ -138,5 +138,130 @@ def build_editor_placed_list_rows(objs, npcs, obj_defs=None):
     return rows
 
 
+FLOW_EVENT_LINKED_HEADER = "★ 이벤트 연결"
+
+
+def flow_catalog_has_event_bindings(name, kind, *, char_assets=None, obj_assets=None) -> bool:
+    """bindings 에 event_id 가 하나라도 있으면 True (FLOW 상단 묶음용)."""
+    from flow import _flow_entity_catalog_entry
+
+    ent = _flow_entity_catalog_entry(
+        name, kind, char_assets=char_assets, obj_assets=obj_assets
+    )
+    return bool(ent.get("event_ids"))
+
+
+def _flow_catalog_entity_row(name, kind, char_defs, obj_defs):
+    if kind == "npc":
+        info = char_defs.get(name) or {}
+        dn = str(info.get("display_name") or "").strip()
+        label = f"{dn} ({name})" if dn and dn != name else name
+        return {
+            "kind": "npc",
+            "name": name,
+            "node": None,
+            "label": label,
+        }
+    cat = get_object_category(name, obj_defs)
+    return {
+        "kind": "obj",
+        "name": name,
+        "node": None,
+        "label": name,
+        "category": cat,
+    }
+
+
+def _flow_catalog_linked_rows(char_defs, obj_defs, *, map_id=None, event_zones=None):
+    """이벤트(bindings·event_id)가 연결된 NPC·오브젝트·이벤트박스 — FLOW 최상단."""
+    rows = []
+    for name in sorted(char_defs.keys(), key=str.lower):
+        if flow_catalog_has_event_bindings(name, "npc", char_assets=char_defs, obj_assets=obj_defs):
+            rows.append(_flow_catalog_entity_row(name, "npc", char_defs, obj_defs))
+    for name in sorted(obj_defs.keys(), key=str.lower):
+        if flow_catalog_has_event_bindings(name, "obj", char_assets=char_defs, obj_assets=obj_defs):
+            rows.append(_flow_catalog_entity_row(name, "obj", char_defs, obj_defs))
+    zones = [z for z in (event_zones or []) if isinstance(z, dict)]
+    for zi, z in enumerate(zones):
+        eid = str(z.get("event_id") or "").strip()
+        if not eid:
+            continue
+        zname = str(z.get("name") or f"zone_{zi + 1}").strip()
+        rows.append({
+            "kind": "zone",
+            "name": zname,
+            "zone_index": zi,
+            "zone_data": z,
+            "label": f"{zname} → {eid}",
+        })
+    return rows
+
+
+def build_editor_flow_catalog_rows(
+    char_defs=None,
+    obj_defs=None,
+    *,
+    map_id=None,
+    event_zones=None,
+):
+    """FLOW 좌측 — char_defs·object_defs 전체 + (선택) 현재 맵 event_zones."""
+    if char_defs is None:
+        from data import CHAR_ASSETS
+        char_defs = CHAR_ASSETS
+    if obj_defs is None:
+        from data import OBJ_ASSETS
+        obj_defs = OBJ_ASSETS
+
+    rows = []
+    linked = _flow_catalog_linked_rows(
+        char_defs, obj_defs, map_id=map_id, event_zones=event_zones
+    )
+    if linked:
+        rows.append({"kind": "header", "label": FLOW_EVENT_LINKED_HEADER})
+        rows.extend(linked)
+
+    char_names = sorted(char_defs.keys(), key=str.lower)
+    if char_names:
+        rows.append({"kind": "header", "label": "캐릭터 (NPC)"})
+        for name in char_names:
+            rows.append(_flow_catalog_entity_row(name, "npc", char_defs, obj_defs))
+
+    by_cat = {}
+    for name in obj_defs:
+        cat = get_object_category(name, obj_defs)
+        by_cat.setdefault(cat, []).append(name)
+
+    for cat in placed_list_category_order(by_cat.keys()):
+        names = sorted(by_cat[cat], key=str.lower)
+        if not names:
+            continue
+        rows.append({"kind": "header", "label": cat})
+        for name in names:
+            rows.append(_flow_catalog_entity_row(name, "obj", char_defs, obj_defs))
+
+    zones = [z for z in (event_zones or []) if isinstance(z, dict)]
+    if zones:
+        hdr = f"이벤트 박스 ({map_id})" if map_id else "이벤트 박스"
+        rows.append({"kind": "header", "label": hdr})
+        for zi, z in enumerate(zones):
+            zname = str(z.get("name") or f"zone_{zi + 1}").strip()
+            eid = str(z.get("event_id") or "").strip()
+            trig = str(z.get("trigger") or "contact_player")
+            label = zname
+            if eid:
+                label = f"{zname} → {eid}"
+            elif trig:
+                label = f"{zname} ({trig})"
+            rows.append({
+                "kind": "zone",
+                "name": zname,
+                "zone_index": zi,
+                "zone_data": z,
+                "label": label,
+            })
+
+    return rows
+
+
 def editor_placed_list_row_count(rows):
     return len(rows)

@@ -135,8 +135,16 @@
     "layer": 0,
     "category": "건축물류"
   },
-  "jjangpu2_stair": {
-    "path": "images/object/jjangpu/jjangpu2_stair.png",
+  "jjangpu2_stair1": {
+    "path": "images/object/jjangpu/jjangpu2_stair1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu2_stair2": {
+    "path": "images/object/jjangpu/jjangpu2_stair2.png",
     "is_holdable": false,
     "collision": false,
     "can_hide_player": false,

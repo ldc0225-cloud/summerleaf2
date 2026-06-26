@@ -5,7 +5,11 @@ os.environ.setdefault("SDL_IME_SHOW_UI", "1")
 
 import pygame, math, json
 from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES
-from entity_defs import build_editor_placed_list_rows
+from entity_defs import (
+    FLOW_EVENT_LINKED_HEADER,
+    build_editor_flow_catalog_rows,
+    build_editor_placed_list_rows,
+)
 from char_editor_ui import (
     any_char_modal_open,
     char_def_modal,
@@ -16,8 +20,10 @@ from char_editor_ui import (
 )
 from flow import (
     GameFlow,
-    build_var_flow_diagram,
-    collect_progress_variables,
+    _flow_entity_catalog_entry,
+    _flow_zone_entry,
+    build_entity_flow_diagram,
+    build_zone_flow_diagram,
     merge_event_catalog,
     progress_value_key,
 )
@@ -59,7 +65,7 @@ def _editor_left_list_tops(top_bar_h):
     """좌측 리스트 시작 Y — metrics / 그리기 / 클릭 공통."""
     tb = int(top_bar_h)
     return {
-        "flow": tb + 58,
+        "flow": tb + 40,
         "map_tools": tb + 38,
         "map_zone_btn": tb + 74,
         "map_bgzone_btn": tb + 108,
@@ -77,6 +83,101 @@ def _editor_entity_world_rect(o):
     left = float(left_edge_bottom_center_x(frx, iw))
     top = float(fry) - float(ih)
     return pygame.Rect(int(left), int(top), iw, ih)
+
+
+def _editor_pick_alpha_min():
+    try:
+        return max(1, min(255, int(CONFIG.get("EDITOR_PICK_ALPHA_MIN", 16) or 16)))
+    except Exception:
+        return 16
+
+
+def _editor_surface_pick_mask(surf, *, alpha_min=None):
+    """스프라이트 투명 영역 제외 픽용 bitmask (surf id 기준 캐시)."""
+    if surf is None:
+        return None
+    if alpha_min is None:
+        alpha_min = _editor_pick_alpha_min()
+    cache = getattr(surf, "_editor_pick_mask_cache", None)
+    if isinstance(cache, dict) and cache.get("alpha_min") == alpha_min and cache.get("surf_id") == id(surf):
+        return cache.get("mask")
+    try:
+        mask = pygame.mask.from_surface(surf, alpha_min)
+    except Exception:
+        mask = None
+    try:
+        surf._editor_pick_mask_cache = {"surf_id": id(surf), "alpha_min": alpha_min, "mask": mask}
+    except Exception:
+        pass
+    return mask
+
+
+def _editor_surface_alpha_hit(surf, rect, px, py, *, alpha_min=None):
+    """rect(스프라이트 배치) 안 (px,py)가 불투명 픽셀인지."""
+    if surf is None or rect is None:
+        return False
+    try:
+        if not rect.collidepoint(float(px), float(py)):
+            return False
+    except Exception:
+        return False
+    lx = int(px) - int(rect.x)
+    ly = int(py) - int(rect.y)
+    try:
+        iw, ih = surf.get_size()
+    except Exception:
+        return False
+    if lx < 0 or ly < 0 or lx >= iw or ly >= ih:
+        return False
+    if alpha_min is None:
+        alpha_min = _editor_pick_alpha_min()
+    mask = _editor_surface_pick_mask(surf, alpha_min=alpha_min)
+    if mask is not None:
+        try:
+            return bool(mask.get_at((lx, ly)))
+        except Exception:
+            pass
+    try:
+        c = surf.get_at((lx, ly))
+        if len(c) >= 4:
+            return int(c[3]) >= int(alpha_min)
+        return True
+    except Exception:
+        return False
+
+
+def _editor_entity_alpha_hit(o, wx, wy, *, alpha_min=None):
+    """월드 좌표가 스프라이트의 보이는(불투명) 픽셀 위인지."""
+    img = getattr(o, "image", None)
+    if img is None:
+        return False
+    return _editor_surface_alpha_hit(img, _editor_entity_world_rect(o), wx, wy, alpha_min=alpha_min)
+
+
+def _editor_entity_alpha_hit_rect(o, sel_rect, *, alpha_min=None):
+    """선택 사각형과 스프라이트 불투명 영역이 겹치는지."""
+    img = getattr(o, "image", None)
+    if img is None:
+        return False
+    r = _editor_entity_world_rect(o)
+    try:
+        inter = r.clip(sel_rect)
+    except Exception:
+        return False
+    if inter.width <= 0 or inter.height <= 0:
+        return False
+    if alpha_min is None:
+        alpha_min = _editor_pick_alpha_min()
+    mask = _editor_surface_pick_mask(img, alpha_min=alpha_min)
+    if mask is None:
+        return True
+    try:
+        chunk = pygame.mask.Mask((int(inter.width), int(inter.height)), fill=True)
+        if mask.overlap(chunk, (int(inter.x - r.x), int(inter.y - r.y))) is not None:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _editor_pick_top_node(objs, npcs, wx, wy):
@@ -97,7 +198,7 @@ def _editor_pick_top_node(objs, npcs, wx, wy):
 
     objs_to_check = sorted(objs + npcs, key=lambda x: (getattr(x, "layer", 0), _ysort_y(x)), reverse=True)
     for o in objs_to_check:
-        if _editor_entity_world_rect(o).collidepoint(wx, wy):
+        if _editor_entity_alpha_hit(o, wx, wy):
             return o
     return None
 
@@ -159,6 +260,41 @@ def _editor_draw_height_span_on_map(
     pygame.draw.circle(surf, fc, (x, int(feet_y_scr)), r, 1)
 
 
+def _editor_entity_play_hidden(ent) -> bool:
+    """플레이 중 숨김(is_visible=false) — 에디터에서는 윤곽 고스트로 표시."""
+    return not bool(getattr(ent, "is_visible", True))
+
+
+def _editor_draw_hidden_entity_ghost(surf, s_img, x, y, *, selected=False):
+    """
+    is_visible=false 엔티티: 반투명 실루엣 + 윤곽선 (맵 편집·배치용).
+    플레이어 화면과 달리 에디터에서는 위치 확인·선택이 가능해야 함.
+    """
+    try:
+        w, h = s_img.get_width(), s_img.get_height()
+    except Exception:
+        return
+    if w < 1 or h < 1:
+        return
+    ghost = s_img.copy()
+    ghost.set_alpha(72 if selected else 48)
+    surf.blit(ghost, (int(x), int(y)))
+    outline = (255, 210, 90) if selected else (110, 210, 255)
+    pygame.draw.rect(surf, outline, (int(x), int(y), w, h), 3 if selected else 2)
+    # 모서리 꺾쇠 — 숨김 상태임을 한눈에 구분
+    corner = max(4, min(14, w // 5, h // 5))
+    cx, cy = int(x), int(y)
+    for ox, oy, dx, dy in (
+        (0, 0, 1, 1),
+        (w, 0, -1, 1),
+        (0, h, 1, -1),
+        (w, h, -1, -1),
+    ):
+        px, py = cx + ox, cy + oy
+        pygame.draw.line(surf, outline, (px, py), (px + dx * corner, py), 2)
+        pygame.draw.line(surf, outline, (px, py), (px, py + dy * corner), 2)
+
+
 def _editor_nodes_in_world_rect(objs, npcs, x1, y1, x2, y2):
     """월드 좌표 사각형과 스프라이트 AABB가 겹치는 오브젝트·NPC 전부."""
     ax, bx = min(float(x1), float(x2)), max(float(x1), float(x2))
@@ -167,7 +303,7 @@ def _editor_nodes_in_world_rect(objs, npcs, x1, y1, x2, y2):
     r = pygame.Rect(int(ax), int(ay), rw, rh)
     out = []
     for o in sorted(objs + npcs, key=lambda x: (getattr(x, "layer", 0), x.pos[1])):
-        if r.colliderect(_editor_entity_world_rect(o)):
+        if _editor_entity_alpha_hit_rect(o, r):
             out.append(o)
     return out
 
@@ -255,11 +391,22 @@ def _editor_fill_event_settings_from_edata(cat, eid, edata):
     }
 
 
-# FLOW 네트워크 다이어그램 — 변수 / 상태 / 오브젝트·NPC / 이벤트 를 한 화면에 배치
-_FLOW_ROW_Y = {"var": 44, "state": 128, "entity": 268, "zone": 268, "event": 408}
+# FLOW 네트워크 다이어그램 — 엔티티 → binding → 이벤트 → progress
+_FLOW_ROW_Y_VAR = {"var": 44, "state": 128, "entity": 268, "zone": 268, "event": 408}
+_FLOW_ROW_Y_ENTITY = {"entity": 56, "bind": 168, "event": 308, "state": 448}
+_FLOW_ROW_Y_ZONE = {"zone": 56, "bind": 168, "event": 308, "state": 448}
 _FLOW_NODE_W = 152
 _FLOW_NODE_H = 52
 _FLOW_NODE_GAP = 18
+
+
+def _editor_flow_diagram_layout(diagram):
+    mode = (diagram or {}).get("mode")
+    if mode == "entity":
+        return ("entity", "bind", "event", "state"), dict(_FLOW_ROW_Y_ENTITY)
+    if mode == "zone":
+        return ("zone", "bind", "event", "state"), dict(_FLOW_ROW_Y_ZONE)
+    return ("var", "state", "entity", "zone", "event"), dict(_FLOW_ROW_Y_VAR)
 
 
 def _editor_flow_node_sort_key(node):
@@ -289,14 +436,34 @@ def _editor_flow_draw_arrow(surface, color, p0, p1, width=2, head=8):
     pygame.draw.polygon(surface, color, [tip, p2, p3])
 
 
+def _editor_flow_open_entity_modal(name, entity_kind, *, on_map=False, objs=None, npcs=None):
+    """FLOW 차트·사이드바 — 타입/맵 인스턴스 상호작용 모달."""
+    nm = str(name or "").strip()
+    if not nm:
+        return
+    ek = str(entity_kind or "").lower()
+    if on_map:
+        if ek in ("char", "npc"):
+            for n in npcs or []:
+                if getattr(n, "name", None) == nm:
+                    char_inst_modal.open(n)
+                    return
+        else:
+            for o in objs or []:
+                if getattr(o, "name", None) == nm:
+                    obj_inst_modal.open(o)
+                    return
+    _editor_open_interact_type_modal(nm)
+
+
 def _editor_flow_paint_diagram(surface, area, diagram, scroll_x, scroll_y, font, title_font):
     """
-    FLOW 작업화면 — 변수·상태·오브젝트/NPC·이벤트 상자를 가로로 펼치고 화살표로 연결.
+    FLOW 작업화면 — 캐릭터/오브젝트·binding·이벤트·progress 상자와 화살표.
     """
     hits = []
     surface.fill((22, 24, 30))
-    if not diagram or not diagram.get("var"):
-        surface.blit(font.render("왼쪽에서 progress 변수 선택", True, (160, 170, 190)), (24, 40))
+    if not diagram or (not diagram.get("var") and not diagram.get("entity_name")):
+        surface.blit(font.render("왼쪽에서 항목 선택", True, (160, 170, 190)), (24, 40))
         return hits
 
     nodes = diagram.get("nodes") or []
@@ -307,22 +474,30 @@ def _editor_flow_paint_diagram(surface, area, diagram, scroll_x, scroll_y, font,
     oy = int(area.y) - scroll
     aw = max(320, int(area.width))
 
-    surface.blit(
-        title_font.render(f"FLOW · {diagram.get('var')}", True, (255, 230, 160)),
-        (ox + 12, oy + 8),
-    )
+    is_entity = diagram.get("mode") == "entity"
+    is_zone = diagram.get("mode") == "zone"
+    if is_zone:
+        title = f"FLOW · BOX {diagram.get('zone_name', '')}"
+        legend = "이벤트 박스 → 트리거/조건 → 이벤트 → progress"
+    elif is_entity:
+        ek = diagram.get("entity_kind", "obj")
+        tag = "NPC" if ek == "npc" else "OBJ"
+        title = f"FLOW · {tag} {diagram.get('entity_name', '')}"
+        legend = "캐릭터/오브젝트 → 조건(binding) → 이벤트 → progress"
+    else:
+        title = f"FLOW · {diagram.get('var')}"
+        legend = "변수 → 상태 → 오브젝트/NPC → 이벤트 → result(상태)"
+
+    surface.blit(title_font.render(title, True, (255, 230, 160)), (ox + 12, oy + 8))
     leg_y = oy + 28
-    surface.blit(
-        font.render("변수 → 상태 → 오브젝트/NPC → 이벤트 → result(상태)", True, (130, 145, 165)),
-        (ox + 12, leg_y),
-    )
+    surface.blit(font.render(legend, True, (130, 145, 165)), (ox + 12, leg_y))
     note = str(diagram.get("note") or "")
     if note:
         surface.blit(font.render(note, True, (200, 140, 140)), (ox + 12, leg_y + 18))
 
     if not nodes:
         surface.blit(
-            font.render("이 변수를 쓰는 오브젝트/이벤트가 없습니다.", True, (200, 160, 160)),
+            font.render("연결된 binding·이벤트가 없습니다.", True, (200, 160, 160)),
             (ox + 24, oy + 100),
         )
         return hits
@@ -331,10 +506,11 @@ def _editor_flow_paint_diagram(surface, area, diagram, scroll_x, scroll_y, font,
         "var": ((42, 38, 62), (180, 160, 255)),
         "state": ((55, 48, 28), (220, 190, 90)),
         "entity": ((48, 42, 30), (180, 150, 90)),
+        "bind": ((38, 48, 58), (100, 180, 220)),
         "zone": ((40, 52, 40), (130, 200, 130)),
         "event": ((32, 42, 58), (120, 160, 220)),
     }
-    row_kinds = ("var", "state", "entity", "zone", "event")
+    row_kinds, row_y_map = _editor_flow_diagram_layout(diagram)
     by_kind = {k: [] for k in row_kinds}
     for n in nodes:
         k = n.get("kind") or "event"
@@ -349,7 +525,7 @@ def _editor_flow_paint_diagram(surface, area, diagram, scroll_x, scroll_y, font,
         ncol = len(row)
         span = ncol * (_FLOW_NODE_W + _FLOW_NODE_GAP) - _FLOW_NODE_GAP
         x0 = ox + max(20, (aw - span) // 2)
-        ry = oy + _FLOW_ROW_Y.get(kind, 200)
+        ry = oy + row_y_map.get(kind, 200)
         for i, n in enumerate(row):
             r = pygame.Rect(
                 x0 + i * (_FLOW_NODE_W + _FLOW_NODE_GAP),
@@ -429,10 +605,11 @@ def _editor_flow_diagram_content_size(diagram, view_w):
     if not diagram:
         return 800, 480
     nodes = diagram.get("nodes") or []
+    _, row_y_map = _editor_flow_diagram_layout(diagram)
     kinds = {n.get("kind") for n in nodes}
     max_y = 0
     for k in kinds:
-        max_y = max(max_y, _FLOW_ROW_Y.get(k, 0))
+        max_y = max(max_y, row_y_map.get(k, 0))
     content_h = max(520, max_y + _FLOW_NODE_H + 100)
     by_kind = {}
     for n in nodes:
@@ -625,6 +802,7 @@ EDITOR_MODAL_ROW_H = 50
 EDITOR_MODAL_SB_W = 12
 EDITOR_MODAL_PAD_X = 12
 EDITOR_MODAL_HEADER_H = 48
+EDITOR_MODAL_SECTION_BAR_H = 38
 EDITOR_MODAL_FOOTER_H = 54
 EDITOR_MODAL_LABEL_W = 148
 EDITOR_MODAL_LABEL_LINES = 2
@@ -654,11 +832,12 @@ def _editor_std_modal_rect(sw, sh, n_rows, row_h=EDITOR_MODAL_ROW_H):
     return pygame.Rect(sw // 2 - 280, y0, 560, ph), content_h, body_vp
 
 
-def _editor_modal_body_scroll_layout(panel_rect, scroll_px, content_h):
+def _editor_modal_body_scroll_layout(panel_rect, scroll_px, content_h, section_bar_h=0):
     pad = EDITOR_MODAL_PAD_X
     sb_w = EDITOR_MODAL_SB_W
     gap = 4
-    body_top = panel_rect.y + EDITOR_MODAL_HEADER_H
+    sbh = int(section_bar_h or 0)
+    body_top = panel_rect.y + EDITOR_MODAL_HEADER_H + sbh
     body_bottom = panel_rect.bottom - EDITOR_MODAL_FOOTER_H
     body_h = max(1, int(body_bottom - body_top))
     inner_w = panel_rect.width - 2 * pad
@@ -738,17 +917,22 @@ def _editor_collect_entity_name_options(objs, npcs):
 def _event_modal_rows(cat):
     cu = str(cat).upper()
     rows = [
+        (
+            "※ 이벤트 = 연출 스텝 묶음. 저장 시 events.json 에 기록됩니다.",
+            "_hint_evt_intro",
+            "hint",
+        ),
         ("Category", "cat", "dropdown", list(EDITOR_EVENT_SECTIONS)),
         ("Event ID", "eid", "text"),
         ("Title", "title", "text"),
         ("Result Prog (mainprogress)", "res_prog", "text"),
         (
-            'Result Opt  예: "progress_x": 1001  (중괄호 없이 OK)',
+            'Result Opt — 추가 progress 예: "progress_flower1_1": 1003  (따옴표만, 중괄호 없이)',
             "res_opt",
             "text",
         ),
         (
-            "※ Condition 은 식: progress_x == 1001 (JSON 아님)",
+            "※ Condition = 조건식 문자열. 예: progress_flower1_1 == 1003  (JSON 아님)",
             "_hint_evt_cond",
             "hint",
         ),
@@ -771,21 +955,76 @@ def _event_modal_rows(cat):
     return rows
 
 
+def _editor_zone_fields_from_zone_dict(z):
+    """event_zones 항목 → 이벤트 박스 모달 필드."""
+    z = z if isinstance(z, dict) else {}
+    fields = {
+        "name": str(z.get("name", "") or ""),
+        "event_id": str(z.get("event_id", "") or ""),
+        "target": str(z.get("target", "") or ""),
+        "trigger": str(z.get("trigger", "contact_player") or "contact_player"),
+        "cond_mainprogress": str((z.get("conditions", {}) or {}).get("mainprogress", "") or ""),
+        "cond_min_laugh_point": str((z.get("conditions", {}) or {}).get("min_laugh_point", "") or ""),
+        "cond_opt": "",
+        "rect": list(z.get("rect")) if isinstance(z.get("rect"), (list, tuple)) else None,
+    }
+    try:
+        cond = dict(z.get("conditions", {}) or {})
+        cond.pop("mainprogress", None)
+        cond.pop("min_laugh_point", None)
+        if cond:
+            fields["cond_opt"] = ", ".join(
+                [
+                    json.dumps(k, ensure_ascii=False) + ": " + json.dumps(v, ensure_ascii=False)
+                    for k, v in cond.items()
+                ]
+            )
+    except Exception:
+        pass
+    return fields
+
+
+def _editor_flow_catalog_rows(world_data, map_id):
+    zones = (world_data or {}).get(map_id, {}).get("event_zones", [])
+    return build_editor_flow_catalog_rows(
+        CHAR_ASSETS, OBJ_ASSETS, map_id=map_id, event_zones=zones
+    )
+
+
+def _editor_flow_row_matches_entry(row, ent):
+    if not row or not ent:
+        return False
+    rk = row.get("kind")
+    if rk == "zone":
+        return ent.get("kind") == "zone" and ent.get("zone_index") == row.get("zone_index")
+    return ent.get("name") == row.get("name") and ent.get("kind") == rk
+
+
 def _zone_modal_rows():
     return [
+        (
+            "※ 이벤트 박스 = 플레이어가 영역에 들어오거나 Z키를 누르면 이벤트가 시작됩니다.",
+            "_hint_zone_intro",
+            "hint",
+        ),
         ("Box Name", "name", "text"),
         ("Event ID", "event_id", "events"),
         ("Target (contact_object)", "target", "text_pick"),
         ("Trigger", "trigger", "dropdown", ZONE_TRIGGER_OPTS),
         ("Cond mainprogress", "cond_mainprogress", "text"),
         ("Cond min_laugh_point", "cond_min_laugh_point", "text"),
-        ('Cond opt(JSON)  ex) "k": 1', "cond_opt", "text"),
-        ("Area", "_area", "area"),
+        ('Cond opt — 추가 조건 JSON 예: "progress_x": 1001', "cond_opt", "text"),
+        ("Area — Set Area 버튼으로 맵에 사각형 지정", "_area", "area"),
     ]
 
 
 def _bgzone_modal_rows():
     return [
+        (
+            "※ 원경(배경) 묶음 — 카메라 틸트 시에만 그릴지, 레이어·정렬 방식 지정",
+            "_hint_bgzone_intro",
+            "hint",
+        ),
         ("Box Name", "name", "text"),
         ("Layer", "layer", "text"),
         ("Draw only when tilt", "draw_only_when_tilt", "dropdown", BGZONE_BOOL_OPTS),
@@ -807,6 +1046,72 @@ def _editor_draw_modal_scrollbar(screen, sb_ui):
 
 
 SIDEBAR_SB_W = 10
+EDITOR_SCROLL_WHEEL_STEP = 28
+EDITOR_SIDEBAR_WHEEL_STEP = 30
+
+
+def _editor_wheel_delta(event, *, step=None):
+    """마우스 휠 한 칸 → 스크롤 픽셀 (모든 모달·사이드바 공통)."""
+    st = EDITOR_SCROLL_WHEEL_STEP if step is None else int(step)
+    dy = getattr(event, "precise_y", None)
+    if dy is not None:
+        delta = int(round(-float(dy) * st))
+    else:
+        delta = -int(getattr(event, "y", 0) or 0) * st
+    if delta == 0 and getattr(event, "y", 0):
+        delta = -int(event.y) * st
+    return delta
+
+
+def _editor_pointer_xy(event, mx, my):
+    pos = getattr(event, "pos", None)
+    if pos is not None:
+        return int(pos[0]), int(pos[1])
+    return int(mx), int(my)
+
+
+def _editor_rects_contain_point(px, py, *rects):
+    for r in rects:
+        if r is not None and r.collidepoint(px, py):
+            return True
+    return False
+
+
+def _editor_scroll_px_from_sb_my(my, sb_ui):
+    """스크롤바 트랙/썸 — 마우스 Y를 scroll 픽셀(0..max)로 변환."""
+    tr = sb_ui.get("track")
+    th = int(sb_ui.get("thumb_h") or 18)
+    max_sc = int(sb_ui.get("max_scroll") or 0)
+    if tr is None or max_sc <= 0:
+        return None
+    y = int(my) - (th // 2)
+    y = max(tr.y, min(tr.bottom - th, y))
+    span = max(0, tr.height - th)
+    p = 0.0 if span <= 0 else (y - tr.y) / float(span)
+    return int(round(p * max_sc))
+
+
+def _editor_modal_sb_hit(pos, sb_ui):
+    """스크롤바 클릭 위치 — 'thumb' | 'track' | None."""
+    max_sc = int(sb_ui.get("max_scroll") or 0)
+    if max_sc <= 0:
+        return None
+    th = sb_ui.get("thumb")
+    tr = sb_ui.get("track")
+    if th is not None and th.collidepoint(pos):
+        return "thumb"
+    if tr is not None and tr.collidepoint(pos):
+        return "track"
+    return None
+
+
+def _editor_paint_modal_scroll_hint(screen, font, panel_rect):
+    """모달 하단 — 스크롤 조작 안내 (모든 설정 창 공통)."""
+    hint = "마우스 휠=위아래 스크롤 · 오른쪽 막대=클릭(이동) 또는 드래그"
+    screen.blit(
+        font.render(hint, True, (110, 125, 145)),
+        (panel_rect.x + 14, panel_rect.bottom - 72),
+    )
 
 
 def _sidebar_scroll_clamp(scroll_y, content_h, view_top, view_bottom):
@@ -855,6 +1160,48 @@ def _editor_filter_collapsed_rows(rows, collapsed_keys):
 
 def _editor_collapse_mark(collapsed_keys, key):
     return "▶" if key in collapsed_keys else "▼"
+
+
+EDITOR_UI_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "editor_ui_state.json")
+EDITOR_UI_COLLAPSE_MAP_LEFT = "map_left_collapsed"
+EDITOR_UI_COLLAPSE_FLOW_LEFT = "flow_left_collapsed"
+EDITOR_UI_COLLAPSE_MAP_RIGHT = "map_right_collapsed"
+
+
+def _load_editor_ui_state() -> dict:
+    try:
+        with open(EDITOR_UI_STATE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _save_editor_ui_state(data: dict) -> None:
+    try:
+        with open(EDITOR_UI_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def _editor_collapsed_set_from_state(data: dict, storage_key: str) -> set:
+    raw = (data or {}).get(storage_key)
+    if isinstance(raw, list):
+        return {str(x) for x in raw if str(x).strip()}
+    return set()
+
+
+def _editor_toggle_collapsed(ui_state: dict, storage_key: str, collapsed_set: set, section_key: str) -> None:
+    key = str(section_key or "")
+    if not key:
+        return
+    if key in collapsed_set:
+        collapsed_set.discard(key)
+    else:
+        collapsed_set.add(key)
+    ui_state[storage_key] = sorted(collapsed_set)
+    _save_editor_ui_state(ui_state)
 
 
 def _editor_right_map_lines(categories, collapsed_keys):
@@ -921,12 +1268,17 @@ def _editor_left_list_metrics(
     top_bar_h,
     event_list_start_y,
     placed_collapsed=None,
-    flow_var_names=None,
+    flow_entity_entries=None,
+    flow_placed_collapsed=None,
 ):
     tops = _editor_left_list_tops(top_bar_h)
     if edit_mode == "FLOW":
         list_top = tops["flow"]
-        content_h = len(flow_var_names or []) * line_h
+        rows = _editor_filter_collapsed_rows(
+            _editor_flow_catalog_rows(flow.world_data, map_id),
+            flow_placed_collapsed or set(),
+        )
+        content_h = len(rows) * line_h
     elif edit_mode == "MAP":
         if map_tool == "OBJECTS":
             list_top = tops["map_objects"]
@@ -978,7 +1330,7 @@ def _editor_paint_sidebar_scrollbar(screen, panel_x, panel_w, view_top, view_bot
 
 
 def _editor_paint_modal_overlay(
-    screen, title_font, font, title, panel_rect, rows, scroll_px, store, active_key, *, area_theme="zone"
+    screen, title_font, font, title, panel_rect, rows, scroll_px, store, active_key, *, area_theme="zone", section_bar_h=0
 ):
     """통합 설정 모달 본문 + 우측 스크롤바. 드롭다운은 호출측에서 별도로 그림."""
     pygame.draw.rect(screen, (40, 40, 40), panel_rect)
@@ -986,7 +1338,9 @@ def _editor_paint_modal_overlay(
     screen.blit(title_font.render(title, True, (255, 255, 255)), (panel_rect.x + 16, panel_rect.y + 12))
 
     content_h = len(rows) * EDITOR_MODAL_ROW_H
-    body_rect, sb_rect, _ms, sp = _editor_modal_body_scroll_layout(panel_rect, scroll_px, content_h)
+    body_rect, sb_rect, _ms, sp = _editor_modal_body_scroll_layout(
+        panel_rect, scroll_px, content_h, section_bar_h
+    )
     prev = screen.get_clip()
     screen.set_clip(body_rect)
 
@@ -1014,6 +1368,14 @@ def _editor_paint_modal_overlay(
                 (120, 160, 130),
                 max_lines=3,
             )
+            continue
+        if kind == "add_btn":
+            btn_w = min(200, body_rect.width - 24)
+            btn_rect = pygame.Rect(body_rect.centerx - btn_w // 2, ry + 4, btn_w, row_h - 8)
+            pygame.draw.rect(screen, (35, 85, 45), btn_rect)
+            pygame.draw.rect(screen, (100, 200, 120), btn_rect, 1)
+            ts = font.render(lab, True, (230, 255, 235))
+            screen.blit(ts, (btn_rect.centerx - ts.get_width() // 2, btn_rect.centery - ts.get_height() // 2))
             continue
         _editor_paint_wrapped_label(
             screen,
@@ -1105,6 +1467,7 @@ def _editor_paint_modal_overlay(
     screen.set_clip(prev)
     sb_ui = _step_overlay_scrollbar_layout(sb_rect, body_rect.height, content_h, sp)
     _editor_draw_modal_scrollbar(screen, sb_ui)
+    _editor_paint_modal_scroll_hint(screen, font, panel_rect)
     return sb_ui
 
 
@@ -1304,9 +1667,9 @@ def _step_field_rows(step_type):
         ]
     if t == "CHANGE":
         return [
-            ("CHANGE: FieldItem 외형 교체 (들고 있는 중 OK)", "_hint_change"),
-            ("Target (held=손, 또는 맵 오브젝트 이름)", "target"),
-            ("To (새 object_defs 키)", "to"),
+            ("CHANGE: FieldItem/캐릭터 외형 교체 (들고 있는 중 OK)", "_hint_change"),
+            ("Target (held=손, 맵 오브젝트/캐릭터 이름)", "target"),
+            ("To (FieldItem=object_defs / 캐릭터=char_defs 키)", "to"),
         ]
     if t == "SCREEN":
         return [
@@ -1485,6 +1848,9 @@ def _dev_cmd_dropdown_options():
         "toggle_fullscreen",
         "camera_follow_player",
         "start_swing_ride",
+        "stop_fishing",
+        "start_fishing",
+        "start_activity_fishing",
         "restart_delete_save",
     ]
 
@@ -1535,7 +1901,8 @@ def _step_entity_options_for_pick(step_type, field_key, steps_ref, before_ix, pl
         opts.extend(_move_target_options(steps_ref, before_ix, player, objs, npcs))
         return opts
     if fk == "to" and t == "CHANGE":
-        return sorted(OBJ_ASSETS.keys())
+        # FieldItem 대상은 object_defs, 캐릭터 대상은 char_defs 키로 교체된다. 둘 다 제공.
+        return sorted(set(OBJ_ASSETS.keys()) | set(CHAR_ASSETS.keys()))
     if fk == "cam_target" and t == "CAMERA":
         return sorted(_entity_names_on_map(player, objs, npcs))
     if fk in ("follower", "leader") and t == "FOLLOW_START":
@@ -2338,7 +2705,7 @@ def _editor_event_preview_pick_at_screen(
                 fpx, fpy, s_img.get_width(), s_img.get_height()
             )
             pr = pygame.Rect(final_x, final_y, s_img.get_width(), s_img.get_height())
-            hit = pr.collidepoint(lx, ly)
+            hit = _editor_surface_alpha_hit(s_img, pr, lx, ly)
         else:
             sx, sy = world_to_map_surface_xy(
                 bg_blit_x, bg_blit_y, float(p[0]), float(p[1]), bg_w, bg_h, sw_bg, sh_bg, 0.0
@@ -2898,6 +3265,8 @@ def editor_main():
     sidebar_thumb_cache = {}
     # 우측 에셋 썸네일: 기본은 거친 픽셀(scale). 다수 선택·대량 에셋 시 PC 부하 완화. F8 또는 우측 상단 버튼으로 부드러운 스케일 토글.
     editor_smooth_sidebar_thumbs = False
+
+    editor_ui_state = _load_editor_ui_state()
        
     scroll_y_left = 0
     scroll_y_right = 0
@@ -2908,40 +3277,61 @@ def editor_main():
     
     edit_mode = "MAP"  # "MAP" | "EVENT" | "FLOW"
 
-    # --- FLOW 모드 (progress 변수별 플로우 차트) ---
-    flow_var_names = []
-    flow_selected_var = None
+    # --- FLOW 모드 (맵 캐릭터/오브젝트 ↔ 이벤트 연결) ---
+    flow_entity_entries = []
+    flow_selected_entity_idx = -1
     flow_graph = None
     flow_scroll_x = 0
     flow_scroll_y = 0
     flow_panning = False
     flow_pan_last = (0, 0)
-    flow_var_node_counts = {}
+    flow_entity_node_counts = {}
     flow_hit_boxes = []
     flow_opened_settings = False
+    flow_placed_collapsed = _editor_collapsed_set_from_state(
+        editor_ui_state, EDITOR_UI_COLLAPSE_FLOW_LEFT
+    )
 
     def _flow_node_count():
         if not flow_graph:
             return 0
         return len(flow_graph.get("nodes") or [])
 
-    def _flow_recount_all_var_nodes():
-        nonlocal flow_var_node_counts
+    def _flow_entity_key(entry):
+        if entry.get("kind") == "zone":
+            return ("zone", entry.get("name"), int(entry.get("zone_index", -1)))
+        n = entry.get("node")
+        return (entry.get("kind"), entry.get("name"), id(n) if n is not None else 0)
+
+    def _flow_diagram_for_entry(ent):
+        if ent.get("kind") == "zone":
+            return build_zone_flow_diagram(
+                ent.get("zone_data") or {},
+                ent.get("map_id") or map_id,
+                ent.get("zone_index", 0),
+                all_events,
+                events_catalog,
+            )
+        return build_entity_flow_diagram(
+            ent["name"],
+            ent["kind"],
+            all_events,
+            events_catalog,
+            entity_node=ent.get("node"),
+            char_assets=CHAR_ASSETS,
+            obj_assets=OBJ_ASSETS,
+        )
+
+    def _flow_recount_all_entity_nodes():
+        nonlocal flow_entity_node_counts
         counts = {}
-        for vname in flow_var_names:
+        for ent in flow_entity_entries:
             try:
-                dg = build_var_flow_diagram(
-                    vname,
-                    all_events,
-                    events_catalog,
-                    OBJ_ASSETS,
-                    CHAR_ASSETS,
-                    flow.world_data,
-                )
-                counts[vname] = len(dg.get("nodes") or [])
+                dg = _flow_diagram_for_entry(ent)
+                counts[_flow_entity_key(ent)] = len(dg.get("nodes") or [])
             except Exception:
-                counts[vname] = 0
-        flow_var_node_counts = counts
+                counts[_flow_entity_key(ent)] = 0
+        flow_entity_node_counts = counts
 
     current_event_id = None     # 예: 'talk_npc_1'
     current_event_type = None   # 'LOCAL' 또는 'GLOBAL'
@@ -3013,7 +3403,7 @@ def editor_main():
 
     def _on_char_def_saved(char_name):
         nonlocal categories, cat_list
-        _flow_refresh_var_list()
+        _flow_refresh_entity_list()
         categories = {}
         for name, info in OBJ_ASSETS.items():
             cat_name = info.get("category", "ETC (기타)")
@@ -3038,7 +3428,11 @@ def editor_main():
                     OBJ_ASSETS.get(obj_name, {}),
                     {"interact": inst} if inst else {},
                 )
-        _flow_refresh_var_list()
+        _flow_refresh_entity_list()
+
+    def _on_inst_saved_flow():
+        flow.save_editor_data(map_id, objs, npcs)
+        _flow_refresh_entity_list()
 
     def _editor_char_modal_ctx():
         return {
@@ -3049,7 +3443,7 @@ def editor_main():
             "modal_dropdown_drag": modal_dropdown_drag,
             "on_char_def_saved": _on_char_def_saved,
             "on_obj_def_saved": _on_obj_def_saved,
-            "on_inst_saved": lambda: flow.save_editor_data(map_id, objs, npcs),
+            "on_inst_saved": _on_inst_saved_flow,
             "event_ids": _editor_collect_event_id_options(all_events, map_id),
             "map_id": map_id,
         }
@@ -3178,50 +3572,101 @@ def editor_main():
 
     def _flow_rebuild_graph():
         nonlocal flow_graph
-        if not flow_selected_var:
+        if flow_selected_entity_idx < 0 or not flow_entity_entries:
             flow_graph = None
             return
+        ent = flow_entity_entries[flow_selected_entity_idx]
         try:
-            flow_graph = build_var_flow_diagram(
-                flow_selected_var,
-                all_events,
-                events_catalog,
-                OBJ_ASSETS,
-                CHAR_ASSETS,
-                flow.world_data,
-            )
+            flow_graph = _flow_diagram_for_entry(ent)
         except Exception as ex:
-            print(f"[FLOW] graph build failed for {flow_selected_var}: {ex}")
+            print(f"[FLOW] graph build failed for {ent.get('name')}: {ex}")
             flow_graph = {
-                "var": flow_selected_var,
+                "mode": ent.get("kind", "entity"),
+                "entity_name": ent.get("name", ""),
+                "entity_kind": ent.get("kind", "obj"),
+                "zone_name": ent.get("name", ""),
+                "var": ent.get("name", ""),
                 "note": str(ex),
                 "nodes": [],
                 "edges": [],
-                "lanes": [],
             }
 
-    def _flow_refresh_var_list():
-        nonlocal flow_var_names, flow_selected_var
-        flow_var_names = collect_progress_variables(
-            all_events, OBJ_ASSETS, CHAR_ASSETS, flow.world_data
-        )
-        if flow_selected_var and flow_selected_var not in flow_var_names:
-            flow_selected_var = flow_var_names[0] if flow_var_names else None
-        elif not flow_selected_var and flow_var_names:
-            flow_selected_var = flow_var_names[0]
-        _flow_recount_all_var_nodes()
+    def _open_zone_config_at(zone_index):
+        nonlocal zone_edit_idx, show_zone_config, zone_modal_scroll, zone_modal_dd_open
+        nonlocal active_zone_field, zone_fields, selected_zone_idx, is_zone_dragging
+        nonlocal flow_opened_settings
+        zones = flow.world_data.get(map_id, {}).get("event_zones", [])
+        zi = int(zone_index)
+        if 0 <= zi < len(zones):
+            zone_edit_idx = zi
+            zone_fields = _editor_zone_fields_from_zone_dict(zones[zi])
+            show_zone_config = True
+            zone_modal_scroll = 0
+            zone_modal_dd_open = False
+            active_zone_field = None
+            selected_zone_idx = zi
+            is_zone_dragging = False
+            flow_opened_settings = True
+
+    def _flow_refresh_entity_list():
+        nonlocal flow_entity_entries, flow_selected_entity_idx
+        prev_name = prev_kind = None
+        prev_zone_index = None
+        if 0 <= flow_selected_entity_idx < len(flow_entity_entries):
+            prev = flow_entity_entries[flow_selected_entity_idx]
+            prev_name = prev.get("name")
+            prev_kind = prev.get("kind")
+            if prev_kind == "zone":
+                prev_zone_index = prev.get("zone_index")
+        flow_entity_entries = []
+        for row in _editor_flow_catalog_rows(flow.world_data, map_id):
+            rk = row.get("kind")
+            if rk == "zone":
+                ent = _flow_zone_entry(row["zone_data"], row["zone_index"], map_id)
+            elif rk in ("npc", "obj"):
+                ent = _flow_entity_catalog_entry(
+                    row["name"],
+                    rk,
+                    char_assets=CHAR_ASSETS,
+                    obj_assets=OBJ_ASSETS,
+                )
+            else:
+                continue
+            ent["list_label"] = row.get("label") or ent.get("label")
+            flow_entity_entries.append(ent)
+        flow_selected_entity_idx = -1
+        if prev_kind:
+            for i, ent in enumerate(flow_entity_entries):
+                if prev_kind == "zone":
+                    if (
+                        ent.get("kind") == "zone"
+                        and ent.get("zone_index") == prev_zone_index
+                        and ent.get("name") == prev_name
+                    ):
+                        flow_selected_entity_idx = i
+                        break
+                elif ent.get("name") == prev_name and ent.get("kind") == prev_kind:
+                    flow_selected_entity_idx = i
+                    break
+        if flow_selected_entity_idx < 0 and flow_entity_entries:
+            flow_selected_entity_idx = 0
+        _flow_recount_all_entity_nodes()
         _flow_rebuild_graph()
 
-    _flow_refresh_var_list()
     map_list = list(flow.world_data.keys())
     cur_idx = 0
     # 초기 맵 로드
     map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": map_list[cur_idx]})
+    _flow_refresh_entity_list()
 
     sidebar_w = EDITOR_SIDEBAR_W
     right_sidebar_w = EDITOR_SIDEBAR_W
-    left_placed_collapsed = set()
-    right_asset_collapsed = set()
+    left_placed_collapsed = _editor_collapsed_set_from_state(
+        editor_ui_state, EDITOR_UI_COLLAPSE_MAP_LEFT
+    )
+    right_asset_collapsed = _editor_collapsed_set_from_state(
+        editor_ui_state, EDITOR_UI_COLLAPSE_MAP_RIGHT
+    )
     map_area_w = SCREEN_W - sidebar_w - right_sidebar_w
     TOP_BAR_H = EDITOR_TOP_BAR_H
     map_view_h = _editor_map_view_h(SCREEN_H, TOP_BAR_H)
@@ -3350,6 +3795,8 @@ def editor_main():
     running = True
     while running:
         mx, my = pygame.mouse.get_pos()
+        right_panel_w = 0 if edit_mode == "FLOW" else right_sidebar_w
+        map_area_w = SCREEN_W - sidebar_w - right_panel_w
         sidebar_list_tooltip = None
         export_map_btn = pygame.Rect(int(sidebar_w + map_area_w - 80), 10, 72, 38)
         pygame.event.pump()
@@ -3457,7 +3904,12 @@ def editor_main():
 
         for event in pygame.event.get():
 
-            if event.type == pygame.QUIT: running = False
+            if event.type == pygame.QUIT:
+                editor_ui_state[EDITOR_UI_COLLAPSE_MAP_LEFT] = sorted(left_placed_collapsed)
+                editor_ui_state[EDITOR_UI_COLLAPSE_FLOW_LEFT] = sorted(flow_placed_collapsed)
+                editor_ui_state[EDITOR_UI_COLLAPSE_MAP_RIGHT] = sorted(right_asset_collapsed)
+                _save_editor_ui_state(editor_ui_state)
+                running = False
 
             # [F7] 맵 PNG 내보내기: KEYDOWN 경로(폴링이 안 되는 환경 대비)
             if _editor_event_triggers_map_export(event):
@@ -3476,7 +3928,7 @@ def editor_main():
             # --- MAP: event zone 영역 드래그 지정 ---
             if is_selecting_zone_rect:
                 # 맵 작업 영역에서만 드래그 받음
-                in_map_area = (sidebar_w < mx < SCREEN_W - right_sidebar_w) and (my > TOP_BAR_H)
+                in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
                     _zwx, _zwy = get_real_pos(mx, my)
                     _zsx, _zsy = editor_snap_pick_world_xy(_zwx, _zwy, GRID_SIZE, is_shift_pressed)
@@ -3506,7 +3958,7 @@ def editor_main():
 
             # --- MAP: bg zone 영역 드래그 지정 ---
             if is_selecting_bgzone_rect:
-                in_map_area = (sidebar_w < mx < SCREEN_W - right_sidebar_w) and (my > TOP_BAR_H)
+                in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
                     _bwx, _bwy = get_real_pos(mx, my)
                     _bsx, _bsy = editor_snap_pick_world_xy(_bwx, _bwy, GRID_SIZE, is_shift_pressed)
@@ -3544,7 +3996,7 @@ def editor_main():
                         reopen_step_config_after_target_pick = False
                     continue
 
-                in_map_area = (sidebar_w < mx < SCREEN_W - right_sidebar_w) and (my > TOP_BAR_H)
+                in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
                     hit = _editor_pick_top_node(objs, npcs, wx, wy)
                     if hit is not None:
@@ -3568,7 +4020,7 @@ def editor_main():
                         reopen_zone_config_after_target_pick = False
                     continue
 
-                in_map_area = (sidebar_w < mx < SCREEN_W - right_sidebar_w) and (my > TOP_BAR_H)
+                in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
                     hit = _editor_pick_top_node(objs, npcs, wx, wy)
                     if hit is not None:
@@ -3591,7 +4043,7 @@ def editor_main():
                         reopen_step_config_after_pick = False
                     continue
 
-                in_map_area = (sidebar_w < mx < SCREEN_W - right_sidebar_w) and (my > TOP_BAR_H)
+                in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
                     _apx, _apy = editor_snap_pick_world_xy(wx, wy, GRID_SIZE, is_shift_pressed)
                     seg = f"{_apx},{_apy}"
@@ -3611,7 +4063,7 @@ def editor_main():
                         reopen_step_config_after_pick = False
                     continue
 
-                in_map_area = (sidebar_w < mx < SCREEN_W - right_sidebar_w) and (my > TOP_BAR_H)
+                in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
                     # 현재 마우스가 가리키는 월드 좌표를 step_fields에 반영 (격자 스냅, Shift=미세)
                     kx, ky = picking_step_xy_keys if picking_step_xy_keys else ("pos_x", "pos_y")
@@ -3824,23 +4276,17 @@ def editor_main():
                 list_w_ev = 52
 
                 if event.type == pygame.MOUSEWHEEL:
-                    wxw, wyw = getattr(event, "pos", (mx, my))
-                    dy = getattr(event, "precise_y", None)
-                    if dy is not None:
-                        delta = int(round(-dy * 40))
-                    else:
-                        delta = -int(event.y) * 24
-                    if delta == 0 and event.y != 0:
-                        delta = -int(event.y) * 24
+                    px, py = _editor_pointer_xy(event, mx, my)
+                    delta = _editor_wheel_delta(event)
                     if event_modal_dd_open and event_modal_dd_rect:
                         total_h = len(event_modal_dd_options) * dd_item_h_ev
                         vis = max(1, event_modal_dd_rect.height)
                         max_dd = max(0, total_h - vis)
-                        if max_dd > 0 and (
-                            event_modal_dd_rect.collidepoint(wxw, wyw) or panel_rect.collidepoint(wxw, wyw)
+                        if max_dd > 0 and _editor_rects_contain_point(
+                            px, py, event_modal_dd_rect, body_rect_ev, panel_rect
                         ):
                             event_modal_dd_scroll = max(0, min(max_dd, event_modal_dd_scroll + delta))
-                    elif panel_rect.collidepoint(wxw, wyw):
+                    elif _editor_rects_contain_point(px, py, body_rect_ev, sb_rect_ev, panel_rect):
                         event_modal_scroll = max(0, min(max_ev_scroll, event_modal_scroll + delta))
                     continue
 
@@ -3848,28 +4294,16 @@ def editor_main():
                     ui_sb = _step_overlay_scrollbar_layout(
                         sb_rect_ev, body_rect_ev.height, content_h_ev, event_modal_scroll
                     )
-                    tr = ui_sb.get("track")
-                    th = int(ui_sb.get("thumb_h") or 18)
-                    max_sc = int(ui_sb.get("max_scroll") or 0)
-                    if tr is not None and max_sc > 0:
-                        y = event.pos[1] - (th // 2)
-                        y = max(tr.y, min(tr.bottom - th, y))
-                        span = max(0, tr.height - th)
-                        p = 0.0 if span <= 0 else (y - tr.y) / span
-                        event_modal_scroll = int(p * max_sc)
+                    sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb)
+                    if sp is not None:
+                        event_modal_scroll = sp
                     continue
 
                 if event.type == pygame.MOUSEMOTION and modal_dropdown_drag == "event_dd":
-                    if event_modal_dd_ui and event_modal_dd_ui.get("track") and event_modal_dd_ui.get("thumb_h"):
-                        tr = event_modal_dd_ui["track"]
-                        th = int(event_modal_dd_ui["thumb_h"] or 18)
-                        max_sc = int(event_modal_dd_ui.get("max_scroll") or 0)
-                        if max_sc > 0:
-                            y = event.pos[1] - (th // 2)
-                            y = max(tr.y, min(tr.bottom - th, y))
-                            span = max(0, tr.height - th)
-                            p = 0.0 if span <= 0 else (y - tr.y) / span
-                            event_modal_dd_scroll = int(p * max_sc)
+                    if event_modal_dd_ui:
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], event_modal_dd_ui)
+                        if sp is not None:
+                            event_modal_dd_scroll = sp
                     continue
 
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -3884,18 +4318,16 @@ def editor_main():
                         dr = event_modal_dd_rect
                         ui_prev = event_modal_dd_ui
                         if dr.collidepoint(event.pos):
-                            if ui_prev and ui_prev.get("thumb") and ui_prev["thumb"].collidepoint(event.pos):
-                                modal_dropdown_drag = "event_dd"
-                                continue
-                            if ui_prev and ui_prev.get("track") and ui_prev["track"].collidepoint(event.pos):
-                                tr = ui_prev["track"]
-                                th = int(ui_prev.get("thumb_h") or 18)
-                                ms = int(ui_prev.get("max_scroll") or 0)
-                                if ms > 0 and tr.height > th:
-                                    p = (event.pos[1] - tr.y - th / 2) / max(1, tr.height - th)
-                                    p = max(0.0, min(1.0, p))
-                                    event_modal_dd_scroll = int(round(p * ms))
-                                continue
+                            if ui_prev:
+                                dd_hit = _editor_modal_sb_hit(event.pos, ui_prev)
+                                if dd_hit == "thumb":
+                                    modal_dropdown_drag = "event_dd"
+                                    continue
+                                if dd_hit == "track":
+                                    sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_prev)
+                                    if sp is not None:
+                                        event_modal_dd_scroll = sp
+                                    continue
                             sb_ex = 11 if int((ui_prev or {}).get("max_scroll") or 0) > 0 else 0
                             pick_w = max(1, dr.width - sb_ex)
                             if event.pos[0] < dr.x + pick_w:
@@ -3913,19 +4345,14 @@ def editor_main():
                     ui_sb_ev = _step_overlay_scrollbar_layout(
                         sb_rect_ev, body_rect_ev.height, content_h_ev, event_modal_scroll
                     )
-                    if ui_sb_ev.get("thumb") and ui_sb_ev["thumb"].collidepoint(event.pos):
+                    sb_hit = _editor_modal_sb_hit(event.pos, ui_sb_ev)
+                    if sb_hit == "thumb":
                         modal_body_drag = "event"
                         continue
-                    if ui_sb_ev.get("track") and ui_sb_ev["track"].collidepoint(event.pos) and int(
-                        ui_sb_ev.get("max_scroll") or 0
-                    ) > 0:
-                        tr = ui_sb_ev["track"]
-                        th = int(ui_sb_ev.get("thumb_h") or 18)
-                        ms = int(ui_sb_ev.get("max_scroll") or 0)
-                        if ms > 0 and tr.height > th:
-                            p = (event.pos[1] - tr.y - th / 2) / max(1, tr.height - th)
-                            p = max(0.0, min(1.0, p))
-                            event_modal_scroll = int(round(p * ms))
+                    if sb_hit == "track":
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb_ev)
+                        if sp is not None:
+                            event_modal_scroll = sp
                         continue
 
                     active_field = None
@@ -4037,7 +4464,7 @@ def editor_main():
                         all_events[cat][eid] = entry
                         show_event_config = False
                         flow.save_events(all_events) # 즉시 파일 저장
-                        _flow_refresh_var_list()
+                        _flow_refresh_entity_list()
 
                     elif canc_btn.collidepoint(event.pos):
                         show_event_config = False
@@ -4088,23 +4515,17 @@ def editor_main():
                 ent_opts_zn = _editor_collect_entity_name_options(objs, npcs)
 
                 if event.type == pygame.MOUSEWHEEL:
-                    wxw, wyw = getattr(event, "pos", (mx, my))
-                    dy = getattr(event, "precise_y", None)
-                    if dy is not None:
-                        delta = int(round(-dy * 40))
-                    else:
-                        delta = -int(event.y) * 24
-                    if delta == 0 and event.y != 0:
-                        delta = -int(event.y) * 24
+                    px, py = _editor_pointer_xy(event, mx, my)
+                    delta = _editor_wheel_delta(event)
                     if zone_modal_dd_open and zone_modal_dd_rect:
                         total_h = len(zone_modal_dd_options) * dd_item_h_zn
                         vis = max(1, zone_modal_dd_rect.height)
                         max_dd = max(0, total_h - vis)
-                        if max_dd > 0 and (
-                            zone_modal_dd_rect.collidepoint(wxw, wyw) or panel_rect.collidepoint(wxw, wyw)
+                        if max_dd > 0 and _editor_rects_contain_point(
+                            px, py, zone_modal_dd_rect, body_rect_zn, panel_rect
                         ):
                             zone_modal_dd_scroll = max(0, min(max_dd, zone_modal_dd_scroll + delta))
-                    elif panel_rect.collidepoint(wxw, wyw):
+                    elif _editor_rects_contain_point(px, py, body_rect_zn, sb_rect_zn, panel_rect):
                         zone_modal_scroll = max(0, min(max_zn_scroll, zone_modal_scroll + delta))
                     continue
 
@@ -4112,28 +4533,16 @@ def editor_main():
                     ui_sb = _step_overlay_scrollbar_layout(
                         sb_rect_zn, body_rect_zn.height, content_h_zn, zone_modal_scroll
                     )
-                    tr = ui_sb.get("track")
-                    th = int(ui_sb.get("thumb_h") or 18)
-                    max_sc = int(ui_sb.get("max_scroll") or 0)
-                    if tr is not None and max_sc > 0:
-                        y = event.pos[1] - (th // 2)
-                        y = max(tr.y, min(tr.bottom - th, y))
-                        span = max(0, tr.height - th)
-                        p = 0.0 if span <= 0 else (y - tr.y) / span
-                        zone_modal_scroll = int(p * max_sc)
+                    sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb)
+                    if sp is not None:
+                        zone_modal_scroll = sp
                     continue
 
                 if event.type == pygame.MOUSEMOTION and modal_dropdown_drag == "zone_dd":
-                    if zone_modal_dd_ui and zone_modal_dd_ui.get("track") and zone_modal_dd_ui.get("thumb_h"):
-                        tr = zone_modal_dd_ui["track"]
-                        th = int(zone_modal_dd_ui["thumb_h"] or 18)
-                        max_sc = int(zone_modal_dd_ui.get("max_scroll") or 0)
-                        if max_sc > 0:
-                            y = event.pos[1] - (th // 2)
-                            y = max(tr.y, min(tr.bottom - th, y))
-                            span = max(0, tr.height - th)
-                            p = 0.0 if span <= 0 else (y - tr.y) / span
-                            zone_modal_dd_scroll = int(p * max_sc)
+                    if zone_modal_dd_ui:
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], zone_modal_dd_ui)
+                        if sp is not None:
+                            zone_modal_dd_scroll = sp
                     continue
 
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -4148,18 +4557,16 @@ def editor_main():
                         dr = zone_modal_dd_rect
                         ui_prev = zone_modal_dd_ui
                         if dr.collidepoint(event.pos):
-                            if ui_prev and ui_prev.get("thumb") and ui_prev["thumb"].collidepoint(event.pos):
-                                modal_dropdown_drag = "zone_dd"
-                                continue
-                            if ui_prev and ui_prev.get("track") and ui_prev["track"].collidepoint(event.pos):
-                                tr = ui_prev["track"]
-                                th = int(ui_prev.get("thumb_h") or 18)
-                                ms = int(ui_prev.get("max_scroll") or 0)
-                                if ms > 0 and tr.height > th:
-                                    p = (event.pos[1] - tr.y - th / 2) / max(1, tr.height - th)
-                                    p = max(0.0, min(1.0, p))
-                                    zone_modal_dd_scroll = int(round(p * ms))
-                                continue
+                            if ui_prev:
+                                dd_hit = _editor_modal_sb_hit(event.pos, ui_prev)
+                                if dd_hit == "thumb":
+                                    modal_dropdown_drag = "zone_dd"
+                                    continue
+                                if dd_hit == "track":
+                                    sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_prev)
+                                    if sp is not None:
+                                        zone_modal_dd_scroll = sp
+                                    continue
                             sb_ex = 11 if int((ui_prev or {}).get("max_scroll") or 0) > 0 else 0
                             pick_w = max(1, dr.width - sb_ex)
                             if event.pos[0] < dr.x + pick_w:
@@ -4177,19 +4584,14 @@ def editor_main():
                     ui_sb_zn = _step_overlay_scrollbar_layout(
                         sb_rect_zn, body_rect_zn.height, content_h_zn, zone_modal_scroll
                     )
-                    if ui_sb_zn.get("thumb") and ui_sb_zn["thumb"].collidepoint(event.pos):
+                    sb_hit = _editor_modal_sb_hit(event.pos, ui_sb_zn)
+                    if sb_hit == "thumb":
                         modal_body_drag = "zone"
                         continue
-                    if ui_sb_zn.get("track") and ui_sb_zn["track"].collidepoint(event.pos) and int(
-                        ui_sb_zn.get("max_scroll") or 0
-                    ) > 0:
-                        tr = ui_sb_zn["track"]
-                        th = int(ui_sb_zn.get("thumb_h") or 18)
-                        ms = int(ui_sb_zn.get("max_scroll") or 0)
-                        if ms > 0 and tr.height > th:
-                            p = (event.pos[1] - tr.y - th / 2) / max(1, tr.height - th)
-                            p = max(0.0, min(1.0, p))
-                            zone_modal_scroll = int(round(p * ms))
+                    if sb_hit == "track":
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb_zn)
+                        if sp is not None:
+                            zone_modal_scroll = sp
                         continue
 
                     active_zone_field = None
@@ -4325,6 +4727,7 @@ def editor_main():
 
                             # 파일 즉시 저장 (objects/npcs도 함께 최신화)
                             flow.save_editor_data(map_id, objs, npcs)
+                            _flow_refresh_entity_list()
 
                         show_zone_config = False
                         zone_edit_idx = None
@@ -4365,23 +4768,17 @@ def editor_main():
                 list_w_bg = 52
 
                 if event.type == pygame.MOUSEWHEEL:
-                    wxw, wyw = getattr(event, "pos", (mx, my))
-                    dy = getattr(event, "precise_y", None)
-                    if dy is not None:
-                        delta = int(round(-dy * 40))
-                    else:
-                        delta = -int(event.y) * 24
-                    if delta == 0 and event.y != 0:
-                        delta = -int(event.y) * 24
+                    px, py = _editor_pointer_xy(event, mx, my)
+                    delta = _editor_wheel_delta(event)
                     if bgzone_modal_dd_open and bgzone_modal_dd_rect:
                         total_h = len(bgzone_modal_dd_options) * dd_item_h_bg
                         vis = max(1, bgzone_modal_dd_rect.height)
                         max_dd = max(0, total_h - vis)
-                        if max_dd > 0 and (
-                            bgzone_modal_dd_rect.collidepoint(wxw, wyw) or panel_rect.collidepoint(wxw, wyw)
+                        if max_dd > 0 and _editor_rects_contain_point(
+                            px, py, bgzone_modal_dd_rect, body_rect_bg, panel_rect
                         ):
                             bgzone_modal_dd_scroll = max(0, min(max_dd, bgzone_modal_dd_scroll + delta))
-                    elif panel_rect.collidepoint(wxw, wyw):
+                    elif _editor_rects_contain_point(px, py, body_rect_bg, sb_rect_bg, panel_rect):
                         bgzone_modal_scroll = max(0, min(max_bg_scroll, bgzone_modal_scroll + delta))
                     continue
 
@@ -4389,28 +4786,16 @@ def editor_main():
                     ui_sb = _step_overlay_scrollbar_layout(
                         sb_rect_bg, body_rect_bg.height, content_h_bg, bgzone_modal_scroll
                     )
-                    tr = ui_sb.get("track")
-                    th = int(ui_sb.get("thumb_h") or 18)
-                    max_sc = int(ui_sb.get("max_scroll") or 0)
-                    if tr is not None and max_sc > 0:
-                        y = event.pos[1] - (th // 2)
-                        y = max(tr.y, min(tr.bottom - th, y))
-                        span = max(0, tr.height - th)
-                        p = 0.0 if span <= 0 else (y - tr.y) / span
-                        bgzone_modal_scroll = int(p * max_sc)
+                    sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb)
+                    if sp is not None:
+                        bgzone_modal_scroll = sp
                     continue
 
                 if event.type == pygame.MOUSEMOTION and modal_dropdown_drag == "bgzone_dd":
-                    if bgzone_modal_dd_ui and bgzone_modal_dd_ui.get("track") and bgzone_modal_dd_ui.get("thumb_h"):
-                        tr = bgzone_modal_dd_ui["track"]
-                        th = int(bgzone_modal_dd_ui["thumb_h"] or 18)
-                        max_sc = int(bgzone_modal_dd_ui.get("max_scroll") or 0)
-                        if max_sc > 0:
-                            y = event.pos[1] - (th // 2)
-                            y = max(tr.y, min(tr.bottom - th, y))
-                            span = max(0, tr.height - th)
-                            p = 0.0 if span <= 0 else (y - tr.y) / span
-                            bgzone_modal_dd_scroll = int(p * max_sc)
+                    if bgzone_modal_dd_ui:
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], bgzone_modal_dd_ui)
+                        if sp is not None:
+                            bgzone_modal_dd_scroll = sp
                     continue
 
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -4425,18 +4810,16 @@ def editor_main():
                         dr = bgzone_modal_dd_rect
                         ui_prev = bgzone_modal_dd_ui
                         if dr.collidepoint(event.pos):
-                            if ui_prev and ui_prev.get("thumb") and ui_prev["thumb"].collidepoint(event.pos):
-                                modal_dropdown_drag = "bgzone_dd"
-                                continue
-                            if ui_prev and ui_prev.get("track") and ui_prev["track"].collidepoint(event.pos):
-                                tr = ui_prev["track"]
-                                th = int(ui_prev.get("thumb_h") or 18)
-                                ms = int(ui_prev.get("max_scroll") or 0)
-                                if ms > 0 and tr.height > th:
-                                    p = (event.pos[1] - tr.y - th / 2) / max(1, tr.height - th)
-                                    p = max(0.0, min(1.0, p))
-                                    bgzone_modal_dd_scroll = int(round(p * ms))
-                                continue
+                            if ui_prev:
+                                dd_hit = _editor_modal_sb_hit(event.pos, ui_prev)
+                                if dd_hit == "thumb":
+                                    modal_dropdown_drag = "bgzone_dd"
+                                    continue
+                                if dd_hit == "track":
+                                    sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_prev)
+                                    if sp is not None:
+                                        bgzone_modal_dd_scroll = sp
+                                    continue
                             sb_ex = 11 if int((ui_prev or {}).get("max_scroll") or 0) > 0 else 0
                             pick_w = max(1, dr.width - sb_ex)
                             if event.pos[0] < dr.x + pick_w:
@@ -4454,19 +4837,14 @@ def editor_main():
                     ui_sb_bg = _step_overlay_scrollbar_layout(
                         sb_rect_bg, body_rect_bg.height, content_h_bg, bgzone_modal_scroll
                     )
-                    if ui_sb_bg.get("thumb") and ui_sb_bg["thumb"].collidepoint(event.pos):
+                    sb_hit = _editor_modal_sb_hit(event.pos, ui_sb_bg)
+                    if sb_hit == "thumb":
                         modal_body_drag = "bgzone"
                         continue
-                    if ui_sb_bg.get("track") and ui_sb_bg["track"].collidepoint(event.pos) and int(
-                        ui_sb_bg.get("max_scroll") or 0
-                    ) > 0:
-                        tr = ui_sb_bg["track"]
-                        th = int(ui_sb_bg.get("thumb_h") or 18)
-                        ms = int(ui_sb_bg.get("max_scroll") or 0)
-                        if ms > 0 and tr.height > th:
-                            p = (event.pos[1] - tr.y - th / 2) / max(1, tr.height - th)
-                            p = max(0.0, min(1.0, p))
-                            bgzone_modal_scroll = int(round(p * ms))
+                    if sb_hit == "track":
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb_bg)
+                        if sp is not None:
+                            bgzone_modal_scroll = sp
                         continue
 
                     active_bgzone_field = None
@@ -4584,6 +4962,8 @@ def editor_main():
                 tgt_item_h = 22
 
                 if event.type == pygame.MOUSEWHEEL:
+                    px, py = _editor_pointer_xy(event, mx, my)
+                    delta = _editor_wheel_delta(event)
                     if (
                         step_target_dropdown_open
                         and step_target_dropdown_rect
@@ -4592,18 +4972,10 @@ def editor_main():
                         total_h = len(step_target_options) * tgt_item_h
                         vis = max(1, step_target_dropdown_rect.height)
                         max_sc = max(0, total_h - vis)
-                        if max_sc > 0:
-                            wx, wy = getattr(event, "pos", (mx, my))
-                            over = step_target_dropdown_rect.collidepoint(wx, wy)
-                            if over or panel_rect.collidepoint(wx, wy):
-                                dy = getattr(event, "precise_y", None)
-                                if dy is not None:
-                                    delta = int(round(-dy * 40))
-                                else:
-                                    delta = -int(event.y) * 24
-                                if delta == 0 and event.y != 0:
-                                    delta = -int(event.y) * 24
-                                step_target_scroll = max(0, min(max_sc, step_target_scroll + delta))
+                        if max_sc > 0 and _editor_rects_contain_point(
+                            px, py, step_target_dropdown_rect, panel_rect
+                        ):
+                            step_target_scroll = max(0, min(max_sc, step_target_scroll + delta))
 
                     if step_type_dropdown_open:
                         dropdown_item_h = 22
@@ -4613,32 +4985,13 @@ def editor_main():
                         dropdown_rect = pygame.Rect(type_rect.x, type_rect.bottom, type_rect.width, vis_h)
                         total_h = len(step_type_cycle) * dropdown_item_h
                         max_sc = max(0, total_h - vis_h)
-                        if max_sc > 0:
-                            wx, wy = getattr(event, "pos", (mx, my))
-                            over = dropdown_rect.collidepoint(wx, wy)
-                            if over or panel_rect.collidepoint(wx, wy):
-                                dy = getattr(event, "precise_y", None)
-                                if dy is not None:
-                                    delta = int(round(-dy * 40))
-                                else:
-                                    delta = -int(event.y) * 24
-                                if delta == 0 and event.y != 0:
-                                    delta = -int(event.y) * 24
-                                step_type_scroll = max(0, min(max_sc, step_type_scroll + delta))
+                        if max_sc > 0 and _editor_rects_contain_point(px, py, dropdown_rect, panel_rect):
+                            step_type_scroll = max(0, min(max_sc, step_type_scroll + delta))
 
                     if (not step_target_dropdown_open) and (not step_type_dropdown_open):
                         body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(panel_rect, rows_layout)
-                        if max_bsc > 0:
-                            wx, wy = getattr(event, "pos", (mx, my))
-                            if body_r.collidepoint(wx, wy) or sb_r.collidepoint(wx, wy) or panel_rect.collidepoint(wx, wy):
-                                dy = getattr(event, "precise_y", None)
-                                if dy is not None:
-                                    delta = int(round(-dy * 40))
-                                else:
-                                    delta = -int(event.y) * 24
-                                if delta == 0 and event.y != 0:
-                                    delta = -int(event.y) * 24
-                                step_body_scroll = max(0, min(max_bsc, step_body_scroll + delta))
+                        if max_bsc > 0 and _editor_rects_contain_point(px, py, body_r, sb_r, panel_rect):
+                            step_body_scroll = max(0, min(max_bsc, step_body_scroll + delta))
 
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     # 삭제 확인창이 열려 있으면, 그 입력만 처리
@@ -4666,12 +5019,16 @@ def editor_main():
 
                     if step_target_dropdown_open and step_target_dropdown_rect:
                         if step_target_dropdown_rect.collidepoint(event.pos):
-                            # 스크롤바 드래그 시작(타겟)
-                            if step_target_dd_ui and step_target_dd_ui.get("thumb") and step_target_dd_ui["thumb"].collidepoint(event.pos):
-                                dd_drag_kind = "target"
-                                dd_drag_start_y = event.pos[1]
-                                dd_drag_start_scroll = step_target_scroll
-                                continue
+                            if step_target_dd_ui:
+                                sb_hit = _editor_modal_sb_hit(event.pos, step_target_dd_ui)
+                                if sb_hit == "thumb":
+                                    dd_drag_kind = "target"
+                                    continue
+                                if sb_hit == "track":
+                                    sp = _editor_scroll_px_from_sb_my(event.pos[1], step_target_dd_ui)
+                                    if sp is not None:
+                                        step_target_scroll = sp
+                                    continue
                             rel = event.pos[1] - step_target_dropdown_rect.y + step_target_scroll
                             pick_i = int(rel // tgt_item_h)
                             if 0 <= pick_i < len(step_target_options):
@@ -4694,12 +5051,16 @@ def editor_main():
                     if step_type_dropdown_open:
                         # 바깥 클릭하면 닫기 (옵션 클릭 포함 처리)
                         if dropdown_rect.collidepoint(event.pos):
-                            # 스크롤바 드래그 시작(타입)
-                            if step_type_dd_ui and step_type_dd_ui.get("thumb") and step_type_dd_ui["thumb"].collidepoint(event.pos):
-                                dd_drag_kind = "type"
-                                dd_drag_start_y = event.pos[1]
-                                dd_drag_start_scroll = step_type_scroll
-                                continue
+                            if step_type_dd_ui:
+                                sb_hit = _editor_modal_sb_hit(event.pos, step_type_dd_ui)
+                                if sb_hit == "thumb":
+                                    dd_drag_kind = "type"
+                                    continue
+                                if sb_hit == "track":
+                                    sp = _editor_scroll_px_from_sb_my(event.pos[1], step_type_dd_ui)
+                                    if sp is not None:
+                                        step_type_scroll = sp
+                                    continue
                             rel_y = event.pos[1] - dropdown_rect.y + step_type_scroll
                             pick = int(rel_y // dropdown_item_h)
                             if 0 <= pick < len(step_type_cycle):
@@ -4734,24 +5095,14 @@ def editor_main():
                     step_body_scroll = min(step_body_scroll, max_bsc)
                     if max_bsc > 0:
                         ui_sb = _step_overlay_scrollbar_layout(sb_r, body_r.height, ch_ov, step_body_scroll)
-                        th = ui_sb.get("thumb")
-                        tr = ui_sb.get("track")
-                        if th and th.collidepoint(event.pos):
+                        sb_hit = _editor_modal_sb_hit(event.pos, ui_sb)
+                        if sb_hit == "thumb":
                             dd_drag_kind = "step_body"
                             continue
-                        if tr and tr.collidepoint(event.pos) and th:
-                            if not th.collidepoint(event.pos):
-                                rel_y = event.pos[1] - tr.y
-                                thumb_h = int(ui_sb.get("thumb_h") or 18)
-                                span = max(0, tr.height - thumb_h)
-                                new_top = rel_y - thumb_h // 2
-                                new_top = max(0, min(span, new_top))
-                                ms = int(ui_sb["max_scroll"])
-                                if span > 0:
-                                    step_body_scroll = int(round((new_top / float(span)) * ms))
-                                else:
-                                    step_body_scroll = 0
-                                step_body_scroll = max(0, min(ms, step_body_scroll))
+                        if sb_hit == "track":
+                            sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb)
+                            if sp is not None:
+                                step_body_scroll = sp
                             continue
 
                     cy = 0
@@ -5375,39 +5726,22 @@ def editor_main():
                         continue
 
                 if event.type == pygame.MOUSEMOTION and dd_drag_kind and show_step_config:
-                    # 드롭다운 스크롤바 드래그로 스크롤 조절
-                    if dd_drag_kind == "type" and step_type_dd_ui and step_type_dd_ui.get("track") and step_type_dd_ui.get("thumb_h"):
-                        tr = step_type_dd_ui["track"]
-                        th = int(step_type_dd_ui["thumb_h"] or 18)
-                        max_sc = int(step_type_dd_ui.get("max_scroll") or 0)
-                        if max_sc > 0:
-                            # 마우스 Y -> 트랙 내 thumb top 비율 -> scroll
-                            y = event.pos[1] - (th // 2)
-                            y = max(tr.y, min(tr.bottom - th, y))
-                            p = 0.0 if (tr.height - th) <= 0 else (y - tr.y) / (tr.height - th)
-                            step_type_scroll = int(p * max_sc)
-                    elif dd_drag_kind == "target" and step_target_dd_ui and step_target_dd_ui.get("track") and step_target_dd_ui.get("thumb_h"):
-                        tr = step_target_dd_ui["track"]
-                        th = int(step_target_dd_ui["thumb_h"] or 18)
-                        max_sc = int(step_target_dd_ui.get("max_scroll") or 0)
-                        if max_sc > 0:
-                            y = event.pos[1] - (th // 2)
-                            y = max(tr.y, min(tr.bottom - th, y))
-                            p = 0.0 if (tr.height - th) <= 0 else (y - tr.y) / (tr.height - th)
-                            step_target_scroll = int(p * max_sc)
+                    if dd_drag_kind == "type" and step_type_dd_ui:
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], step_type_dd_ui)
+                        if sp is not None:
+                            step_type_scroll = sp
+                    elif dd_drag_kind == "target" and step_target_dd_ui:
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], step_target_dd_ui)
+                        if sp is not None:
+                            step_target_scroll = sp
                     elif dd_drag_kind == "step_body":
                         panel_r = _step_settings_panel_rect(SCREEN_W, SCREEN_H, step_fields)
                         rows_ov = _step_field_rows(step_fields.get("type", "MOVE"))
                         b_r, s_r, _mx, ch0 = _step_overlay_body_geometry(panel_r, rows_ov)
                         ui_b = _step_overlay_scrollbar_layout(s_r, b_r.height, ch0, step_body_scroll)
-                        tr = ui_b.get("track")
-                        th = int(ui_b.get("thumb_h") or 18)
-                        max_sc = int(ui_b.get("max_scroll") or 0)
-                        if tr is not None and max_sc > 0:
-                            y = event.pos[1] - (th // 2)
-                            y = max(tr.y, min(tr.bottom - th, y))
-                            p = 0.0 if (tr.height - th) <= 0 else (y - tr.y) / (tr.height - th)
-                            step_body_scroll = int(p * max_sc)
+                        sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_b)
+                        if sp is not None:
+                            step_body_scroll = sp
 
                 if event.type == pygame.MOUSEBUTTONUP and dd_drag_kind:
                     dd_drag_kind = None
@@ -5475,7 +5809,7 @@ def editor_main():
             if event.type == pygame.MOUSEBUTTONDOWN:
                 # 휠(버튼 4/5): 일부 환경에서 MOUSEWHEEL 대신 들어옴 → 스크롤만, 선택 없음
                 if event.button in (4, 5) and my > TOP_BAR_H:
-                    _wheel_dy = 30 if event.button == 4 else -30
+                    _wheel_dy = EDITOR_SIDEBAR_WHEEL_STEP if event.button == 4 else -EDITOR_SIDEBAR_WHEEL_STEP
                     if mx < sidebar_w:
                         _lt, _lch = _editor_left_list_metrics(
                             edit_mode,
@@ -5489,13 +5823,14 @@ def editor_main():
                             TOP_BAR_H,
                             EVENT_LIST_START_Y,
                             left_placed_collapsed,
-                            flow_var_names=flow_var_names,
+                            flow_entity_entries=flow_entity_entries,
+                            flow_placed_collapsed=flow_placed_collapsed,
                         )
                         scroll_y_left = _sidebar_scroll_clamp(
                             scroll_y_left + _wheel_dy, _lch, _lt, sidebar_list_bottom
                         )
                         continue
-                    if mx > SCREEN_W - right_sidebar_w:
+                    if mx > SCREEN_W - right_panel_w:
                         if edit_mode == "MAP":
                             _rt = _editor_right_map_list_top()
                             _rch = _editor_right_map_content_height(
@@ -5549,7 +5884,8 @@ def editor_main():
                             TOP_BAR_H,
                             EVENT_LIST_START_Y,
                             left_placed_collapsed,
-                            flow_var_names=flow_var_names,
+                            flow_entity_entries=flow_entity_entries,
+                            flow_placed_collapsed=flow_placed_collapsed,
                         )
                         scroll_y_left = _sidebar_scroll_clamp(scroll_y_left, _lch, _lt, sidebar_list_bottom)
                         _sb = _sidebar_sb_rect(0, sidebar_w, _lt, sidebar_list_bottom)
@@ -5564,7 +5900,7 @@ def editor_main():
                                 if _ns is not None:
                                     scroll_y_left = _ns
                                 continue
-                    elif mx > SCREEN_W - right_sidebar_w:
+                    elif mx > SCREEN_W - right_panel_w:
                         if edit_mode == "MAP":
                             _rt = _editor_right_map_list_top()
                             _rch = _editor_right_map_content_height(
@@ -5582,7 +5918,7 @@ def editor_main():
                                 scroll_y_right, _rch, _rt, _vb_sb
                             )
                             _sb = _sidebar_sb_rect(
-                                SCREEN_W - right_sidebar_w, right_sidebar_w, _rt, _vb_sb
+                                SCREEN_W - right_panel_w, right_sidebar_w, _rt, _vb_sb
                             )
                             _ui = _step_overlay_scrollbar_layout(
                                 _sb, _vb_sb - _rt, _rch, -scroll_y_right
@@ -5594,7 +5930,7 @@ def editor_main():
                                 scroll_y_steps, _rch, _rt, sidebar_list_bottom
                             )
                             _sb = _sidebar_sb_rect(
-                                SCREEN_W - right_sidebar_w, right_sidebar_w, _rt, sidebar_list_bottom
+                                SCREEN_W - right_panel_w, right_sidebar_w, _rt, sidebar_list_bottom
                             )
                             _ui = _step_overlay_scrollbar_layout(
                                 _sb, sidebar_list_bottom - _rt, _rch, -scroll_y_steps
@@ -5624,7 +5960,8 @@ def editor_main():
                         edit_mode = "FLOW"
                         flow_scroll_x = 0
                         flow_scroll_y = 0
-                        _flow_refresh_var_list()
+                        scroll_y_left = 0
+                        _flow_refresh_entity_list()
 
                 # [FLOW] 뒤로 가기·차트 노드 클릭 (좌측 변수 리스트는 아래 [2]에서 처리)
                 elif (
@@ -5633,7 +5970,7 @@ def editor_main():
                     and (
                         (flow_back_btn is not None and flow_back_btn.collidepoint(mx, my))
                         or (
-                            sidebar_w < mx < SCREEN_W - right_sidebar_w
+                            sidebar_w < mx < SCREEN_W - right_panel_w
                             and my > TOP_BAR_H
                         )
                     )
@@ -5649,7 +5986,7 @@ def editor_main():
                         close_all_char_modals()
                         flow_opened_settings = False
                         continue
-                    if sidebar_w < mx < SCREEN_W - right_sidebar_w and my > TOP_BAR_H:
+                    if sidebar_w < mx < SCREEN_W - right_panel_w and my > TOP_BAR_H:
                         flow_lx = mx - sidebar_w + flow_scroll_x
                         flow_ly = my - TOP_BAR_H + flow_scroll_y
                         for hb in flow_hit_boxes:
@@ -5678,15 +6015,31 @@ def editor_main():
                                     current_event_type = sec
                             elif act == "entity":
                                 ent = str(hb.get("entity") or "")
-                                if hb.get("entity_kind") == "char":
-                                    char_def_modal.open(ent)
-                                else:
-                                    obj_def_modal.open(ent)
+                                _editor_flow_open_entity_modal(
+                                    ent,
+                                    hb.get("entity_kind"),
+                                    on_map=bool(hb.get("on_map")),
+                                    objs=objs,
+                                    npcs=npcs,
+                                )
+                            elif act == "binding":
+                                ent = str(hb.get("entity") or "")
+                                _editor_flow_open_entity_modal(
+                                    ent,
+                                    hb.get("entity_kind"),
+                                    on_map=bool(hb.get("on_map")),
+                                    objs=objs,
+                                    npcs=npcs,
+                                )
+                            elif act == "zone":
+                                zi = hb.get("zone_index")
+                                if zi is not None:
+                                    _open_zone_config_at(zi)
                             break
                         continue
 
                 # [1. 상단 맵 바 클릭]
-                elif event.button == 1 and 0 < my < TOP_BAR_H and sidebar_w < mx < SCREEN_W - right_sidebar_w:
+                elif event.button == 1 and 0 < my < TOP_BAR_H and sidebar_w < mx < SCREEN_W - right_panel_w:
                     if export_map_btn.collidepoint(mx, my):
                         trigger_map_png_export()
                         continue
@@ -5705,7 +6058,7 @@ def editor_main():
                         zoom_level = zoom_steps[zoom_idx]
                         cam_x = bg_w / 2
                         cam_y = bg_h / 2
-                
+                        _flow_refresh_entity_list()
                 # [2. 좌측 리스트 클릭] (왼쪽 버튼만 — 휠은 위에서 스크롤 전용 처리)
                 elif event.button == 1 and mx < sidebar_w:
                     if edit_mode == "MAP":
@@ -5799,31 +6152,7 @@ def editor_main():
                                     zone_modal_scroll = 0
                                     zone_modal_dd_open = False
                                     active_zone_field = None
-                                    zone_fields = {
-                                        "name": str(z.get("name", "") or ""),
-                                        "event_id": str(z.get("event_id", "") or ""),
-                                        "target": str(z.get("target", "") or ""),
-                                        "trigger": str(z.get("trigger", "contact_player") or "contact_player"),
-                                        "cond_mainprogress": str((z.get("conditions", {}) or {}).get("mainprogress", "") or ""),
-                                        "cond_min_laugh_point": str((z.get("conditions", {}) or {}).get("min_laugh_point", "") or ""),
-                                        # NOTE: cond_opt는 dict→문자열로 보여주되, 저장 시 {"...": ...} 형태 입력을 기대
-                                        "cond_opt": "",
-                                        "rect": list(z.get("rect")) if isinstance(z.get("rect"), (list, tuple)) else None,
-                                    }
-                                    # 추가 조건(옵션) 보여주기: mainprogress/min_laugh_point 제외
-                                    try:
-                                        cond = dict(z.get("conditions", {}) or {})
-                                        cond.pop("mainprogress", None)
-                                        cond.pop("min_laugh_point", None)
-                                        if cond:
-                                            # 사용자가 {"k":1} 말고 "k":1 형태로 넣을 수 있게 내부만 표시
-                                            import json
-                                            zone_fields["cond_opt"] = ", ".join(
-                                                [json.dumps(k, ensure_ascii=False) + ": " + json.dumps(v, ensure_ascii=False) for k, v in cond.items()]
-                                            )
-                                    except:
-                                        pass
-
+                                    zone_fields = _editor_zone_fields_from_zone_dict(z)
                                     selected_zone_idx = idx
                                     is_zone_dragging = False
                                 elif row_rect.collidepoint(mx, my):
@@ -5884,10 +6213,12 @@ def editor_main():
                         if row:
                             if row["kind"] == "header":
                                 key = row["label"]
-                                if key in left_placed_collapsed:
-                                    left_placed_collapsed.discard(key)
-                                else:
-                                    left_placed_collapsed.add(key)
+                                _editor_toggle_collapsed(
+                                    editor_ui_state,
+                                    EDITOR_UI_COLLAPSE_MAP_LEFT,
+                                    left_placed_collapsed,
+                                    key,
+                                )
                             else:
                                 target = row["node"]
                                 selected_node = target
@@ -5897,11 +6228,28 @@ def editor_main():
                     elif edit_mode == "FLOW":
                         list_start_y = left_list_tops["flow"]
                         idx = (my - list_start_y - scroll_y_left) // LINE_H
-                        if 0 <= idx < len(flow_var_names):
-                            flow_selected_var = flow_var_names[int(idx)]
-                            flow_scroll_x = 0
-                            flow_scroll_y = 0
-                            _flow_rebuild_graph()
+                        placed_rows = _editor_filter_collapsed_rows(
+                            _editor_flow_catalog_rows(flow.world_data, map_id),
+                            flow_placed_collapsed,
+                        )
+                        row = _editor_list_row_at(placed_rows, idx)
+                        if row:
+                            if row["kind"] == "header":
+                                key = row["label"]
+                                _editor_toggle_collapsed(
+                                    editor_ui_state,
+                                    EDITOR_UI_COLLAPSE_FLOW_LEFT,
+                                    flow_placed_collapsed,
+                                    key,
+                                )
+                            elif row["kind"] in ("npc", "obj", "zone"):
+                                for i, ent in enumerate(flow_entity_entries):
+                                    if _editor_flow_row_matches_entry(row, ent):
+                                        flow_selected_entity_idx = i
+                                        break
+                                flow_scroll_x = 0
+                                flow_scroll_y = 0
+                                _flow_rebuild_graph()
 
                     elif edit_mode == "EVENT":
                         add_rect_click = pygame.Rect(8, EVENT_ADD_Y, sidebar_w - 16, EVENT_ADD_H)
@@ -5975,14 +6323,15 @@ def editor_main():
                                                 save_data={"current_map": preview_map}
                                             )
                                             scaled_cache.clear()
+                                            _flow_refresh_entity_list()
                                             print(f"Map Switched to: {preview_map} for Event: {eid}")
                                         print(f"Event Selected: {eid}")
                                     y_ptr += LINE_H
 
                 # [3. 우측 사이드바 클릭]
-                elif event.button == 1 and mx > SCREEN_W - right_sidebar_w:
+                elif event.button == 1 and mx > SCREEN_W - right_panel_w:
                     if edit_mode == "MAP":
-                        _tx = SCREEN_W - right_sidebar_w
+                        _tx = SCREEN_W - right_panel_w
                         _thumb_toggle_rect = pygame.Rect(_tx + 4, 6, right_sidebar_w - 8, 34)
                         if _thumb_toggle_rect.collidepoint(mx, my):
                             editor_smooth_sidebar_thumbs = not editor_smooth_sidebar_thumbs
@@ -5997,7 +6346,7 @@ def editor_main():
                                 sidebar_w=sidebar_w,
                                 event_preview_sel=event_preview_sel,
                             )
-                            _panel_x = SCREEN_W - right_sidebar_w
+                            _panel_x = SCREEN_W - right_panel_w
                             found_asset = None
                             curr_y = 0
                             for line in _editor_right_map_lines(
@@ -6021,10 +6370,12 @@ def editor_main():
                                 if row_rect.collidepoint(mx, my) and row_y_abs < _vb_clk:
                                     if line["kind"] == "header":
                                         cat = line["cat"]
-                                        if cat in right_asset_collapsed:
-                                            right_asset_collapsed.discard(cat)
-                                        else:
-                                            right_asset_collapsed.add(cat)
+                                        _editor_toggle_collapsed(
+                                            editor_ui_state,
+                                            EDITOR_UI_COLLAPSE_MAP_RIGHT,
+                                            right_asset_collapsed,
+                                            cat,
+                                        )
                                         break
                                     found_asset = line["name"]
                                     break
@@ -6038,7 +6389,7 @@ def editor_main():
                     elif edit_mode == "EVENT":
                         # --- 이벤트 모드: 스텝 선택 / View / Insert(+) / Add Step ---
                         if current_event_id and current_event_type:
-                            base_x = SCREEN_W - right_sidebar_w
+                            base_x = SCREEN_W - right_panel_w
                             steps = all_events[current_event_type][current_event_id].get('steps', [])
 
                             # [+ ADD STEP] 버튼 클릭 (맨 아래)
@@ -6247,7 +6598,7 @@ def editor_main():
 
                 # [4. 중앙 작업창 클릭]
                 else:
-                    in_map_area = (sidebar_w < mx < SCREEN_W - right_sidebar_w) and (my > TOP_BAR_H)
+                    in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                     if event.type == pygame.MOUSEBUTTONDOWN and in_map_area and event.button == 3:
                         if edit_mode == "FLOW":
                             flow_panning = True
@@ -6573,7 +6924,8 @@ def editor_main():
                     TOP_BAR_H,
                     EVENT_LIST_START_Y,
                     left_placed_collapsed,
-                    flow_var_names=flow_var_names,
+                    flow_entity_entries=flow_entity_entries,
+                    flow_placed_collapsed=flow_placed_collapsed,
                 )
                 _sb = _sidebar_sb_rect(0, sidebar_w, _lt, sidebar_list_bottom)
                 _ui = _step_overlay_scrollbar_layout(_sb, SCREEN_H - _lt, _lch, -scroll_y_left)
@@ -6596,7 +6948,7 @@ def editor_main():
                         event_preview_sel=event_preview_sel,
                     )
                     scroll_y_right = _sidebar_scroll_clamp(scroll_y_right, _rch, _rt, _vb)
-                    _sb = _sidebar_sb_rect(SCREEN_W - right_sidebar_w, right_sidebar_w, _rt, _vb)
+                    _sb = _sidebar_sb_rect(SCREEN_W - right_panel_w, right_sidebar_w, _rt, _vb)
                     _ui = _step_overlay_scrollbar_layout(_sb, _vb - _rt, _rch, -scroll_y_right)
                     _ns = _sidebar_sb_scroll_from_my(event.pos[1], _ui)
                     if _ns is not None:
@@ -6605,7 +6957,7 @@ def editor_main():
                     _steps = all_events[current_event_type][current_event_id].get("steps", [])
                     _rt, _rch, _vb = EDITOR_RIGHT_STEPS_TOP, len(_steps) * LINE_H + 40, sidebar_list_bottom
                     scroll_y_steps = _sidebar_scroll_clamp(scroll_y_steps, _rch, _rt, _vb)
-                    _sb = _sidebar_sb_rect(SCREEN_W - right_sidebar_w, right_sidebar_w, _rt, _vb)
+                    _sb = _sidebar_sb_rect(SCREEN_W - right_panel_w, right_sidebar_w, _rt, _vb)
                     _ui = _step_overlay_scrollbar_layout(_sb, _vb - _rt, _rch, -scroll_y_steps)
                     _ns = _sidebar_sb_scroll_from_my(event.pos[1], _ui)
                     if _ns is not None:
@@ -6620,7 +6972,7 @@ def editor_main():
 
             if event.type == pygame.MOUSEWHEEL:
                 if mx < sidebar_w: # 좌측 리스트 휠 (스크롤만)
-                    scroll_y_left += event.y * 30
+                    scroll_y_left += event.y * EDITOR_SIDEBAR_WHEEL_STEP
                     _lt, _lch = _editor_left_list_metrics(
                         edit_mode,
                         map_tool,
@@ -6633,22 +6985,17 @@ def editor_main():
                         TOP_BAR_H,
                         EVENT_LIST_START_Y,
                         left_placed_collapsed,
-                        flow_var_names=flow_var_names,
+                        flow_entity_entries=flow_entity_entries,
+                        flow_placed_collapsed=flow_placed_collapsed,
                     )
                     scroll_y_left = _sidebar_scroll_clamp(scroll_y_left, _lch, _lt, sidebar_list_bottom)
                     continue
                 elif (
                     edit_mode == "FLOW"
-                    and sidebar_w < mx < SCREEN_W - right_sidebar_w
+                    and sidebar_w < mx < SCREEN_W - right_panel_w
                     and my > TOP_BAR_H
                 ):
-                    dy = getattr(event, "precise_y", None)
-                    if dy is not None:
-                        delta = int(round(-float(dy) * 40))
-                    else:
-                        delta = -int(event.y) * 30
-                    if delta == 0 and event.y:
-                        delta = -int(event.y) * 30
+                    delta = _editor_wheel_delta(event, step=EDITOR_SIDEBAR_WHEEL_STEP)
                     cw, ch = _editor_flow_diagram_content_size(flow_graph, map_area_w)
                     vh = max(1, map_view_h - 20)
                     if is_shift_pressed:
@@ -6660,9 +7007,9 @@ def editor_main():
                             0, min(max(0, ch - vh), flow_scroll_y + delta)
                         )
                     continue
-                elif mx > SCREEN_W - right_sidebar_w: # 우측 리스트 휠
+                elif mx > SCREEN_W - right_panel_w: # 우측 리스트 휠
                     if edit_mode == "MAP":
-                        scroll_y_right += event.y * 30
+                        scroll_y_right += event.y * EDITOR_SIDEBAR_WHEEL_STEP
                         _rt, _rch = 45, _editor_right_map_content_height(
                             categories, LINE_H, right_asset_collapsed
                         )
@@ -6676,7 +7023,7 @@ def editor_main():
                         )
                         scroll_y_right = _sidebar_scroll_clamp(scroll_y_right, _rch, _rt, _vb)
                     else:
-                        scroll_y_steps += event.y * 30
+                        scroll_y_steps += event.y * EDITOR_SIDEBAR_WHEEL_STEP
                         if current_event_id and current_event_type:
                             _steps = all_events[current_event_type][current_event_id].get("steps", [])
                             scroll_y_steps = _sidebar_scroll_clamp(
@@ -6951,14 +7298,25 @@ def editor_main():
                         )
 
                 if on_map:
-                    map_surf.blit(s_img, (final_x, final_y))
-                    if o in selected_nodes:
-                        pygame.draw.rect(
+                    hidden = _editor_entity_play_hidden(o)
+                    if hidden:
+                        _editor_draw_hidden_entity_ghost(
                             map_surf,
-                            (255, 255, 0),
-                            (final_x, final_y, s_img.get_width(), s_img.get_height()),
-                            2,
+                            s_img,
+                            final_x,
+                            final_y,
+                            selected=(o in selected_nodes),
                         )
+                    else:
+                        map_surf.blit(s_img, (final_x, final_y))
+                    if o in selected_nodes:
+                        if not hidden:
+                            pygame.draw.rect(
+                                map_surf,
+                                (255, 255, 0),
+                                (final_x, final_y, s_img.get_width(), s_img.get_height()),
+                                2,
+                            )
                         if edit_mode == "MAP" and o is not player:
                             try:
                                 from char_behavior import npc_interact_enabled
@@ -7259,7 +7617,7 @@ def editor_main():
 
 
         # 고스트(미리보기)
-        if selected_asset and sidebar_w < mx < SCREEN_W - right_sidebar_w and my > TOP_BAR_H:
+        if selected_asset and sidebar_w < mx < SCREEN_W - right_panel_w and my > TOP_BAR_H:
                 gzx, gzy = world_to_map_surface_xy(
                     bg_blit_x, bg_blit_y, float(swx), float(swy), bg_w, bg_h, sw_bg, sh_bg, 0.0
                 )
@@ -7305,7 +7663,7 @@ def editor_main():
 
 
         # 스텝 좌표 픽(Pos / WP+): 격자 스냅 위치 미리보기 (Shift=미세)
-        if (is_picking_step_pos or is_picking_step_waypoints) and sidebar_w < mx < SCREEN_W - right_sidebar_w and my > TOP_BAR_H:
+        if (is_picking_step_pos or is_picking_step_waypoints) and sidebar_w < mx < SCREEN_W - right_panel_w and my > TOP_BAR_H:
                 prx, pry = editor_snap_pick_world_xy(wx, wy, GRID_SIZE, is_shift_pressed)
                 gzx, gzy = world_to_map_surface_xy(
                     bg_blit_x, bg_blit_y, float(prx), float(pry), bg_w, bg_h, sw_bg, sh_bg, 0.0
@@ -7619,26 +7977,72 @@ def editor_main():
                     screen.blit(font.render("View", True, (220, 230, 255)), (vb.x + 4, vb.y + 2))
 
         elif edit_mode == "FLOW":
-            screen.blit(title_font.render("PROGRESS VARS", True, (255, 230, 180)), (10, TOP_BAR_H + 8))
             screen.blit(
-                font.render("클릭=선택 · 우클릭드래그=패닝", True, (130, 145, 165)),
-                (10, TOP_BAR_H + 30),
+                title_font.render("캐릭터 / 오브젝트 / 이벤트박스", True, (255, 230, 180)),
+                (10, TOP_BAR_H + 6),
+            )
+            screen.blit(
+                font.render("타입 전체 + 현재 맵 이벤트박스 · 클릭 → 차트", True, (130, 145, 165)),
+                (10, TOP_BAR_H + 26),
+            )
+            screen.blit(
+                font.render("휠=차트 스크롤 · Shift+휠=가로 · 드래그=이동", True, (110, 125, 145)),
+                (10, TOP_BAR_H + 44),
             )
             list_start_y = left_list_tops["flow"]
-            for i, vname in enumerate(flow_var_names):
+            placed_rows = _editor_filter_collapsed_rows(
+                _editor_flow_catalog_rows(flow.world_data, map_id),
+                flow_placed_collapsed,
+            )
+            for i, row in enumerate(placed_rows):
                 item_y = list_start_y + (i * LINE_H) + scroll_y_left
-                if not (TOP_BAR_H + 40 < item_y < sidebar_list_bottom):
+                if not (TOP_BAR_H + 28 < item_y < sidebar_list_bottom):
                     continue
-                sel = vname == flow_selected_var
-                col = (255, 255, 0) if sel else (190, 195, 210)
-                n_ev = flow_var_node_counts.get(vname, 0)
-                label = f"{'>' if sel else ' '} {vname}  (노드 {n_ev})"
-                row_rect = pygame.Rect(8, item_y, sidebar_w - 16, LINE_H)
-                screen.blit(font.render(label, True, col), (10, item_y + 4))
+                label_x = 8
+                if row["kind"] == "header":
+                    key = row["label"]
+                    mark = _editor_collapse_mark(flow_placed_collapsed, key)
+                    hdr = f"{mark} {key}"
+                    hdr_rect = pygame.Rect(label_x, item_y, sidebar_w - 16, LINE_H)
+                    hdr_color = (255, 215, 120) if key == FLOW_EVENT_LINKED_HEADER else (180, 220, 255)
+                    screen.blit(title_font.render(hdr, True, hdr_color), (label_x + 4, item_y + 2))
+                    if _editor_sidebar_list_tooltip_ok(
+                        show_event_config, show_zone_config, show_bgzone_config, show_step_config, show_multi_delete_confirm
+                    ) and hdr_rect.collidepoint(mx, my):
+                        sidebar_list_tooltip = (mx, my, "클릭: 접기/펼치기")
+                    continue
+                sel = False
+                rname = row.get("name")
+                rkind = row.get("kind")
+                if 0 <= flow_selected_entity_idx < len(flow_entity_entries):
+                    se = flow_entity_entries[flow_selected_entity_idx]
+                    sel = _editor_flow_row_matches_entry(row, se)
+                ent_meta = None
+                for ent in flow_entity_entries:
+                    if _editor_flow_row_matches_entry(row, ent):
+                        ent_meta = ent
+                        break
+                if rkind == "zone":
+                    col = (255, 255, 0) if sel else (150, 210, 150)
+                elif (ent_meta or {}).get("event_ids"):
+                    col = (255, 255, 0) if sel else (220, 200, 140)
+                else:
+                    col = (255, 255, 0) if sel else (190, 195, 210)
+                prefix = ">" if sel else ("▣ " if rkind == "zone" else " ")
+                name = row.get("label") or rname or ""
+                n_ev = len((ent_meta or {}).get("event_ids") or [])
+                suffix = f"  ev×{n_ev}" if n_ev else ""
+                row_rect = pygame.Rect(label_x, item_y, sidebar_w - 16, LINE_H)
+                screen.blit(
+                    font.render(f"{prefix} {name}{suffix}", True, col),
+                    (label_x + 4, item_y + 4),
+                )
                 if _editor_sidebar_list_tooltip_ok(
                     show_event_config, show_zone_config, show_bgzone_config, show_step_config, show_multi_delete_confirm
                 ) and row_rect.collidepoint(mx, my):
-                    sidebar_list_tooltip = (mx, my, f"{vname}\n트리거 {n_ev}개")
+                    evs = ", ".join(sorted((ent_meta or {}).get("event_ids") or []))
+                    tip = f"{name}\n이벤트: {evs or '(없음)'}"
+                    sidebar_list_tooltip = (mx, my, tip)
 
         elif edit_mode == "EVENT":
             screen.blit(title_font.render("EVENT LIST", True, (200, 255, 200)), (10, TOP_BAR_H + 6))
@@ -7690,7 +8094,8 @@ def editor_main():
             TOP_BAR_H,
             EVENT_LIST_START_Y,
             left_placed_collapsed,
-            flow_var_names=flow_var_names,
+            flow_entity_entries=flow_entity_entries,
+            flow_placed_collapsed=flow_placed_collapsed,
         )
         scroll_y_left, _ = _editor_paint_sidebar_scrollbar(
             screen, 0, sidebar_w, _lt_sb, sidebar_list_bottom, _lch_sb, scroll_y_left
@@ -7710,21 +8115,13 @@ def editor_main():
 
 
 
-        # --- [6] UI: 우측 에셋 바 & 하단 상태 바 (기존 유지) ---
-        pygame.draw.rect(
-            screen, (45, 45, 45), (SCREEN_W - right_sidebar_w, TOP_BAR_H, right_sidebar_w, map_view_h)
-        )
-        if edit_mode == "FLOW":
-            screen.blit(
-                title_font.render("FLOW", True, (255, 230, 180)),
-                (SCREEN_W - right_sidebar_w + 12, TOP_BAR_H + 12),
+        # --- [6] UI: 우측 에셋 바 & 하단 상태 바 (FLOW는 좌측 목록+차트만) ---
+        if right_panel_w > 0:
+            pygame.draw.rect(
+                screen, (45, 45, 45), (SCREEN_W - right_panel_w, TOP_BAR_H, right_panel_w, map_view_h)
             )
-            screen.blit(
-                font.render("차트 상자 클릭 → 설정", True, (150, 160, 175)),
-                (SCREEN_W - right_sidebar_w + 12, TOP_BAR_H + 36),
-            )
-        elif edit_mode == "MAP":
-            _rbx = SCREEN_W - right_sidebar_w
+        if edit_mode == "MAP" and right_panel_w > 0:
+            _rbx = SCREEN_W - right_panel_w
             thumb_toggle_draw = pygame.Rect(_rbx + 4, 6, right_sidebar_w - 8, 34)
             pygame.draw.rect(screen, (52, 56, 72), thumb_toggle_draw)
             pygame.draw.rect(
@@ -7746,7 +8143,7 @@ def editor_main():
             )
             _rt_draw = _editor_right_map_list_top()
             y_ptr = _rt_draw + scroll_y_right
-            _rbx_list = SCREEN_W - right_sidebar_w
+            _rbx_list = SCREEN_W - right_panel_w
 
             for line in _editor_right_map_lines(categories, right_asset_collapsed):
                 if line["kind"] == "header":
@@ -7802,14 +8199,14 @@ def editor_main():
                 categories, LINE_H, right_asset_collapsed
             )
             scroll_y_right, _ = _editor_paint_sidebar_scrollbar(
-                screen, SCREEN_W - right_sidebar_w, right_sidebar_w, _rt_sb, _vb, _rch_sb, scroll_y_right
+                screen, SCREEN_W - right_panel_w, right_sidebar_w, _rt_sb, _vb, _rch_sb, scroll_y_right
             )
 
-        else: # [신규] EVENT 모드일 때 우측 화면
+        elif edit_mode == "EVENT" and right_panel_w > 0:
             if current_event_id:
                 # 선택된 이벤트 정보 표시
                 evt_title = all_events[current_event_type][current_event_id].get('title', 'No Title')
-                _hdr_x = SCREEN_W - right_sidebar_w + 10
+                _hdr_x = SCREEN_W - right_panel_w + 10
                 _hdr_w = max(40, right_sidebar_w - 20)
                 ev_line = f"EVENT: {current_event_id}"
                 ev_vis, _he = _editor_truncate_text_to_width(title_font, ev_line, _hdr_w)
@@ -7818,7 +8215,7 @@ def editor_main():
                 tl_vis, _te = _editor_truncate_text_to_width(font, title_line, _hdr_w)
                 screen.blit(font.render(tl_vis, True, (200, 200, 200)), (_hdr_x, 70))
                 
-                pygame.draw.line(screen, (100, 100, 100), (SCREEN_W - right_sidebar_w + 5, 95), (SCREEN_W - 5, 95))
+                pygame.draw.line(screen, (100, 100, 100), (SCREEN_W - right_panel_w + 5, 95), (SCREEN_W - 5, 95))
                 
                 # [스텝 리스트 출력 시작]
                 steps = all_events[current_event_type][current_event_id].get('steps', [])
@@ -7828,7 +8225,7 @@ def editor_main():
                     color = (255, 255, 0) if i == selected_step_idx else (180, 180, 180)
                     vb = pygame.Rect(SCREEN_W - 60, s_y + 2, 50, LINE_H - 6)
                     if 90 < s_y < sidebar_list_bottom:
-                        _rbx_step = SCREEN_W - right_sidebar_w
+                        _rbx_step = SCREEN_W - right_panel_w
                         _tx_step = _rbx_step + 15
                         _vb_x = SCREEN_W - 60
                         max_sw = max(24, _vb_x - 6 - _tx_step)
@@ -7843,7 +8240,7 @@ def editor_main():
                             sidebar_list_tooltip = (mx, my, step_tooltip)
                     # 삽입(+) 버튼 (스텝 사이)
                     if i > 0:
-                        ins = pygame.Rect(SCREEN_W - right_sidebar_w + 10, s_y - 12, 18, 18)
+                        ins = pygame.Rect(SCREEN_W - right_panel_w + 10, s_y - 12, 18, 18)
                         if 90 < s_y < sidebar_list_bottom:
                             pygame.draw.rect(screen, (60, 60, 60), ins)
                             pygame.draw.rect(screen, (120, 120, 120), ins, 1)
@@ -7862,19 +8259,19 @@ def editor_main():
                     s_y += LINE_H
                 
                 # [+] 스텝 추가 버튼 (임시 시각화)
-                add_step_rect = pygame.Rect(SCREEN_W - right_sidebar_w + 10, s_y + 12, 120, 26)
+                add_step_rect = pygame.Rect(SCREEN_W - right_panel_w + 10, s_y + 12, 120, 26)
                 if add_step_rect.y < SCREEN_H - 10:
                     pygame.draw.rect(screen, (60, 80, 60), add_step_rect)
                     pygame.draw.rect(screen, (120, 160, 120), add_step_rect, 1)
                     screen.blit(font.render("+ ADD STEP", True, (255, 255, 255)), (add_step_rect.x + 10, add_step_rect.y + 5))
             else:
-                screen.blit(font.render("Select an event from left", True, (120, 120, 120)), (SCREEN_W - right_sidebar_w + 10, 100))
+                screen.blit(font.render("Select an event from left", True, (120, 120, 120)), (SCREEN_W - right_panel_w + 10, 100))
 
             if current_event_id and current_event_type:
                 _steps_sb = all_events[current_event_type][current_event_id].get("steps", [])
                 scroll_y_steps, _ = _editor_paint_sidebar_scrollbar(
                     screen,
-                    SCREEN_W - right_sidebar_w,
+                    SCREEN_W - right_panel_w,
                     right_sidebar_w,
                     EDITOR_RIGHT_STEPS_TOP,
                     sidebar_list_bottom,
@@ -7988,7 +8385,7 @@ def editor_main():
                 pygame.draw.rect(screen, (48, 42, 70), btn_oi)
                 pygame.draw.rect(screen, (150, 140, 200), btn_oi, 1)
                 screen.blit(font.render("맵 이벤트", True, (230, 225, 255)), (btn_oi.x + 10, btn_oi.y + 4))
-            hint = "NPC: [A]bindings→연출 [B]대사=progress·char_defs · OBJ: bindings"
+            hint = "NPC/OBJ: [C]spawn [D]progress [A]bindings · 숨김=청색 윤곽 고스트"
             screen.blit(font.render(hint, True, (120, 135, 160)), (ix, L["bar"].bottom - 16))
 
         # [하단 상태바] - 레이어 최상단에 배치하여 가림 방지
@@ -8007,8 +8404,9 @@ def editor_main():
                     status_txt += " | 높이·틸트: 바로 위 회색 줄"
             else:
                 status_txt += f" | SELECTED x{len(selected_nodes)}"
-        if edit_mode == "FLOW" and flow_selected_var:
-            status_txt += f" | FLOW: {flow_selected_var}"
+        if edit_mode == "FLOW" and 0 <= flow_selected_entity_idx < len(flow_entity_entries):
+            se = flow_entity_entries[flow_selected_entity_idx]
+            status_txt += f" | FLOW: {se.get('label', se.get('name', ''))}"
         if edit_mode == "EVENT" and current_event_id and current_event_type:
             stp = all_events[current_event_type][current_event_id].get("steps", [])
             upi = _preview_upto_index(
@@ -8249,6 +8647,14 @@ def editor_main():
 
             y_off = panel_rect.y + 20
             screen.blit(title_font.render("STEP SETTINGS", True, (255, 255, 255)), (panel_rect.x + 20, y_off))
+            screen.blit(
+                font.render(
+                    "※ 이벤트 한 단계 = 스텝. 위 Type 변경 후 아래 필드 입력 → SAVE",
+                    True,
+                    (120, 155, 130),
+                ),
+                (panel_rect.x + 20, y_off + 28),
+            )
 
             # Type
             y_off += 50
@@ -8465,6 +8871,7 @@ def editor_main():
                 screen.blit(font.render("DELETE", True, (255, 255, 255)), (delete_btn.x + 18, delete_btn.y + 7))
             screen.blit(font.render("SAVE", True, (255, 255, 255)), (save_btn.x + 25, save_btn.y + 7))
             screen.blit(font.render("CANCEL", True, (255, 255, 255)), (canc_btn.x + 15, canc_btn.y + 7))
+            _editor_paint_modal_scroll_hint(screen, font, panel_rect)
 
             # 삭제 확인 모달
             if show_step_delete_confirm:

@@ -19,9 +19,223 @@ BEHAVIOR_OPTS = [
     ("flee", "flee"),
     ("frozen", "frozen"),
 ]
-BIND_SLOT_COUNT = 3
-TALK_LINE_COUNT = 4
+DEFAULT_BIND_SLOTS = 3
+DEFAULT_TALK_LINES = 4
+DEFAULT_PROGRESS_RULES = 4
+MAX_EXPAND_SLOTS = 32
+# 하위 호환 별칭
+BIND_SLOT_COUNT = DEFAULT_BIND_SLOTS
+TALK_LINE_COUNT = DEFAULT_TALK_LINES
+PROGRESS_RULE_COUNT = DEFAULT_PROGRESS_RULES
+VISIBLE_OPTS = [("—", ""), ("Yes", "true"), ("No", "false")]
+ANIM_MODE_OPTS = [("—", ""), ("hold", "hold"), ("once", "once")]
+DIR_OPTS = [("—", ""), ("left", "left"), ("right", "right")]
 
+
+def _max_numbered_slot(fields: dict, prefix: str) -> int:
+    """fields 키에서 prefix{N}_ 패턴의 최대 N."""
+    pat = re.compile(rf"^{re.escape(prefix)}(\d+)_")
+    max_n = 0
+    for k in fields:
+        m = pat.match(k)
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return max_n
+
+
+def _add_btn_row(label: str, add_id: str) -> tuple:
+    return (label, add_id, "add_btn")
+
+
+def _init_bind_slot_fields(fields: dict, n: int) -> None:
+    fields[f"bind{n}_cond"] = ""
+    fields[f"bind{n}_event"] = ""
+    fields[f"bind{n}_pri"] = "100"
+    fields[f"bind{n}_after"] = ""
+    fields[f"bind{n}_st_visible"] = ""
+    fields[f"bind{n}_st_anim"] = ""
+    fields[f"bind{n}_st_anim_mode"] = ""
+
+
+def _init_talk_line_fields(fields: dict, n: int) -> None:
+    fields[f"line{n}_when"] = ""
+    fields[f"line{n}_text"] = ""
+    fields[f"line{n}_after"] = ""
+
+
+def _init_prog_rule_fields(fields: dict, slot_prefix: str, n: int) -> None:
+    p = f"{slot_prefix}{n}_"
+    fields[f"{p}when"] = ""
+    _state_patch_to_fields({}, fields, p)
+
+
+def _default_slot_counts() -> Dict[str, int]:
+    return {
+        "bind": DEFAULT_BIND_SLOTS,
+        "talk": DEFAULT_TALK_LINES,
+        "prog": DEFAULT_PROGRESS_RULES,
+        "inst_prog": DEFAULT_PROGRESS_RULES,
+    }
+
+
+def _opt_bool_field(val, default_empty="") -> str:
+    if val is None:
+        return default_empty
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    return str(val).strip().lower() if str(val).strip() else default_empty
+
+
+def _parse_opt_bool(s) -> Optional[bool]:
+    t = str(s or "").strip().lower()
+    if not t or t == "—":
+        return None
+    return t in ("true", "1", "yes")
+
+
+def _state_patch_to_fields(patch: dict, fields: dict, prefix: str) -> None:
+    """spawn_state / binding.state / progress 규칙 → 에디터 필드."""
+    p = patch or {}
+    fields[f"{prefix}visible"] = _opt_bool_field(p.get("visible"), "")
+    fields[f"{prefix}spawn"] = _opt_bool_field(p.get("spawn"), "")
+    fields[f"{prefix}anim"] = str(p.get("anim") or p.get("state") or "")
+    fields[f"{prefix}anim_mode"] = str(p.get("anim_mode") or p.get("mode") or "")
+    fields[f"{prefix}change_to"] = str(p.get("change_to") or p.get("to") or "")
+    fields[f"{prefix}dir"] = str(p.get("dir") or p.get("face") or "")
+
+
+def _state_patch_from_fields(fields: dict, prefix: str) -> Optional[dict]:
+    """에디터 필드 → 상태 패치 dict (비어 있으면 None)."""
+    out: dict = {}
+    vis = _parse_opt_bool(fields.get(f"{prefix}visible"))
+    if vis is not None:
+        out["visible"] = vis
+    sp = _parse_opt_bool(fields.get(f"{prefix}spawn"))
+    if sp is not None:
+        out["spawn"] = sp
+    anim = str(fields.get(f"{prefix}anim") or "").strip()
+    if anim:
+        out["anim"] = anim
+    mode = str(fields.get(f"{prefix}anim_mode") or "").strip()
+    if mode:
+        out["anim_mode"] = mode
+    ct = str(fields.get(f"{prefix}change_to") or "").strip()
+    if ct:
+        out["change_to"] = ct
+    d = str(fields.get(f"{prefix}dir") or "").strip().lower()
+    if d in ("left", "right"):
+        out["dir"] = d
+    return out if out else None
+
+
+def _progress_apply_to_fields(rules: list, fields: dict, *, slot_prefix: str = "prog") -> None:
+    rule_count = max(
+        DEFAULT_PROGRESS_RULES,
+        len(rules or []),
+        _max_numbered_slot(fields, slot_prefix),
+    )
+    for i in range(1, rule_count + 1):
+        fields[f"{slot_prefix}{i}_when"] = ""
+        _state_patch_to_fields({}, fields, f"{slot_prefix}{i}_")
+    for i, row in enumerate(rules or []):
+        if not isinstance(row, dict):
+            continue
+        n = i + 1
+        p = f"{slot_prefix}{n}_"
+        cond = row.get("when")
+        if cond is None:
+            cond = row.get("condition")
+        fields[f"{p}when"] = str(cond or "").strip()
+        st = row.get("state") if isinstance(row.get("state"), dict) else row
+        if isinstance(st, dict):
+            _state_patch_to_fields(st, fields, p)
+        else:
+            _state_patch_to_fields({}, fields, p)
+
+
+def _progress_apply_from_fields(fields: dict, *, slot_prefix: str = "prog") -> Optional[list]:
+    rules = []
+    rule_count = max(DEFAULT_PROGRESS_RULES, _max_numbered_slot(fields, slot_prefix))
+    for i in range(1, rule_count + 1):
+        p = f"{slot_prefix}{i}_"
+        when = str(fields.get(f"{p}when") or "").strip()
+        if not when:
+            continue
+        row: dict = {"when": when}
+        patch = _state_patch_from_fields(fields, p)
+        if patch:
+            row.update(patch)
+        rules.append(row)
+    return rules if rules else None
+
+
+def _spawn_editor_rows(*, spawn_prefix: str = "spawn_") -> list:
+    return [
+        (
+            "── [C] spawn_state — 맵에 처음 나타날 때의 모습 (저장 후 맵 다시 열면 적용) ──",
+            "_hint_spawn",
+            "hint",
+        ),
+        ("  visible — false면 플레이 중 안 보임 (에디터는 윤곽으로 표시)", f"{spawn_prefix}visible", "dropdown", VISIBLE_OPTS),
+        ("  dir — 바라보는 방향 left / right", f"{spawn_prefix}dir", "dropdown", DIR_OPTS),
+        ("  anim — idle, walk 등 애니 이름", f"{spawn_prefix}anim", "text"),
+        ("  anim_mode — hold=계속, once=한 번 재생", f"{spawn_prefix}anim_mode", "dropdown", ANIM_MODE_OPTS),
+    ]
+
+
+def _progress_editor_rows(
+    *,
+    prog_prefix: str = "prog",
+    rule_count: int = DEFAULT_PROGRESS_RULES,
+    with_add: bool = True,
+) -> list:
+    rows = [
+        (
+            "── [D] progress_apply — 세이브의 progress 숫자에 따라 자동으로 모습 변경 ──",
+            "_hint_prog",
+            "hint",
+        ),
+        (
+            "  when 예: progress_flower1_1 == 1003 · 위에서 아래로 첫 번째 맞는 규칙만 적용",
+            "_hint_prog2",
+            "hint",
+        ),
+    ]
+    for i in range(1, rule_count + 1):
+        p = f"{prog_prefix}{i}_"
+        rows.append((f"  규칙{i} when", f"{p}when", "text"))
+        rows.append((f"  규칙{i} visible", f"{p}visible", "dropdown", VISIBLE_OPTS))
+        rows.append((f"  규칙{i} anim", f"{p}anim", "text"))
+        rows.append((f"  규칙{i} anim_mode", f"{p}anim_mode", "dropdown", ANIM_MODE_OPTS))
+        rows.append((f"  규칙{i} change_to", f"{p}change_to", "text"))
+        rows.append((f"  규칙{i} dir", f"{p}dir", "dropdown", DIR_OPTS))
+    if with_add:
+        rows.append(_add_btn_row("+ 단계 추가", f"_add:prog:{prog_prefix}"))
+    return rows
+
+
+def _spawn_progress_editor_rows(*, spawn_prefix: str = "spawn_", prog_prefix: str = "prog") -> list:
+    """char_defs / object_defs 공통 — [C] 초기값 · [D] progress_apply."""
+    rows = _spawn_editor_rows(spawn_prefix=spawn_prefix)
+    rows.extend(_progress_editor_rows(prog_prefix=prog_prefix))
+    return rows
+
+
+def _binding_inline_rows(*, bind_count: int = DEFAULT_BIND_SLOTS) -> list:
+    """bindings 슬롯 — 이벤트 ID 또는 인라인 state/after."""
+    rows = [
+        (
+            "  ※ 이벤트 ID를 비우면 아래 state/after 만 즉시 적용 (events.json 없이)",
+            "_hint_bind_inline",
+            "hint",
+        ),
+    ]
+    for i in range(1, bind_count + 1):
+        rows.append((f"  #{i} after (progress)", f"bind{i}_after", "text"))
+        rows.append((f"  #{i} state visible", f"bind{i}_st_visible", "dropdown", VISIBLE_OPTS))
+        rows.append((f"  #{i} state anim", f"bind{i}_st_anim", "text"))
+        rows.append((f"  #{i} state anim_mode", f"bind{i}_st_anim_mode", "dropdown", ANIM_MODE_OPTS))
+    return rows
 
 def _format_talk_when(when: Any) -> str:
     if when is None:
@@ -69,20 +283,40 @@ def _parse_talk_after(s: str) -> Any:
 
 
 def _bindings_to_slot_fields(bindings, fields: dict) -> None:
-    for i in range(1, BIND_SLOT_COUNT + 1):
-        fields[f"bind{i}_cond"] = ""
-        fields[f"bind{i}_event"] = ""
-        fields[f"bind{i}_pri"] = "100"
+    bind_count = max(
+        DEFAULT_BIND_SLOTS,
+        len(bindings or []),
+        _max_numbered_slot(fields, "bind"),
+    )
+    for i in range(1, bind_count + 1):
+        _init_bind_slot_fields(fields, i)
     for i, b in enumerate(bindings or []):
-        if i >= BIND_SLOT_COUNT or not isinstance(b, dict):
-            break
+        if not isinstance(b, dict):
+            continue
         n = i + 1
         fields[f"bind{n}_cond"] = str(b.get("condition") or "")
         fields[f"bind{n}_event"] = str(b.get("event_id") or "")
+        fields[f"bind{n}_after"] = _format_talk_after(b.get("after"))
         try:
             fields[f"bind{n}_pri"] = str(int(b.get("priority", 100)))
         except (TypeError, ValueError):
             fields[f"bind{n}_pri"] = "100"
+        st = b.get("state") if isinstance(b.get("state"), dict) else None
+        if not st:
+            st = {
+                k: b.get(k)
+                for k in ("visible", "anim", "anim_mode", "change_to", "dir", "spawn")
+                if k in b
+            }
+            st = st or None
+        if isinstance(st, dict):
+            fields[f"bind{n}_st_visible"] = _opt_bool_field(st.get("visible"), "")
+            fields[f"bind{n}_st_anim"] = str(st.get("anim") or st.get("state") or "")
+            fields[f"bind{n}_st_anim_mode"] = str(st.get("anim_mode") or st.get("mode") or "")
+
+
+def _binding_inline_state_from_fields(fields: dict, slot: int) -> Optional[dict]:
+    return _state_patch_from_fields(fields, f"bind{slot}_st_")
 
 
 def _interact_enabled_field(inter: dict) -> str:
@@ -93,14 +327,25 @@ def _interact_enabled_field(inter: dict) -> str:
 
 def _bindings_from_slot_fields(fields: dict) -> list:
     out = []
-    for i in range(1, BIND_SLOT_COUNT + 1):
+    bind_count = max(DEFAULT_BIND_SLOTS, _max_numbered_slot(fields, "bind"))
+    for i in range(1, bind_count + 1):
+        cond = str(fields.get(f"bind{i}_cond") or "").strip()
         eid = str(fields.get(f"bind{i}_event") or "").strip()
-        if not eid:
+        after = _parse_talk_after(fields.get(f"bind{i}_after"))
+        st = _binding_inline_state_from_fields(fields, i)
+        if not cond and not eid and not after and not st:
             continue
-        row = {
-            "condition": str(fields.get(f"bind{i}_cond") or "").strip(),
-            "event_id": eid,
-        }
+        if not cond:
+            continue
+        row: dict = {"condition": cond}
+        if eid:
+            row["event_id"] = eid
+        if st:
+            row["state"] = st
+        if after:
+            row["after"] = after
+        if not eid and not st and not after:
+            continue
         pr_s = str(fields.get(f"bind{i}_pri") or "").strip()
         if pr_s:
             try:
@@ -143,10 +388,14 @@ def _interact_offset_into_dict(fields: dict, out: dict) -> None:
 
 def _interact_range_offset_rows() -> list:
     return [
-        ("상호작용 거리", "interact_range", "text"),
-        ("중심 X (발 기준 px)", "interact_offset_x", "text"),
-        ("중심 Y (발 기준 px)", "interact_offset_y", "text"),
-        ("※ 거리·offset 비우면 타입/전역 기본값", "_hint_interact_anchor", "hint"),
+        ("상호작용 거리 (픽셀)", "interact_range", "text"),
+        ("중심 X (발 위치 기준)", "interact_offset_x", "text"),
+        ("중심 Y (발 위치 기준, +는 아래)", "interact_offset_y", "text"),
+        (
+            "※ 거리·offset 을 비우면 char_defs / object_defs 기본값 사용",
+            "_hint_interact_anchor",
+            "hint",
+        ),
     ]
 
 
@@ -162,63 +411,125 @@ def _interact_dict_from_fields(fields: dict) -> dict:
     return out
 
 
-def char_def_modal_rows() -> list:
+def _bindings_slot_rows(*, bind_count: int = DEFAULT_BIND_SLOTS, with_add: bool = True) -> list:
+    """bindings 본문 (섹션 헤더 없음)."""
     rows = [
-        ("표시 이름", "display_name", "text"),
-        ("── [A] 연출 이벤트 (bindings → events.json) ──", "_hint_evt", "hint"),
-        ("상호작용 활성", "interact_enabled", "dropdown", BOOL_OPTS),
+        ("상호작용 사용", "interact_enabled", "dropdown", BOOL_OPTS),
     ]
     rows.extend(_interact_range_offset_rows())
-    rows.extend(
-        [
-        ("조건=progress 식 · List=이벤트 ID · 우선순위↑먼저", "_hint_bind", "hint"),
-        ]
+    rows.append(
+        (
+            "  조건=progress 식 · 이벤트 ID=events.json · 우선순위 숫자 클수록 먼저 검사",
+            "_hint_bind",
+            "hint",
+        )
     )
-    for i in range(1, BIND_SLOT_COUNT + 1):
+    for i in range(1, bind_count + 1):
         rows.append((f"  #{i} 조건", f"bind{i}_cond", "text"))
         rows.append((f"  #{i} 이벤트 ID", f"bind{i}_event", "events"))
         rows.append((f"  #{i} 우선순위", f"bind{i}_pri", "text"))
-    rows.extend(
-        [
-            ("── [B] 일상 대사 (char_defs · SAY만) ──", "_hint_talk", "hint"),
-            ("대화 시 바라보기", "face_player", "dropdown", BOOL_OPTS),
-            ("when=progress 식(이벤트와 동일) · 위→아래 첫 매칭", "_hint_talk_when", "hint"),
-        ]
-    )
-    for i in range(1, TALK_LINE_COUNT + 1):
-        rows.append((f"  대사{i} when", f"line{i}_when", "text"))
-        rows.append((f"  대사{i} text", f"line{i}_text", "text"))
-        rows.append((f"  대사{i} after", f"line{i}_after", "text"))
-    rows.extend(
-        [
-            ("  기본 대사 (fallback)", "fallback_text", "text"),
-            ("after 예: progress_c10_talk:1", "_hint_talk_after", "hint"),
-            ("── 이동 AI (behavior) ──", "_hint_beh", "hint"),
-            ("behavior mode", "behavior_mode", "dropdown", BEHAVIOR_OPTS),
-            ("jump_max_gap", "jump_max_gap", "text"),
-            ("mask_nav", "mask_nav", "dropdown", BOOL_OPTS),
-        ]
-    )
+    rows.extend(_binding_inline_rows(bind_count=bind_count))
+    if with_add:
+        rows.append(_add_btn_row("+ 단계 추가", "_add:bind"))
     return rows
 
 
-def char_inst_modal_rows() -> list:
+def _bindings_core_rows(
+    *,
+    intro_hint: str = "_hint_evt",
+    bind_count: int = DEFAULT_BIND_SLOTS,
+    with_add: bool = True,
+) -> list:
     rows = [
-        ("Instance ID", "instance_id", "text"),
-        ("── 맵만: 이벤트 bindings 덮어쓰기 ──", "_hint_inst_evt", "hint"),
-        ("상호작용 활성", "interact_enabled", "dropdown", BOOL_OPTS),
+        ("── [A] 클릭 상호작용 (bindings) ──", intro_hint, "hint"),
+        (
+            "  플레이어가 클릭했을 때 — 조건 맞으면 이벤트 실행 또는 즉시 상태 변경",
+            "_hint_evt2",
+            "hint",
+        ),
     ]
-    rows.extend(_interact_range_offset_rows())
-    rows.extend(
+    rows.extend(_bindings_slot_rows(bind_count=bind_count, with_add=with_add))
+    return rows
+
+
+def _talk_line_rows(*, talk_count: int = DEFAULT_TALK_LINES, with_add: bool = True) -> list:
+    rows = []
+    for i in range(1, talk_count + 1):
+        rows.append((f"  대사{i} when", f"line{i}_when", "text"))
+        rows.append((f"  대사{i} text", f"line{i}_text", "text"))
+        rows.append((f"  대사{i} after", f"line{i}_after", "text"))
+    if with_add:
+        rows.append(_add_btn_row("+ 단계 추가", "_add:talk"))
+    return rows
+
+
+def char_def_modal_section_rows(
+    *,
+    bind_count: int = DEFAULT_BIND_SLOTS,
+    talk_count: int = DEFAULT_TALK_LINES,
+    prog_count: int = DEFAULT_PROGRESS_RULES,
+) -> dict:
+    basic_setup = [
+        (
+            "※ NPC 타입 기본값 — char_defs.json 에 저장 · 맵마다 덮어쓰려면 맵 인스턴스 모달 사용",
+            "_hint_char_def_intro",
+            "hint",
+        ),
+        ("표시 이름 (대화창에 나오는 이름)", "display_name", "text"),
+    ]
+    basic_setup.extend(_spawn_editor_rows(spawn_prefix="spawn_"))
+    basic_setup.extend(
         [
-        ("※ bindings 는 타입 설정을 맵에서 덮어씀", "_hint_inst_talk", "hint"),
+            ("── 이동 AI (behavior) ──", "_hint_beh", "hint"),
+            ("behavior mode — idle=가만히, patrol=왕복 등", "behavior_mode", "dropdown", BEHAVIOR_OPTS),
+            ("jump_max_gap — 점프로 넘을 수 있는 틈(픽셀)", "jump_max_gap", "text"),
+            ("mask_nav — true면 마스크 위를 걸어다님", "mask_nav", "dropdown", BOOL_OPTS),
         ]
     )
-    for i in range(1, BIND_SLOT_COUNT + 1):
-        rows.append((f"  #{i} 조건", f"bind{i}_cond", "text"))
-        rows.append((f"  #{i} 이벤트 ID", f"bind{i}_event", "events"))
-        rows.append((f"  #{i} 우선순위", f"bind{i}_pri", "text"))
-    rows.extend(
+    return {
+        "basic_setup": basic_setup,
+        "progress": _progress_editor_rows(prog_prefix="prog", rule_count=prog_count),
+        "interact": _bindings_core_rows(bind_count=bind_count),
+        "talk": [
+            ("── [B] 일상 대사 (게임 중 말 걸기) ──", "_hint_talk", "hint"),
+            ("대화 시 플레이어 쪽 바라보기", "face_player", "dropdown", BOOL_OPTS),
+            (
+                "  when=progress 조건 · 위에서 아래 첫 번째 맞는 대사만 표시",
+                "_hint_talk_when",
+                "hint",
+            ),
+        ]
+        + _talk_line_rows(talk_count=talk_count)
+        + [
+            ("  기본 대사 (위 조건 모두 안 맞을 때)", "fallback_text", "text"),
+            ("  after 예: progress_c10_talk:1 — 대사 후 progress 변경", "_hint_talk_after", "hint"),
+        ],
+    }
+
+
+def char_def_modal_rows() -> list:
+    rows = []
+    for _sid, sec_rows in char_def_modal_section_rows().items():
+        rows.extend(sec_rows)
+    return rows
+
+
+def char_inst_modal_section_rows(
+    *,
+    bind_count: int = DEFAULT_BIND_SLOTS,
+    inst_prog_count: int = DEFAULT_PROGRESS_RULES,
+) -> dict:
+    basic_setup = [
+        (
+            "※ 이 맵에만 적용 — 비우면 char_defs 타입 기본값 사용 (world_data.json 저장)",
+            "_hint_inst_intro",
+            "hint",
+        ),
+        ("Instance ID (구분용, 비워도 됨)", "instance_id", "text"),
+        ("── 맵 전용: spawn (타입 [C] 덮어쓰기) ──", "_hint_inst_spawn", "hint"),
+    ]
+    basic_setup.extend(_spawn_editor_rows(spawn_prefix="inst_spawn_"))
+    basic_setup.extend(
         [
             ("── behavior (맵) ──", "_hint_inst_beh", "hint"),
             ("Behavior mode", "behavior_mode", "dropdown", BEHAVIOR_OPTS),
@@ -232,7 +543,61 @@ def char_inst_modal_rows() -> list:
             ("Flee safe px", "flee_safe", "text"),
         ]
     )
+    return {
+        "basic_setup": basic_setup,
+        "progress": [
+            ("── 맵 전용: progress (타입 [D] 덮어쓰기) ──", "_hint_inst_prog", "hint"),
+        ]
+        + _progress_editor_rows(prog_prefix="inst_prog", rule_count=inst_prog_count),
+        "interact": [
+            ("── 맵 전용: 클릭 상호작용 bindings ──", "_hint_inst_evt", "hint"),
+            (
+                "※ 여기 입력한 bindings 가 타입(char_defs) 설정보다 우선합니다",
+                "_hint_inst_talk",
+                "hint",
+            ),
+        ]
+        + _bindings_slot_rows(bind_count=bind_count),
+    }
+
+
+def char_inst_modal_rows() -> list:
+    rows = []
+    for sec_rows in char_inst_modal_section_rows().values():
+        rows.extend(sec_rows)
     return rows
+
+
+def obj_def_modal_section_rows(
+    *,
+    bind_count: int = DEFAULT_BIND_SLOTS,
+    prog_count: int = DEFAULT_PROGRESS_RULES,
+) -> dict:
+    return {
+        "basic_setup": _spawn_editor_rows(spawn_prefix="spawn_"),
+        "progress": _progress_editor_rows(prog_prefix="prog", rule_count=prog_count),
+        "interact": _interact_binding_modal_rows(bind_count=bind_count),
+    }
+
+
+def obj_inst_modal_section_rows(
+    *,
+    bind_count: int = DEFAULT_BIND_SLOTS,
+    inst_prog_count: int = DEFAULT_PROGRESS_RULES,
+) -> dict:
+    basic_setup = [
+        (
+            "※ 이 맵에만 적용 — 비우면 object_defs 타입 기본값 사용",
+            "_hint_obj_inst_intro",
+            "hint",
+        ),
+    ]
+    basic_setup.extend(_spawn_editor_rows(spawn_prefix="inst_spawn_"))
+    return {
+        "basic_setup": basic_setup,
+        "progress": _progress_editor_rows(prog_prefix="inst_prog", rule_count=inst_prog_count),
+        "interact": _interact_binding_modal_rows(bind_count=bind_count),
+    }
 
 
 def char_def_to_fields(cdef: dict, char_name: str) -> dict:
@@ -256,7 +621,8 @@ def char_def_to_fields(cdef: dict, char_name: str) -> dict:
         "fallback_text": str((fb_say or {}).get("text") or ""),
     }
     _bindings_to_slot_fields(inter.get("bindings"), fields)
-    for i in range(1, TALK_LINE_COUNT + 1):
+    talk_count = max(DEFAULT_TALK_LINES, len(lines))
+    for i in range(1, talk_count + 1):
         if i - 1 < len(lines):
             ln = lines[i - 1]
             say = ln.get("say") or {}
@@ -264,16 +630,16 @@ def char_def_to_fields(cdef: dict, char_name: str) -> dict:
             fields[f"line{i}_text"] = str(say.get("text") or "")
             fields[f"line{i}_after"] = _format_talk_after(ln.get("after"))
         else:
-            fields[f"line{i}_when"] = ""
-            fields[f"line{i}_text"] = ""
-            fields[f"line{i}_after"] = ""
+            _init_talk_line_fields(fields, i)
     if not fields["display_name"]:
         fields["display_name"] = char_name
+    _state_patch_to_fields(cdef.get("spawn_state") or {}, fields, "spawn_")
+    _progress_apply_to_fields(cdef.get("progress_apply"), fields, slot_prefix="prog")
     return fields
 
 
 def fields_to_char_def(fields: dict, char_name: str) -> dict:
-    from char_behavior import get_char_type_def
+    from char_behavior import get_char_type_def, _deep_merge
 
     base = dict(get_char_type_def(char_name))
     out: dict = {
@@ -292,8 +658,15 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
     )
     mode = str(fields.get("behavior_mode") or "idle").strip() or "idle"
     out["behavior"] = {"mode": mode}
+    ss = _state_patch_from_fields(fields, "spawn_")
+    if ss:
+        out["spawn_state"] = ss
+    pa = _progress_apply_from_fields(fields, slot_prefix="prog")
+    if pa:
+        out["progress_apply"] = pa
     lines = []
-    for i in range(1, TALK_LINE_COUNT + 1):
+    talk_count = max(DEFAULT_TALK_LINES, _max_numbered_slot(fields, "line"))
+    for i in range(1, talk_count + 1):
         txt = str(fields.get(f"line{i}_text") or "").strip()
         if not txt:
             continue
@@ -314,7 +687,18 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
         talk["fallback"] = {"say": {"text": fb_txt, "show_name": False}}
     if talk:
         out["talk"] = talk
-    return out
+    merged = _deep_merge(base, out)
+    if str(fields.get("mask_nav", "false")).lower() not in ("true", "1", "yes"):
+        merged.pop("mask_nav", None)
+    if not ss and "spawn_state" in merged:
+        merged.pop("spawn_state", None)
+    if not pa and "progress_apply" in merged:
+        merged.pop("progress_apply", None)
+    if ss:
+        merged["spawn_state"] = ss
+    if pa:
+        merged["progress_apply"] = pa
+    return merged
 
 
 def save_char_def_to_json(char_name: str, fields: dict) -> None:
@@ -369,6 +753,9 @@ def char_inst_fields_from_npc(npc) -> dict:
         "flee_safe": str(spec.get("safe_range", 140)),
     }
     _bindings_to_slot_fields(inter.get("bindings"), fields)
+    we = getattr(npc, "_world_entry", None) or {}
+    _state_patch_to_fields(we.get("spawn_state") or {}, fields, "inst_spawn_")
+    _progress_apply_to_fields(we.get("progress_apply"), fields, slot_prefix="inst_prog")
     return fields
 
 
@@ -433,7 +820,26 @@ def apply_char_inst_fields(npc, fields: dict) -> None:
     entry["behavior"] = spec
     if inst_inter:
         entry["interact"] = inst_inter
+    ss = _state_patch_from_fields(fields, "inst_spawn_")
+    if ss:
+        entry["spawn_state"] = ss
+    else:
+        entry.pop("spawn_state", None)
+    pa = _progress_apply_from_fields(fields, slot_prefix="inst_prog")
+    if pa:
+        entry["progress_apply"] = pa
+    else:
+        entry.pop("progress_apply", None)
+    npc._world_entry = dict(entry)
     attach_npc_from_entry(npc, entry)
+    from char_behavior import apply_entity_progress_state
+    from flow import GameFlow
+
+    try:
+        gf = GameFlow()
+        apply_entity_progress_state(npc, gf.save_data)
+    except Exception:
+        pass
 
 
 class _ConfigModal:
@@ -442,13 +848,26 @@ class _ConfigModal:
     tag: str = "cfg"
     title: str = "CONFIG"
 
-    def get_rows(self) -> list:
+    def get_sections(self) -> List[Tuple[str, str]]:
         return []
+
+    def get_section_rows(self) -> Dict[str, list]:
+        return {}
+
+    def get_rows(self) -> list:
+        sections = self.get_sections()
+        if not sections:
+            return []
+        sec_map = self.get_section_rows()
+        sid = self.section_id or sections[0][0]
+        return list(sec_map.get(sid, []))
 
     def __init__(self):
         self.show = False
         self.fields: Dict[str, str] = {}
         self.scroll = 0
+        self.section_id = ""
+        self.slot_counts: Dict[str, int] = _default_slot_counts()
         self.active_field: Optional[str] = None
         self.dd_open = False
         self.dd_key: Optional[str] = None
@@ -458,6 +877,100 @@ class _ConfigModal:
         self.dd_ui = None
         self._body_drag = False
         self._dd_drag = False
+
+    def _reset_section(self):
+        sections = self.get_sections()
+        self.section_id = sections[0][0] if sections else ""
+
+    def _sync_slot_counts_from_fields(self):
+        base = _default_slot_counts()
+        base["bind"] = max(base["bind"], _max_numbered_slot(self.fields, "bind"))
+        base["talk"] = max(base["talk"], _max_numbered_slot(self.fields, "line"))
+        base["prog"] = max(base["prog"], _max_numbered_slot(self.fields, "prog"))
+        base["inst_prog"] = max(base["inst_prog"], _max_numbered_slot(self.fields, "inst_prog"))
+        self.slot_counts = base
+
+    def _scroll_to_bottom(self, ctx) -> None:
+        from editor import _editor_modal_body_scroll_layout, _editor_std_modal_rect
+
+        rows = self.get_rows()
+        sw, sh = ctx["screen_w"], ctx["screen_h"]
+        panel_rect, content_h, _ = _editor_std_modal_rect(sw, sh, len(rows))
+        sbh = self._section_bar_h()
+        _, _, max_scroll, _ = _editor_modal_body_scroll_layout(panel_rect, 0, content_h, sbh)
+        self.scroll = max_scroll
+
+    def _on_add_slot_click(self, add_id: str, ctx) -> None:
+        if add_id == "_add:bind":
+            if self.slot_counts["bind"] >= MAX_EXPAND_SLOTS:
+                return
+            self.slot_counts["bind"] += 1
+            _init_bind_slot_fields(self.fields, self.slot_counts["bind"])
+        elif add_id == "_add:talk":
+            if self.slot_counts["talk"] >= MAX_EXPAND_SLOTS:
+                return
+            self.slot_counts["talk"] += 1
+            _init_talk_line_fields(self.fields, self.slot_counts["talk"])
+        elif add_id.startswith("_add:prog:"):
+            prefix = add_id[len("_add:prog:") :]
+            cur = self.slot_counts.get(prefix, DEFAULT_PROGRESS_RULES)
+            if cur >= MAX_EXPAND_SLOTS:
+                return
+            self.slot_counts[prefix] = cur + 1
+            _init_prog_rule_fields(self.fields, prefix, self.slot_counts[prefix])
+        else:
+            return
+        self.dd_open = False
+        self.active_field = None
+        self._scroll_to_bottom(ctx)
+
+    def _section_bar_h(self) -> int:
+        from editor import EDITOR_MODAL_SECTION_BAR_H
+
+        return EDITOR_MODAL_SECTION_BAR_H if self.get_sections() else 0
+
+    def _section_tab_layout(self, panel_rect) -> List[Tuple[str, str, pygame.Rect]]:
+        sections = self.get_sections()
+        if not sections:
+            return []
+        from editor import EDITOR_MODAL_HEADER_H
+
+        pad_x = 8
+        y = panel_rect.y + EDITOR_MODAL_HEADER_H + 4
+        h = 30
+        gap = 4
+        n = len(sections)
+        avail = panel_rect.width - 2 * pad_x
+        tw = max(48, int((avail - gap * (n - 1)) / n))
+        out: List[Tuple[str, str, pygame.Rect]] = []
+        x = panel_rect.x + pad_x
+        for sid, label in sections:
+            w = min(tw, panel_rect.right - pad_x - x)
+            if w < 40:
+                break
+            out.append((sid, label, pygame.Rect(x, y, w, h)))
+            x += w + gap
+        return out
+
+    def _paint_section_tabs(self, screen, font, panel_rect):
+        tabs = self._section_tab_layout(panel_rect)
+        if not tabs:
+            return
+        from editor import EDITOR_MODAL_HEADER_H
+
+        line_y = panel_rect.y + EDITOR_MODAL_HEADER_H + 34
+        pygame.draw.line(
+            screen, (90, 90, 90), (panel_rect.x + 8, line_y), (panel_rect.right - 8, line_y)
+        )
+        active_sid = self.section_id or tabs[0][0]
+        for sid, label, rect in tabs:
+            active = sid == active_sid
+            bg = (70, 90, 130) if active else (48, 48, 48)
+            pygame.draw.rect(screen, bg, rect)
+            pygame.draw.rect(screen, (160, 160, 160), rect, 1)
+            ts = font.render(label, True, (255, 255, 255) if active else (190, 190, 190))
+            tx = rect.x + max(4, (rect.width - ts.get_width()) // 2)
+            screen.blit(ts, (tx, rect.y + 7))
 
     def close(self):
         self.show = False
@@ -478,7 +991,12 @@ class _ConfigModal:
         from editor import (
             EDITOR_MODAL_ROW_H,
             _editor_modal_body_scroll_layout,
+            _editor_modal_sb_hit,
+            _editor_pointer_xy,
+            _editor_rects_contain_point,
+            _editor_scroll_px_from_sb_my,
             _editor_std_modal_rect,
+            _editor_wheel_delta,
             _step_overlay_scrollbar_layout,
         )
 
@@ -486,8 +1004,9 @@ class _ConfigModal:
         sw, sh = ctx["screen_w"], ctx["screen_h"]
         mx, my = ctx["mouse"]
         panel_rect, content_h, _ = _editor_std_modal_rect(sw, sh, len(rows))
+        sbh = self._section_bar_h()
         body_rect, sb_rect, max_scroll, _ = _editor_modal_body_scroll_layout(
-            panel_rect, self.scroll, content_h
+            panel_rect, self.scroll, content_h, sbh
         )
         save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
         canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
@@ -498,23 +1017,15 @@ class _ConfigModal:
         modal_dd_drag = ctx.get("modal_dropdown_drag")
 
         if event.type == pygame.MOUSEWHEEL:
-            wxw, wyw = getattr(event, "pos", (mx, my))
-            dy = getattr(event, "precise_y", None)
-            if dy is not None:
-                delta = int(round(-dy * 40))
-            else:
-                delta = -int(event.y) * 24
-            if delta == 0 and event.y:
-                delta = -int(event.y) * 24
+            px, py = _editor_pointer_xy(event, mx, my)
+            delta = _editor_wheel_delta(event)
             if self.dd_open and self.dd_rect:
                 total_h = len(self.dd_options) * dd_item_h
                 vis = max(1, self.dd_rect.height)
                 max_dd = max(0, total_h - vis)
-                if max_dd > 0 and (
-                    self.dd_rect.collidepoint(wxw, wyw) or panel_rect.collidepoint(wxw, wyw)
-                ):
+                if max_dd > 0 and _editor_rects_contain_point(px, py, self.dd_rect, body_rect, panel_rect):
                     self.dd_scroll = max(0, min(max_dd, self.dd_scroll + delta))
-            elif panel_rect.collidepoint(wxw, wyw):
+            elif _editor_rects_contain_point(px, py, body_rect, sb_rect, panel_rect) and max_scroll > 0:
                 self.scroll = max(0, min(max_scroll, self.scroll + delta))
             return True
 
@@ -522,27 +1033,16 @@ class _ConfigModal:
             ui_sb = _step_overlay_scrollbar_layout(
                 sb_rect, body_rect.height, content_h, self.scroll
             )
-            tr, th = ui_sb.get("track"), int(ui_sb.get("thumb_h") or 18)
-            max_sc = int(ui_sb.get("max_scroll") or 0)
-            if tr is not None and max_sc > 0:
-                y = event.pos[1] - (th // 2)
-                y = max(tr.y, min(tr.bottom - th, y))
-                span = max(0, tr.height - th)
-                p = 0.0 if span <= 0 else (y - tr.y) / span
-                self.scroll = int(p * max_sc)
+            sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb)
+            if sp is not None:
+                self.scroll = sp
             return True
 
         if event.type == pygame.MOUSEMOTION and modal_dd_drag == f"{self.tag}_dd":
             if self.dd_ui and self.dd_ui.get("track"):
-                tr = self.dd_ui["track"]
-                th = int(self.dd_ui.get("thumb_h") or 18)
-                max_sc = int(self.dd_ui.get("max_scroll") or 0)
-                if max_sc > 0:
-                    y = event.pos[1] - (th // 2)
-                    y = max(tr.y, min(tr.bottom - th, y))
-                    span = max(0, tr.height - th)
-                    p = 0.0 if span <= 0 else (y - tr.y) / span
-                    self.dd_scroll = int(p * max_sc)
+                sp = _editor_scroll_px_from_sb_my(event.pos[1], self.dd_ui)
+                if sp is not None:
+                    self.dd_scroll = sp
             return True
 
         if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -557,9 +1057,16 @@ class _ConfigModal:
                 dr = self.dd_rect
                 ui_prev = self.dd_ui
                 if dr.collidepoint(event.pos):
-                    if ui_prev and ui_prev.get("thumb") and ui_prev["thumb"].collidepoint(event.pos):
-                        ctx["modal_dropdown_drag"] = f"{self.tag}_dd"
-                        return True
+                    if ui_prev:
+                        dd_hit = _editor_modal_sb_hit(event.pos, ui_prev)
+                        if dd_hit == "thumb":
+                            ctx["modal_dropdown_drag"] = f"{self.tag}_dd"
+                            return True
+                        if dd_hit == "track":
+                            sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_prev)
+                            if sp is not None:
+                                self.dd_scroll = sp
+                            return True
                     sb_ex = 11 if int((ui_prev or {}).get("max_scroll") or 0) > 0 else 0
                     pick_w = max(1, dr.width - sb_ex)
                     if event.pos[0] < dr.x + pick_w:
@@ -580,11 +1087,26 @@ class _ConfigModal:
                 self.close()
                 return True
 
+            for sid, _label, tab_rect in self._section_tab_layout(panel_rect):
+                if tab_rect.collidepoint(event.pos):
+                    if sid != self.section_id:
+                        self.section_id = sid
+                        self.scroll = 0
+                        self.dd_open = False
+                        self.active_field = None
+                    return True
+
             ui_sb = _step_overlay_scrollbar_layout(
                 sb_rect, body_rect.height, content_h, self.scroll
             )
-            if ui_sb.get("thumb") and ui_sb["thumb"].collidepoint(event.pos):
+            sb_hit = _editor_modal_sb_hit(event.pos, ui_sb)
+            if sb_hit == "thumb":
                 ctx["modal_body_drag"] = self.tag
+                return True
+            if sb_hit == "track":
+                sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_sb)
+                if sp is not None:
+                    self.scroll = sp
                 return True
 
             self.active_field = None
@@ -593,6 +1115,15 @@ class _ConfigModal:
                 kind = row[2]
                 ry = body_rect.y + i * EDITOR_MODAL_ROW_H - self.scroll
                 if ry + EDITOR_MODAL_ROW_H < body_rect.top or ry > body_rect.bottom:
+                    continue
+                if kind == "add_btn":
+                    btn_w = min(200, body_rect.width - 24)
+                    btn_rect = pygame.Rect(
+                        body_rect.centerx - btn_w // 2, ry + 3, btn_w, EDITOR_MODAL_ROW_H - 6
+                    )
+                    if btn_rect.collidepoint(event.pos):
+                        self._on_add_slot_click(rk, ctx)
+                        return True
                     continue
                 if kind == "hint":
                     continue
@@ -678,6 +1209,7 @@ class _ConfigModal:
         screen.blit(overlay, (0, 0))
         rows = self.get_rows()
         panel_rect, content_h, _ = _editor_std_modal_rect(ctx["screen_w"], ctx["screen_h"], len(rows))
+        sbh = self._section_bar_h()
         _editor_paint_modal_overlay(
             screen,
             title_font,
@@ -688,7 +1220,9 @@ class _ConfigModal:
             self.scroll,
             self.fields,
             self.active_field,
+            section_bar_h=sbh,
         )
+        self._paint_section_tabs(screen, font, panel_rect)
         save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
         canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
         pygame.draw.rect(screen, (0, 100, 0), save_btn)
@@ -716,10 +1250,25 @@ class _ConfigModal:
 
 class CharDefModal(_ConfigModal):
     tag = "char_def"
-    title = "NPC 타입 — [A]연출 / [B]대사 (char_defs)"
+    title = "NPC 타입 (char_defs)"
+
+    def get_sections(self):
+        return [
+            ("basic_setup", "기본설정"),
+            ("progress", "자동 실행"),
+            ("interact", "상호작용(이벤트)"),
+            ("talk", "상호작용(대화)"),
+        ]
+
+    def get_section_rows(self):
+        return char_def_modal_section_rows(
+            bind_count=self.slot_counts["bind"],
+            talk_count=self.slot_counts["talk"],
+            prog_count=self.slot_counts["prog"],
+        )
 
     def get_rows(self):
-        return char_def_modal_rows()
+        return super().get_rows()
 
     def __init__(self):
         super().__init__()
@@ -730,8 +1279,10 @@ class CharDefModal(_ConfigModal):
 
         self.target_name = char_name
         self.fields = char_def_to_fields(get_char_type_def(char_name), char_name)
+        self._sync_slot_counts_from_fields()
         self.show = True
         self.scroll = 0
+        self._reset_section()
         self.active_field = None
         self.dd_open = False
 
@@ -742,10 +1293,23 @@ class CharDefModal(_ConfigModal):
 
 class CharInstModal(_ConfigModal):
     tag = "char_inst"
-    title = "NPC 맵 인스턴스 — 이벤트 bindings만"
+    title = "NPC 맵 인스턴스"
+
+    def get_sections(self):
+        return [
+            ("basic_setup", "기본설정"),
+            ("progress", "자동 실행"),
+            ("interact", "상호작용(이벤트)"),
+        ]
+
+    def get_section_rows(self):
+        return char_inst_modal_section_rows(
+            bind_count=self.slot_counts["bind"],
+            inst_prog_count=self.slot_counts["inst_prog"],
+        )
 
     def get_rows(self):
-        return char_inst_modal_rows()
+        return super().get_rows()
 
     def __init__(self):
         super().__init__()
@@ -754,8 +1318,10 @@ class CharInstModal(_ConfigModal):
     def open(self, npc):
         self.target_npc = npc
         self.fields = char_inst_fields_from_npc(npc)
+        self._sync_slot_counts_from_fields()
         self.show = True
         self.scroll = 0
+        self._reset_section()
         self.active_field = None
         self.dd_open = False
 
@@ -767,21 +1333,75 @@ class CharInstModal(_ConfigModal):
             cb()
 
 
-def obj_interact_modal_rows() -> list:
+def _interact_binding_modal_rows(
+    *, bind_count: int = DEFAULT_BIND_SLOTS, with_add: bool = True
+) -> list:
     rows = [
-        ("── 오브젝트 상호작용 (progress → events) ──", "_hint_obj_evt", "hint"),
-        ("상호작용 활성", "interact_enabled", "dropdown", BOOL_OPTS),
+        (
+            "── [A] 클릭 상호작용 (bindings) — 오브젝트를 클릭했을 때 ──",
+            "_hint_obj_evt",
+            "hint",
+        ),
+        (
+            "  조건이 맞으면 events.json 이벤트 실행 · 비우면 들기(CARRY) 등 기본 동작",
+            "_hint_obj_evt2",
+            "hint",
+        ),
+        ("상호작용 사용", "interact_enabled", "dropdown", BOOL_OPTS),
     ]
     rows.extend(_interact_range_offset_rows())
-    rows.append(("조건=progress · List=이벤트 ID", "_hint_obj_bind", "hint"))
-    for i in range(1, BIND_SLOT_COUNT + 1):
+    rows.append(
+        (
+            "  조건=progress 식 · 이벤트 ID · 우선순위(숫자 클수록 먼저 검사)",
+            "_hint_obj_bind",
+            "hint",
+        )
+    )
+    for i in range(1, bind_count + 1):
         rows.append((f"  #{i} 조건", f"bind{i}_cond", "text"))
         rows.append((f"  #{i} 이벤트 ID", f"bind{i}_event", "events"))
         rows.append((f"  #{i} 우선순위", f"bind{i}_pri", "text"))
+    rows.extend(_binding_inline_rows(bind_count=bind_count))
+    if with_add:
+        rows.append(_add_btn_row("+ 단계 추가", "_add:bind"))
     return rows
 
 
+def obj_interact_modal_rows() -> list:
+    rows = []
+    for sec_rows in obj_def_modal_section_rows().values():
+        rows.extend(sec_rows)
+    return rows
+
+
+def _obj_def_to_fields(odef: dict) -> dict:
+    fields = _fields_from_interact_dict((odef or {}).get("interact"))
+    _state_patch_to_fields((odef or {}).get("spawn_state") or {}, fields, "spawn_")
+    _progress_apply_to_fields((odef or {}).get("progress_apply"), fields, slot_prefix="prog")
+    return fields
+
+
+def _obj_def_from_fields(fields: dict, base: dict) -> dict:
+    from char_behavior import _deep_merge
+
+    row = _deep_merge(dict(base or {}), {})
+    row["interact"] = _interact_dict_from_fields(fields)
+    ss = _state_patch_from_fields(fields, "spawn_")
+    if ss:
+        row["spawn_state"] = ss
+    else:
+        row.pop("spawn_state", None)
+    pa = _progress_apply_from_fields(fields, slot_prefix="prog")
+    if pa:
+        row["progress_apply"] = pa
+    else:
+        row.pop("progress_apply", None)
+    return row
+
+
 def _fields_from_interact_dict(inter: dict) -> dict:
+    from data import CONFIG
+
     inter = inter or {}
     iox, ioy = _interact_offset_to_fields(inter)
     fields = {
@@ -798,10 +1418,23 @@ class ObjDefModal(_ConfigModal):
     """object_defs.json 타입별 interact (progress→events.json)."""
 
     tag = "obj_def"
-    title = "오브젝트 타입 — 이벤트 bindings (object_defs)"
+    title = "오브젝트 타입 (object_defs)"
+
+    def get_sections(self):
+        return [
+            ("basic_setup", "기본설정"),
+            ("progress", "자동 실행"),
+            ("interact", "상호작용(이벤트)"),
+        ]
+
+    def get_section_rows(self):
+        return obj_def_modal_section_rows(
+            bind_count=self.slot_counts["bind"],
+            prog_count=self.slot_counts["prog"],
+        )
 
     def get_rows(self):
-        return obj_interact_modal_rows()
+        return super().get_rows()
 
     def __init__(self):
         super().__init__()
@@ -812,9 +1445,11 @@ class ObjDefModal(_ConfigModal):
 
         self.target_name = str(obj_name or "")
         info = OBJ_ASSETS.get(self.target_name, {})
-        self.fields = _fields_from_interact_dict(info.get("interact"))
+        self.fields = _obj_def_to_fields(info)
+        self._sync_slot_counts_from_fields()
         self.show = True
         self.scroll = 0
+        self._reset_section()
         self.active_field = None
         self.dd_open = False
 
@@ -822,9 +1457,8 @@ class ObjDefModal(_ConfigModal):
         from entity_defs import load_object_defs, reload_entity_defs, save_object_defs
 
         all_defs = load_object_defs()
-        row = dict(all_defs.get(self.target_name, {}) or {})
-        row["interact"] = _interact_dict_from_fields(self.fields)
-        all_defs[self.target_name] = row
+        base = dict(all_defs.get(self.target_name, {}) or {})
+        all_defs[self.target_name] = _obj_def_from_fields(self.fields, base)
         save_object_defs(all_defs)
         reload_entity_defs()
         cb = ctx.get("on_obj_def_saved")
@@ -836,10 +1470,23 @@ class ObjInstModal(_ConfigModal):
     """맵에 배치된 FieldItem 인스턴스 interact (world_data.objects[].interact)."""
 
     tag = "obj_inst"
-    title = "오브젝트 맵 — 이벤트 bindings 덮어쓰기"
+    title = "오브젝트 맵 인스턴스"
+
+    def get_sections(self):
+        return [
+            ("basic_setup", "기본설정"),
+            ("progress", "자동 실행"),
+            ("interact", "상호작용(이벤트)"),
+        ]
+
+    def get_section_rows(self):
+        return obj_inst_modal_section_rows(
+            bind_count=self.slot_counts["bind"],
+            inst_prog_count=self.slot_counts["inst_prog"],
+        )
 
     def get_rows(self):
-        return obj_interact_modal_rows()
+        return super().get_rows()
 
     def __init__(self):
         super().__init__()
@@ -847,19 +1494,17 @@ class ObjInstModal(_ConfigModal):
 
     def open(self, item):
         from data import OBJ_ASSETS
-        from flow import merge_interact_spec
 
         self.target_item = item
-        spec = getattr(item, "interact_spec", None)
-        if not isinstance(spec, dict):
-            inst = getattr(item, "interact_instance", None) or {}
-            spec = merge_interact_spec(
-                OBJ_ASSETS.get(item.name, {}),
-                {"interact": inst} if isinstance(inst, dict) else {},
-            )
-        self.fields = _fields_from_interact_dict(spec)
+        inst = getattr(item, "interact_instance", None) or {}
+        self.fields = _fields_from_interact_dict(inst if isinstance(inst, dict) else {})
+        we = getattr(item, "_world_entry", None) or {}
+        _state_patch_to_fields(we.get("spawn_state") or {}, self.fields, "inst_spawn_")
+        _progress_apply_to_fields(we.get("progress_apply"), self.fields, slot_prefix="inst_prog")
+        self._sync_slot_counts_from_fields()
         self.show = True
         self.scroll = 0
+        self._reset_section()
         self.active_field = None
         self.dd_open = False
 
@@ -875,6 +1520,27 @@ class ObjInstModal(_ConfigModal):
             OBJ_ASSETS.get(self.target_item.name, {}),
             {"interact": inst},
         )
+        we = dict(getattr(self.target_item, "_world_entry", None) or {})
+        we["name"] = self.target_item.name
+        we["pos"] = [int(self.target_item.pos[0]), int(self.target_item.pos[1])]
+        ss = _state_patch_from_fields(self.fields, "inst_spawn_")
+        if ss:
+            we["spawn_state"] = ss
+        else:
+            we.pop("spawn_state", None)
+        pa = _progress_apply_from_fields(self.fields, slot_prefix="inst_prog")
+        if pa:
+            we["progress_apply"] = pa
+        else:
+            we.pop("progress_apply", None)
+        self.target_item._world_entry = we
+        from char_behavior import apply_entity_progress_state
+        from flow import GameFlow
+
+        try:
+            apply_entity_progress_state(self.target_item, GameFlow().save_data)
+        except Exception:
+            pass
         cb = ctx.get("on_inst_saved")
         if callable(cb):
             cb()

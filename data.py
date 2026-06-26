@@ -23,9 +23,8 @@ CONFIG = {
 
     # 논리 해상도(게임 내부 좌표 기준)
     "WIDTH": 640, "HEIGHT": 480, "FPS": 30,
-    # UI 아이콘(말풍선·이모트·존 클릭 FX): 논리 px = 에셋 px (NATIVE_640 기준 1:1, 고정 참조)
+    # UI 아이콘(말풍선·pushbutton·이모트): 논리 px = 에셋 px (런타임에 WIDTH와 동기화)
     "UI_LAYOUT_WIDTH": 640,
-    "UI_LAYOUT_BASE_WIDTH": 640,
     # 텍스트박스·폰트·RECT_*_320 값만 320 설계 기준 → WIDTH/320 으로 스케일
     "UI_TEXT_REFERENCE_WIDTH": 320,
 
@@ -114,7 +113,7 @@ CONFIG = {
     "SAY_TEXTBOX_RECT_320": [30, 182, 284, 52],
     # 폰트 (UI_FONT_FILES 키)
     "SAY_FONT_KEY": "dialog",
-    "SAY_FONT_SIZE_320": 9,
+    "SAY_FONT_SIZE_320": 10,
     "SAY_NAME_FONT_SIZE_320": 12,
     # 이름(Who) 표시 기본값
     "SAY_SHOW_NAME_DEFAULT": True,
@@ -468,7 +467,62 @@ CONFIG = {
 
 
     # 초기값
-    "progress_wateringcan":1001
+    "progress_wateringcan":1001,
+    "progress_frog_minigame_win": 0,
+    "progress_frog_seed": 0,
+    "progress_frog_minigame_tried": 0,
+    "progress_fishing_win": 0,
+    "score_frog_trial_best": 0,
+    "score_frog_trial_last": 0,
+}
+
+# 낚시터 정의 — 물 영역·낚시대 위치(이벤트박스와 별도).
+# 이벤트박스는 world_data.json event_zones, 물가 좌표는 여기서 관리.
+# (에디터: 존은 편집 가능, 물 rect는 추후 전용 레이어 추가 예정)
+FISHING_PONDS = {
+    "jjangpu_water1": {
+        "map_id": "bg_jjangpu",
+        # 이벤트박스 524,987 — 661,1025 → stand 중심
+        "stand": [592.0, 1012.0],
+        "face": "down",
+        # 물가 491,1049 — 620,1139
+        "water_rect": [491.0, 1049.0, 129.0, 90.0],
+        "cast_near": 36.0,
+        "cast_far": 116.0,
+        "success_dist": 24.0,
+        "max_shadows": 4,
+        "hook_radius": 20.0,
+        "bite_shake_sec": 0.95,
+        # --- 난이도 튜닝 (activities/fishing.py 가 읽음) ---
+        # [연타 당기기] reel_tap_step_base + reel_tap_step_pull×pull / 연타 1회 이동량(px)
+        "reel_tap_step_base": 2.0,
+        "reel_tap_step_pull": 11.0,
+        "reel_tap_pull_gain": 0.058,
+        # [연타 안 할 때] 물고기가 다시 멀어지는 속도
+        "reel_fish_drift_back": 0.012,
+        "reel_pull_decay": 0.028,
+        # [몸부림] struggle_drift_speed=캐릭터 반대로 밀림(px/s), duration=지속시간
+        "struggle_drift_speed": 14.0,
+        "struggle_duration_min": 0.9,
+        "struggle_duration_max": 1.6,
+        # [몸부림 빈도] cooldown 짧을수록 자주 반항. near_shore_freq=가까운 물가 입질 보너스
+        "struggle_cooldown_min": 0.8,
+        "struggle_cooldown_max": 1.4,
+        "struggle_near_shore_freq": 0.55,
+        "near_shore_cast_ratio": 0.45,
+        # [줄 긴장] 1.0 넘으면 실패. struggle 중 연타 시 tension_tap_penalty_struggle 추가
+        "tension_fail": 1.0,
+        "tension_build_struggle": 0.1,
+        "tension_decay_reel": 0.07,
+        "tension_tap_relief": 0.035,
+        "tension_tap_penalty_struggle": 0.2,
+        "fish_types": [
+            {"id": "잉어", "rarity": "common", "weight": 5, "surface_min": 10.0, "surface_max": 15.0, "bite_chance": 0.55},
+            {"id": "붕어", "rarity": "common", "weight": 4, "surface_min": 9.0, "surface_max": 14.0, "bite_chance": 0.5},
+            {"id": "송어", "rarity": "uncommon", "weight": 2, "surface_min": 7.0, "surface_max": 11.0, "bite_chance": 0.45},
+            {"id": "금붕어", "rarity": "rare", "weight": 1, "surface_min": 5.0, "surface_max": 8.0, "bite_chance": 0.35},
+        ],
+    },
 }
 
 # UI 폰트 레지스트리: 논리 이름 → 프로젝트 루트 기준 .ttf 경로.

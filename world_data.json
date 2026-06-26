@@ -13,13 +13,13 @@
         "event_zones": [
             { "name": "테스트이벤트2", "rect": [538, 1894, 41, 30], "trigger": "contact_player", "event_id": "ev_jjangpu_tutorial_010500" },
             { "name": "bench", "rect": [519, 2097, 36, 38], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_bench" },
-            { "name": "그네타기", "rect": [794, 1892, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_swing" }
+            { "name": "그네타기", "rect": [794, 1892, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_swing" },
+            { "name": "호숫가낚시", "rect": [544, 992, 64, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_fishing" }
         ],
         "objects": [
             { "name": "jjangpu2_house", "pos": [676, 1916], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_wall", "pos": [568, 1936], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_house2", "pos": [613, 1792], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_stair", "pos": [560, 1926], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [504, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [600, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [616, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
@@ -132,10 +132,10 @@
             { "name": "jjangpu2_fence4", "pos": [536, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_column", "pos": [812, 1916], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_bench3-2", "pos": [512, 2385], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "swing1", "pos": [736, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
-            { "name": "swing1", "pos": [752, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
+            { "name": "swing1", "pos": [688, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
+            { "name": "swing1", "pos": [704, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
             { "name": "tree5", "pos": [764, 2181], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "pole1", "pos": [704, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "pole1", "pos": [660, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [960, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [960, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence2", "pos": [976, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
@@ -159,7 +159,7 @@
             { "name": "tree3", "pos": [960, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "tree3", "pos": [928, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "tree3", "pos": [864, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_column", "pos": [812, 1856], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_column", "pos": [812, 1794], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "flower1", "pos": [768, 2192], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "flower1", "pos": [912, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "flower3", "pos": [928, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
@@ -293,24 +293,15 @@
             { "name": "bush1", "pos": [704, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "bush1", "pos": [896, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "bush1", "pos": [752, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "wateringcan2", "pos": [753, 1942], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+            { "name": "wateringcan2", "pos": [753, 1942], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "pole1", "pos": [480, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_stair1", "pos": [551, 1933], "sprite_tilt": 1.0, "height": 51, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_stair2", "pos": [488, 1952], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_column", "pos": [812, 1878], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_column", "pos": [812, 1837], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
         ],
         "npcs": [
-            { "name": "broccoli", "pos": [656, 2320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "broccoli@656_2320" },
-            { "name": "babydino", "pos": [704, 2320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "babydino@704_2320" },
-            { "name": "c1", "pos": [752, 2320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c1@752_2320" },
-            { "name": "c2", "pos": [800, 2320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c2@800_2320" },
-            { "name": "c3", "pos": [848, 2320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c3@848_2320" },
-            { "name": "c4", "pos": [896, 2320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c4@896_2320" },
-            { "name": "c5", "pos": [656, 2368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c5@656_2368" },
-            { "name": "c6", "pos": [704, 2368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c6@704_2368" },
-            { "name": "c7", "pos": [752, 2368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c7@752_2368" },
-            { "name": "c8", "pos": [800, 2368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c8@800_2368" },
-            { "name": "cc1", "pos": [848, 2368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "cc1@848_2368" },
-            { "name": "cc2", "pos": [896, 2368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "cc2@896_2368" },
-            { "name": "cc3", "pos": [848, 2416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "cc3@848_2416" },
-            { "name": "cc4", "pos": [896, 2416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "cc4@896_2416" },
-            { "name": "fairy1", "pos": [800, 2416], "sprite_tilt": 1.0, "height": 10, "ysort": "ground", "layer": 0, "instance_id": "fairy1@800_2416" }
+            { "name": "flower_fairy1", "pos": [662, 2141], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "flower_fairy1@662_2141" }
         ],
         "bg_zones": [
             { "name": "jjangpubgbox", "rect": [-48, -800, 1648, 2072], "layer": -50, "draw_only_when_tilt": true, "update_policy": "none", "sort_policy": "cached", "cull_margin_px": 160 }

@@ -36,6 +36,7 @@ from field_runtime import (
     _pygame_key_from_spec,
 )
 from render_align import snap_render_zoom
+from activities import FieldActivityHost, FieldDrawContext
 
 
 _SWING_RESTART_KEY = _pygame_key_from_spec(CONFIG.get("SWING_RESTART_HOTKEY", "g"))
@@ -755,13 +756,11 @@ def main():
             scale_factor = int(upscale_factor)
 
         lw, lh = int(CONFIG["WIDTH"]), int(CONFIG["HEIGHT"])
-        # UI_LAYOUT_WIDTH는 NATIVE_640 기준 고정(320 모드에서 pushbutton·말풍선 0.5× 스케일).
+        # 말풍선·pushbutton: 에셋 px = UI_LAYOUT_WIDTH 기준 1:1. 320 모드에서도 lw에 맞춰 2×(구 0.5×)로 유지.
         try:
-            CONFIG["UI_LAYOUT_WIDTH"] = int(
-                CONFIG.get("UI_LAYOUT_BASE_WIDTH", CONFIG.get("UI_LAYOUT_WIDTH", 640)) or 640
-            )
+            CONFIG["UI_LAYOUT_WIDTH"] = int(lw)
         except Exception:
-            CONFIG["UI_LAYOUT_WIDTH"] = 640
+            CONFIG["UI_LAYOUT_WIDTH"] = lw
         try:
             base_off = float(CONFIG.get("CAMERA_FOLLOW_OFFSET_Y_PX", 0) or 0)
             CONFIG["CAMERA_FOLLOW_OFFSET_Y_PX_EFFECTIVE"] = float(base_off) / max(
@@ -1299,11 +1298,10 @@ def main():
         except Exception:
             pass
         try:
-            CONFIG["UI_LAYOUT_WIDTH"] = int(
-                CONFIG.get("UI_LAYOUT_BASE_WIDTH", CONFIG.get("UI_LAYOUT_WIDTH", 640)) or 640
-            )
+            lw_r = int(CONFIG.get("WIDTH", 640) or 640)
+            CONFIG["UI_LAYOUT_WIDTH"] = int(lw_r)
         except Exception:
-            CONFIG["UI_LAYOUT_WIDTH"] = 640
+            pass
         # 카메라 follow 오프셋을 물리 기준으로 유지(UPSCALE_320면 논리 px이 절반 효과)
         try:
             base_off = float(CONFIG.get("CAMERA_FOLLOW_OFFSET_Y_PX", 0) or 0)
@@ -1393,6 +1391,9 @@ def main():
     swing_ride_mount_start_xy = None
     swing_ride_mount_start_h = 0.0
     # 정렬은 layer 변경 대신 ysort bias로 처리
+
+    # --- 필드 활동 (낚시 등 — activities/ 패키지, 그네와 동일한 request 패턴) ---
+    field_activities = FieldActivityHost()
 
     # --- 그네 점프(간소화: 뒤 정점 누름 시작 -> 앞 정점 떼면 점프) ---
     swing_jump_ready = False
@@ -1982,7 +1983,46 @@ def main():
         # --- 1. 카메라 및 매니저 업데이트 ---
         bg_w, bg_h = bg.get_size()
         t0 = _pnow() if perf_enabled else None
+        # --- 미니게임 (로직은 minigames/ 패키지, 여기서는 ev_mgr 브릿지만) ---
+        _tick_mg = getattr(ev_mgr, "tick_minigame", None)
+        if callable(_tick_mg):
+            _tick_mg(dt_sec)
+        if field_activities.is_active:
+            try:
+                field_activities.tick(dt_sec, player, int(pygame.time.get_ticks()))
+            except Exception:
+                pass
+            act_res = field_activities.pop_finished_result()
+            if act_res and act_res.get("won") and not act_res.get("quit") and act_res.get("win_flag"):
+                try:
+                    flow.save_data[str(act_res["win_flag"])] = act_res.get("win_value", 1)
+                    flow.save_game(map_id, player.pos)
+                except Exception:
+                    pass
+        if getattr(ev_mgr, "field_activity_stop_request", False):
+            try:
+                ev_mgr.field_activity_stop_request = False
+            except Exception:
+                pass
+            field_activities.cancel()
+            try:
+                ev_mgr.remove_ui_overlay("fishing_exit")
+            except Exception:
+                pass
+            try:
+                ev_mgr.pending_camera_command = {
+                    "mode": "follow_player",
+                    "smooth": True,
+                    "duration_sec": 0.5,
+                }
+            except Exception:
+                pass
         ev_mgr.update(player, cam, objs, npcs, mask_img=mask, dt_sec=dt_sec)
+        if getattr(ev_mgr, "_progress_refresh_pending", False):
+            from char_behavior import apply_map_progress_states
+
+            objs, npcs = apply_map_progress_states(objs, npcs, flow.save_data)
+            ev_mgr._progress_refresh_pending = False
         if perf_enabled and t0 is not None:
             _padd("event", _pnow() - t0)
         pc = getattr(ev_mgr, "pending_camera_command", None)
@@ -2300,6 +2340,13 @@ def main():
                     continue
 
             if ev_mgr.active_event:
+                # 미니게임 입력: 필드 클릭과 분리 (minigames 세션 handle_event)
+                if getattr(ev_mgr, "is_minigame_active", lambda: False)():
+                    _push_mg = getattr(ev_mgr, "minigame_push_event", None)
+                    if callable(_push_mg):
+                        _push_mg(event)
+                    if event.type != pygame.QUIT:
+                        continue
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     if ev_mgr.try_escape_click(event.button):
                         player.stop_moving()
@@ -2347,10 +2394,54 @@ def main():
 
             # [평상시 마우스 클릭 이동]
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx_a, my_a = _embed_phys_to_logical_xy(
+                    event.pos[0], event.pos[1], scale_factor=scale_factor
+                )
+                # 낚시 나가기 등 — OVERLAY_UI clickable (persist 버튼)
+                _ov_click = getattr(ev_mgr, "try_overlay_ui_click", None)
+                if callable(_ov_click):
+                    ov_act = _ov_click(int(mx_a), int(my_a))
+                    if ov_act == "stop_fishing":
+                        field_activities.cancel()
+                        try:
+                            ev_mgr.remove_ui_overlay("fishing_exit")
+                        except Exception:
+                            pass
+                        try:
+                            ev_mgr.pending_camera_command = {
+                                "mode": "follow_player",
+                                "smooth": True,
+                                "duration_sec": 0.5,
+                            }
+                        except Exception:
+                            pass
+                        continue
+                # 필드 활동(낚시 등): 클릭을 활동에 넘김
+                if field_activities.is_active:
+                    ww_a = None
+                    if render_xform_for_input:
+                        ww_a = _screen_to_world_from_render_xform(mx_a, my_a, xf=render_xform_for_input)
+                    if ww_a is None:
+                        ww_a = _screen_to_world_field(
+                            mx_a,
+                            my_a,
+                            cam=cam,
+                            cam_x_start=cam_x_start,
+                            cam_y_start=cam_y_start,
+                            player=player,
+                            bg_h=bg_h,
+                            tilt_current=tilt_current,
+                            tilt_eps=tilt_eps,
+                            shear_smoothed=shear_smoothed,
+                        )
+                    if field_activities.on_pointer_down(
+                        (mx_a, my_a), ww_a, int(pygame.time.get_ticks())
+                    ):
+                        continue
                 # 그네 타기 중: approach/mount는 클릭 이동 막기. ride는 점프 드래그를 위해 클릭을 받는다.
                 if swing_ride_mode in ("approach", "mount"):
                     continue
-                mx, my = _embed_phys_to_logical_xy(event.pos[0], event.pos[1], scale_factor=scale_factor)
+                mx, my = int(mx_a), int(my_a)
 
                 # 렌더 변환 캐시 기반 역변환(틸트+줌+쉬어를 항상 렌더와 동일하게 복원)
                 if render_xform_for_input:
@@ -2508,6 +2599,13 @@ def main():
                     events_catalog=events_catalog,
                 )
 
+                # 필드 활동: A/Space/Enter = 화면 탭과 동일 (낚시 연타·캐스트)
+                if field_activities.is_active and _is_primary_action_key(event.key):
+                    if field_activities.on_pointer_down(
+                        (0, 0), None, int(pygame.time.get_ticks())
+                    ):
+                        continue
+
                 # 그네 재시작: data.py SWING_RESTART_HOTKEY
                 if event.key == _SWING_RESTART_KEY:
                     try:
@@ -2637,6 +2735,16 @@ def main():
                         pending_action, target_obj, target_npc = "interact_npc", None, target
                     else:
                         pending_action, target_obj, target_npc = None, None, None
+
+            # 필드 활동 포인터/키 릴리즈 (낚시 캐스트 등)
+            if field_activities.is_active:
+                rel_act = False
+                if event.type == pygame.MOUSEBUTTONUP and getattr(event, "button", None) == 1:
+                    rel_act = True
+                if event.type == pygame.KEYUP and _is_primary_action_key(event.key):
+                    rel_act = True
+                if rel_act and field_activities.on_pointer_up(int(pygame.time.get_ticks())):
+                    continue
 
             # 그네 점프 릴리즈(키/마우스): 앞 정점에서 떼면 점프
             if swing_ride_mode == "ride" and swing_jump_hold_active:
@@ -3172,6 +3280,16 @@ def main():
                     except Exception:
                         pass
 
+            # 이벤트(DEV_CMD)로 요청된 필드 활동 시작 (start_fishing 등)
+            fa_req = getattr(ev_mgr, "field_activity_request", None)
+            if isinstance(fa_req, dict) and fa_req.get("action") == "start":
+                try:
+                    ev_mgr.field_activity_request = None
+                except Exception:
+                    pass
+                field_activities.consume_request(fa_req, player=player)
+                pending_action = None
+
             if _try_start_pending_sync_event():
                 pending_action = None
             else:
@@ -3203,7 +3321,7 @@ def main():
                         npcs=npcs,
                         # 그네 탑승/접근 중에는 이벤트존 confirm을 잠시 무시:
                         # swing zone(그네타기 박스) 안에서 펌프/점프 입력이 매번 이벤트를 재시작하지 않게 한다.
-                        zone_click_world=(None if swing_ride_mode in ("approach", "mount", "ride") else zone_confirm_click_world),
+                        zone_click_world=(None if swing_ride_mode in ("approach", "mount", "ride") or field_activities.blocks_zone_confirm() else zone_confirm_click_world),
                     )
                     if tid and tid in events_catalog:
                         ev = events_catalog[tid]
@@ -4420,14 +4538,15 @@ def main():
         except Exception:
             zprompt_on = True
         # 이벤트가 발동되어 진행 중일 땐(대사/스크린 포함) 프롬프트를 숨긴다.
+        # 필드 활동(낚시 등)·그네 탑승 중에도 동일 — 이벤트가 곧 끝나도 존 안에 있으면 버튼이 다시 뜨지 않게.
         if (
             zprompt_on
             and (not ev_mgr.active_event)
             and (not bool(getattr(ev_mgr, "is_busy", False)))
             and (not bool(getattr(ev_mgr, "is_talking", False)))
             and (not bool(getattr(ev_mgr, "active_screen", None)))
-            # 그네 타기(approach/mount/ride)는 이벤트처럼 동작하므로 프롬프트를 숨긴다.
             and (swing_ride_mode not in ("approach", "mount", "ride"))
+            and (not field_activities.is_active)
         ):
             m_data = flow.world_data.get(map_id, {}) if flow is not None else {}
             zones = m_data.get("event_zones", []) if isinstance(m_data, dict) else []
@@ -4554,6 +4673,23 @@ def main():
                         render_surf.blit(img2, (ox, oy))
                         shown += 1
 
+        # --- 필드 활동 오버레이 (낚시 찌·물고기 등 — 월드 줌 직전) ---
+        if field_activities.is_active:
+            try:
+                field_activities.draw(
+                    FieldDrawContext(
+                        surf=world_surf,
+                        cam_draw_x=float(cam_draw_x),
+                        cam_draw_y=float(cam_draw_y),
+                        z=float(z),
+                        y_transform=y_transform,
+                        x_offset_fn=x_offset_fn,
+                        font_fn=get_ui_font,
+                    )
+                )
+            except Exception:
+                pass
+
         # --- 월드 줌(후처리) 합성: world_surf -> draw_surf ---
         # 오버레이(UI)는 줌 영향을 받지 않으므로, 여기서만 스케일한다.
         t_wz0 = _pnow() if perf_enabled else None
@@ -4622,6 +4758,12 @@ def main():
                 _padd("wz_blit", _pnow() - t_wz_bl0)
         if perf_enabled and t_wz0 is not None:
             _padd("world_zoom", _pnow() - t_wz0)
+
+        # --- 미니게임 전체 화면 (minigames/*.py 세션 draw) ---
+        if getattr(ev_mgr, "is_minigame_active", lambda: False)():
+            _draw_mg = getattr(ev_mgr, "draw_minigame", None)
+            if callable(_draw_mg):
+                _draw_mg(render_surf, get_ui_font)
 
         # [추가] SCREEN 오버레이 (인트로/슬라이드)
         t0 = _pnow() if perf_enabled else None

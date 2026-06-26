@@ -229,6 +229,53 @@ def merge_interact_spec(type_asset: dict, world_entry: dict = None) -> dict:
     return copy.deepcopy(base)
 
 
+def build_obj_def(name: str, world_entry=None) -> dict:
+    """
+    object_defs 타입 + world_data 인스턴스 병합.
+    build_npc_def(char_behavior) 와 동일하게 spawn_state / progress_apply 를 합칩니다.
+    """
+    from char_behavior import _deep_merge
+
+    base = dict(OBJ_ASSETS.get(name, {}) or {})
+    entry = world_entry or {}
+    merged = _deep_merge(base, entry.get("overrides") or {})
+    if base.get("spawn_state") or entry.get("spawn_state"):
+        merged["spawn_state"] = _deep_merge(
+            base.get("spawn_state") or {}, entry.get("spawn_state") or {}
+        )
+    if entry.get("progress_apply"):
+        merged["progress_apply"] = list(entry["progress_apply"])
+    elif base.get("progress_apply"):
+        merged["progress_apply"] = list(base["progress_apply"])
+    return merged
+
+
+def binding_has_inline_action(binding: dict) -> bool:
+    """
+    interact.binding 이 events.json 없이 state/after 만으로 동작하는지.
+    try_start_interact_event 인라인 분기 판정용.
+    """
+    if not isinstance(binding, dict):
+        return False
+    if binding.get("after"):
+        return True
+    st = binding.get("state")
+    if isinstance(st, dict) and st:
+        return True
+    inline_keys = (
+        "visible",
+        "spawn",
+        "anim",
+        "state",
+        "anim_mode",
+        "change_to",
+        "behavior_mode",
+        "behavior",
+        "dir",
+    )
+    return any(k in binding for k in inline_keys)
+
+
 def parse_interact_bindings_text(text: str) -> list:
     """
     에디터 한 줄 형식: condition | event_id | priority(선택)
@@ -275,29 +322,45 @@ def format_interact_bindings_text(bindings) -> str:
     return "\n".join(lines)
 
 
-def pick_interact_event(bindings, eval_ctx: dict, events_catalog: dict):
+def pick_interact_binding(bindings, eval_ctx: dict, events_catalog: dict):
     """
-    상호작용 시 progress 등 조건에 맞는 events.json 이벤트 1개 선택.
-    pick_sync_events / pick_global_auto_event 와 동일: priority 오름차순, 같으면 event_id.
+    상호작용 binding 1개 선택. event_id 또는 state/after 인라인 액션.
+    priority 오름차순, 같으면 event_id 문자열.
     """
     candidates = []
     for b in bindings or []:
         if not isinstance(b, dict):
             continue
-        eid = str(b.get("event_id") or "").strip()
-        if not eid or eid not in events_catalog:
-            continue
         if not evaluate_global_condition(b.get("condition"), eval_ctx):
+            continue
+        eid = str(b.get("event_id") or "").strip()
+        inline = binding_has_inline_action(b)
+        if eid and eid not in events_catalog:
+            continue
+        if not eid and not inline:
             continue
         try:
             pr = int(b.get("priority", 100))
         except (TypeError, ValueError):
             pr = 100
-        candidates.append((pr, eid))
+        sort_key = eid or "__inline__"
+        candidates.append((pr, sort_key, b))
     if not candidates:
         return None
     candidates.sort(key=lambda x: (x[0], x[1]))
-    return candidates[0][1]
+    return candidates[0][2]
+
+
+def pick_interact_event(bindings, eval_ctx: dict, events_catalog: dict):
+    """
+    상호작용 시 progress 등 조건에 맞는 events.json 이벤트 1개 선택.
+    pick_sync_events / pick_global_auto_event 와 동일: priority 오름차순, 같으면 event_id.
+    """
+    b = pick_interact_binding(bindings, eval_ctx, events_catalog)
+    if not b:
+        return None
+    eid = str(b.get("event_id") or "").strip()
+    return eid if eid else None
 
 
 def entity_interact_spec(entity) -> dict:
@@ -324,11 +387,21 @@ def interact_spec_enabled(spec) -> bool:
 
 
 def entity_interact_enabled(entity) -> bool:
-    """enabled 가 명시적 true 이고 bindings 가 있으면 클릭→events.json 상호작용 후보."""
+    """enabled 가 명시적 true 이고 bindings(이벤트 또는 인라인 state/after)가 있으면 상호작용 후보."""
     spec = entity_interact_spec(entity)
     if not interact_spec_enabled(spec):
         return False
-    return bool(spec.get("bindings"))
+    binds = spec.get("bindings") or []
+    if not binds:
+        return False
+    for b in binds:
+        if not isinstance(b, dict):
+            continue
+        if str(b.get("event_id") or "").strip():
+            return True
+        if binding_has_inline_action(b):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -977,6 +1050,494 @@ def _flow_build_network(
     return list(nodes.values()), edges
 
 
+def _flow_find_event_section(eid: str, event_data: dict) -> str:
+    eid = str(eid or "").strip()
+    for sec in ("LOCAL", "GLOBAL", "SYNC"):
+        if eid in (event_data.get(sec) or {}):
+            return sec
+    return ""
+
+
+def _flow_entity_catalog_entry(name, kind: str, *, char_assets=None, obj_assets=None) -> dict:
+    """char_defs / object_defs 타입 한 개 — binding·대사 연결 요약 (맵 인스턴스 없음)."""
+    name = str(name or "").strip()
+    kind = "npc" if str(kind or "").lower() in ("npc", "char") else "obj"
+    info = ((char_assets if kind == "npc" else obj_assets) or {}).get(name, {}) or {}
+    inter = info.get("interact") or {}
+    binds = [b for b in (inter.get("bindings") or []) if isinstance(b, dict)]
+    event_ids = set()
+    link_count = 0
+    for b in binds:
+        eid = str(b.get("event_id") or "").strip()
+        if eid:
+            event_ids.add(eid)
+        cond = str(b.get("condition") or "").strip()
+        if eid or binding_has_inline_action(b) or cond:
+            link_count += 1
+    talk_n = 0
+    if kind == "npc":
+        talk = (info.get("talk") or {}) if isinstance(info.get("talk"), dict) else {}
+        talk_n = len(talk.get("lines") or [])
+        if talk.get("fallback"):
+            talk_n += 1
+    has_links = bool(event_ids) or link_count > 0 or talk_n > 0
+    tag = "NPC" if kind == "npc" else "OBJ"
+    return {
+        "name": name,
+        "kind": kind,
+        "node": None,
+        "event_ids": event_ids,
+        "link_count": link_count + talk_n,
+        "has_links": has_links,
+        "label": f"{tag} {name}",
+    }
+
+
+def _flow_entity_runtime_entry(ent, kind: str) -> dict:
+    """맵에 배치된 NPC/오브젝트 한 개 — 이벤트·binding·대사 연결 요약."""
+    name = str(getattr(ent, "name", "") or "")
+    spec = entity_interact_spec(ent)
+    binds = [b for b in (spec.get("bindings") or []) if isinstance(b, dict)]
+    event_ids = set()
+    link_count = 0
+    for b in binds:
+        eid = str(b.get("event_id") or "").strip()
+        if eid:
+            event_ids.add(eid)
+        cond = str(b.get("condition") or "").strip()
+        if eid or binding_has_inline_action(b) or cond:
+            link_count += 1
+    talk_n = 0
+    if kind == "npc":
+        talk = (getattr(ent, "char_def", None) or {}).get("talk") or {}
+        talk_n = len(talk.get("lines") or [])
+        if talk.get("fallback"):
+            talk_n += 1
+    has_links = bool(event_ids) or link_count > 0 or talk_n > 0
+    tag = "NPC" if kind == "npc" else "OBJ"
+    return {
+        "name": name,
+        "kind": kind,
+        "node": ent,
+        "event_ids": event_ids,
+        "link_count": link_count + talk_n,
+        "has_links": has_links,
+        "label": f"{tag} {name}",
+    }
+
+
+def collect_flow_entities_on_map(objs, npcs):
+    """
+    현재 맵에 배치된 캐릭터/오브젝트 중 이벤트·binding·대사와 연결된 항목.
+    연결된 것이 하나도 없으면 맵 전체 목록을 반환(설정 추가용).
+    """
+    entries = []
+    for n in npcs or []:
+        entries.append(_flow_entity_runtime_entry(n, "npc"))
+    for o in objs or []:
+        entries.append(_flow_entity_runtime_entry(o, "obj"))
+    linked = [e for e in entries if e["has_links"]]
+    out = linked if linked else entries
+    name_counts = {}
+    for e in out:
+        key = (e["kind"], e["name"])
+        name_counts[key] = name_counts.get(key, 0) + 1
+    for e in out:
+        key = (e["kind"], e["name"])
+        n = e.get("node")
+        if name_counts.get(key, 0) > 1 and n is not None and hasattr(n, "pos"):
+            try:
+                e["label"] = f"{e['label']} @{int(n.pos[0])},{int(n.pos[1])}"
+            except (TypeError, ValueError):
+                pass
+    out.sort(key=lambda x: (0 if x["kind"] == "npc" else 1, x["name"].lower()))
+    return out
+
+
+def build_entity_flow_diagram(
+    entity_name,
+    entity_kind,
+    event_data,
+    events_catalog,
+    *,
+    entity_node=None,
+    char_assets=None,
+    obj_assets=None,
+):
+    """
+    FLOW 에디터: 캐릭터/오브젝트 → binding/대사 → 이벤트 → progress 결과.
+    맵 인스턴스(entity_node)가 있으면 병합된 interact·char_def 기준.
+    """
+    entity_name = str(entity_name or "").strip()
+    entity_kind = "npc" if str(entity_kind or "").lower() in ("npc", "char") else "obj"
+    char_assets = char_assets or {}
+    obj_assets = obj_assets or {}
+    nodes: dict = {}
+    edges: list = []
+    seen_edges: set = set()
+
+    def _nid(kind, key):
+        return f"{kind}:{key}"
+
+    def _add_node(nid, kind, label, sublabel="", sort_key=None, hit=None):
+        if nid in nodes:
+            return
+        nodes[nid] = {
+            "id": nid,
+            "kind": kind,
+            "label": str(label or "")[:28],
+            "sublabel": str(sublabel or "")[:24],
+            "sort_key": sort_key if sort_key is not None else label,
+            "hit": dict(hit or {}),
+        }
+
+    def _add_edge(frm, to, label=""):
+        if not frm or not to or frm == to:
+            return
+        key = (frm, to, str(label or "")[:36])
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        edges.append({"from": frm, "to": to, "label": key[2], "cycle": False})
+
+    on_map = entity_node is not None
+    if on_map:
+        spec = entity_interact_spec(entity_node)
+        cdef = (
+            getattr(entity_node, "char_def", None)
+            if entity_kind == "npc"
+            else getattr(entity_node, "obj_def", None)
+        )
+        cdef = cdef if isinstance(cdef, dict) else {}
+    else:
+        info = (char_assets if entity_kind == "npc" else obj_assets).get(entity_name, {}) or {}
+        spec = merge_interact_spec(info, {})
+        cdef = info
+
+    ek_hit = "char" if entity_kind == "npc" else "obj"
+    tag = "NPC" if entity_kind == "npc" else "OBJ"
+    ent_id = _nid("ent", f"{entity_kind}:{entity_name}")
+    _add_node(
+        ent_id,
+        "entity",
+        entity_name,
+        f"{tag} · {'맵' if on_map else '타입'}",
+        entity_name,
+        {
+            "action": "entity",
+            "entity": entity_name,
+            "entity_kind": ek_hit,
+            "on_map": on_map,
+        },
+    )
+
+    bind_i = 0
+    bindings = [b for b in (spec.get("bindings") or []) if isinstance(b, dict)]
+
+    def _prio(b):
+        try:
+            return int(b.get("priority", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    bindings.sort(key=_prio, reverse=True)
+
+    for b in bindings:
+        bind_i += 1
+        cond = str(b.get("condition") or "").strip() or "(항상)"
+        bid = _nid("bind", str(bind_i))
+        eid = str(b.get("event_id") or "").strip()
+        if eid:
+            sub = f"→ {eid}"[:24]
+        elif binding_has_inline_action(b):
+            sub = "인라인 state/after"
+        else:
+            sub = "binding"
+        _add_node(
+            bid,
+            "bind",
+            cond[:28],
+            sub,
+            bind_i,
+            {
+                "action": "binding",
+                "entity": entity_name,
+                "entity_kind": ek_hit,
+                "binding_index": bind_i,
+                "on_map": on_map,
+            },
+        )
+        _add_edge(ent_id, bid, "상호작용")
+
+        if eid:
+            ev_id = _nid("evt", eid)
+            sec = _flow_find_event_section(eid, event_data)
+            ev_data = None
+            if sec:
+                ev_data = (event_data.get(sec) or {}).get(eid)
+            if not isinstance(ev_data, dict):
+                ev_data = (events_catalog or {}).get(eid)
+            ev_title = ""
+            if isinstance(ev_data, dict):
+                ev_title = str(ev_data.get("title") or "")[:24]
+            _add_node(
+                ev_id,
+                "event",
+                eid,
+                f"[{sec}]" if sec else "이벤트",
+                eid,
+                {"action": "event", "event_id": eid, "section": sec},
+            )
+            _add_edge(bid, ev_id, "실행")
+            res = ev_data.get("result") if isinstance(ev_data, dict) else None
+            if isinstance(res, dict):
+                prog = [
+                    k
+                    for k in res
+                    if k == "mainprogress" or str(k).startswith("progress_")
+                ]
+                if prog:
+                    for pk in prog[:4]:
+                        sv = progress_value_key(res.get(pk))
+                        if not sv:
+                            continue
+                        sid = _nid("state", f"{pk}={sv}")
+                        _add_node(sid, "state", str(pk)[:28], f"= {sv}", sv, {})
+                        _add_edge(ev_id, sid, "result")
+                elif res:
+                    sid = _nid("state", "result")
+                    _add_node(sid, "state", "result", str(res)[:24], 0, {})
+                    _add_edge(ev_id, sid, "result")
+            if ev_title:
+                nodes[ev_id]["sublabel"] = ev_title[:24]
+        elif binding_has_inline_action(b):
+            after = b.get("after")
+            if isinstance(after, dict):
+                for pk, pv in after.items():
+                    if pk == "mainprogress" or str(pk).startswith("progress_"):
+                        sv = progress_value_key(pv)
+                        sid = _nid("state", f"{pk}={sv}")
+                        _add_node(sid, "state", str(pk)[:28], f"= {sv}", sv, {})
+                        _add_edge(bid, sid, "after")
+
+    if entity_kind == "npc":
+        talk = cdef.get("talk") or {}
+        for i, ln in enumerate(talk.get("lines") or []):
+            if not isinstance(ln, dict):
+                continue
+            bind_i += 1
+            when = str(ln.get("when") or "").strip() or "(항상)"
+            say = ln.get("say") or {}
+            txt = str(say.get("text") or "").strip()[:18] or f"line{i+1}"
+            bid = _nid("bind", f"t{i}")
+            _add_node(
+                bid,
+                "bind",
+                f"대사: {txt}",
+                when[:24],
+                f"t{i}",
+                {
+                    "action": "binding",
+                    "entity": entity_name,
+                    "entity_kind": "char",
+                    "binding_index": bind_i,
+                    "talk_line": i,
+                    "on_map": on_map,
+                },
+            )
+            _add_edge(ent_id, bid, "대화")
+            after = ln.get("after")
+            if isinstance(after, dict):
+                for pk, pv in after.items():
+                    if pk == "mainprogress" or str(pk).startswith("progress_"):
+                        sv = progress_value_key(pv)
+                        sid = _nid("state", f"{pk}={sv}")
+                        _add_node(sid, "state", str(pk)[:28], f"= {sv}", sv, {})
+                        _add_edge(bid, sid, "after")
+
+    note = ""
+    if bind_i == 0:
+        note = "bindings·대사 없음 — 상자 클릭 또는 우측 버튼으로 설정"
+
+    return {
+        "mode": "entity",
+        "entity_name": entity_name,
+        "entity_kind": entity_kind,
+        "on_map": on_map,
+        "var": entity_name,
+        "note": note,
+        "nodes": list(nodes.values()),
+        "edges": edges,
+    }
+
+
+def _flow_zone_entry(zone, zone_index: int, map_id: str) -> dict:
+    """맵 event_zones 한 개 — FLOW 목록·차트용."""
+    zone = zone if isinstance(zone, dict) else {}
+    zi = int(zone_index)
+    zname = str(zone.get("name") or f"zone_{zi + 1}").strip()
+    eid = str(zone.get("event_id") or "").strip()
+    event_ids = {eid} if eid else set()
+    return {
+        "name": zname,
+        "kind": "zone",
+        "zone_index": zi,
+        "zone_data": dict(zone),
+        "map_id": str(map_id or ""),
+        "node": None,
+        "event_ids": event_ids,
+        "link_count": 1 if eid else 0,
+        "has_links": bool(eid),
+        "label": f"BOX {zname}",
+    }
+
+
+def build_zone_flow_diagram(
+    zone,
+    map_id,
+    zone_index,
+    event_data,
+    events_catalog,
+):
+    """FLOW — 이벤트 박스 → 트리거/조건 → 이벤트 → progress 결과."""
+    zone = zone if isinstance(zone, dict) else {}
+    map_id = str(map_id or "")
+    zi = int(zone_index)
+    zname = str(zone.get("name") or f"zone_{zi + 1}").strip()
+    eid = str(zone.get("event_id") or "").strip()
+    trigger = str(zone.get("trigger") or "contact_player")
+    target = str(zone.get("target") or "").strip()
+    cond = zone.get("conditions") if isinstance(zone.get("conditions"), dict) else {}
+
+    nodes: dict = {}
+    edges: list = []
+    seen_edges: set = set()
+
+    def _nid(kind, key):
+        return f"{kind}:{key}"
+
+    def _add_node(nid, kind, label, sublabel="", sort_key=None, hit=None):
+        if nid in nodes:
+            return
+        nodes[nid] = {
+            "id": nid,
+            "kind": kind,
+            "label": str(label or "")[:28],
+            "sublabel": str(sublabel or "")[:24],
+            "sort_key": sort_key if sort_key is not None else label,
+            "hit": dict(hit or {}),
+        }
+
+    def _add_edge(frm, to, label=""):
+        if not frm or not to or frm == to:
+            return
+        key = (frm, to, str(label or "")[:36])
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        edges.append({"from": frm, "to": to, "label": key[2], "cycle": False})
+
+    zid = _nid("zone", f"{map_id}:{zi}:{zname}")
+    _add_node(
+        zid,
+        "zone",
+        zname,
+        f"맵 {map_id}"[:24] if map_id else "이벤트 박스",
+        zname,
+        {
+            "action": "zone",
+            "zone_name": zname,
+            "map_id": map_id,
+            "zone_index": zi,
+        },
+    )
+
+    cond_bits = [trigger]
+    if target:
+        cond_bits.append(f"target={target}")
+    mp = cond.get("mainprogress")
+    if mp is not None and str(mp).strip():
+        cond_bits.append(f'mp="{progress_value_key(mp)}"')
+    mlp = cond.get("min_laugh_point")
+    if mlp is not None and str(mlp).strip():
+        cond_bits.append(f"laugh≥{mlp}")
+    for ck, cv in cond.items():
+        if ck in ("mainprogress", "min_laugh_point"):
+            continue
+        cond_bits.append(f"{ck}={cv}")
+
+    cid = _nid("bind", "cond")
+    _add_node(
+        cid,
+        "bind",
+        " / ".join(cond_bits)[:28] or trigger,
+        "트리거·조건",
+        0,
+        {
+            "action": "zone",
+            "zone_name": zname,
+            "map_id": map_id,
+            "zone_index": zi,
+        },
+    )
+    _add_edge(zid, cid, "진입")
+
+    note = ""
+    if not eid:
+        note = "event_id 없음 — 이벤트 박스 설정에서 연결하세요"
+    else:
+        ev_id = _nid("evt", eid)
+        sec = _flow_find_event_section(eid, event_data)
+        ev_data = None
+        if sec:
+            ev_data = (event_data.get(sec) or {}).get(eid)
+        if not isinstance(ev_data, dict):
+            ev_data = (events_catalog or {}).get(eid)
+        ev_title = ""
+        if isinstance(ev_data, dict):
+            ev_title = str(ev_data.get("title") or "")[:24]
+        _add_node(
+            ev_id,
+            "event",
+            eid,
+            f"[{sec}]" if sec else "이벤트",
+            eid,
+            {"action": "event", "event_id": eid, "section": sec},
+        )
+        _add_edge(cid, ev_id, "실행")
+        res = ev_data.get("result") if isinstance(ev_data, dict) else None
+        if isinstance(res, dict):
+            prog = [
+                k for k in res if k == "mainprogress" or str(k).startswith("progress_")
+            ]
+            if prog:
+                for pk in prog[:4]:
+                    sv = progress_value_key(res.get(pk))
+                    if not sv:
+                        continue
+                    sid = _nid("state", f"{pk}={sv}")
+                    _add_node(sid, "state", str(pk)[:28], f"= {sv}", sv, {})
+                    _add_edge(ev_id, sid, "result")
+            elif res:
+                sid = _nid("state", "result")
+                _add_node(sid, "state", "result", str(res)[:24], 0, {})
+                _add_edge(ev_id, sid, "result")
+        if ev_title:
+            nodes[ev_id]["sublabel"] = ev_title[:24]
+
+    return {
+        "mode": "zone",
+        "zone_name": zname,
+        "map_id": map_id,
+        "zone_index": zi,
+        "entity_name": zname,
+        "var": zname,
+        "note": note,
+        "nodes": list(nodes.values()),
+        "edges": edges,
+    }
+
+
 def entity_carry_click_allowed(entity) -> bool:
     """
     클릭으로 들기( begin_carry_pickup ).
@@ -1128,33 +1689,58 @@ def try_start_interact_event(
     ctx = build_eval_ctx(flow.save_data if flow else {}, session_vars)
     ctx["map_id"] = str(map_id or "")
     ctx["npc_name"] = str(getattr(entity, "name", "") or "")
-    eid = pick_interact_event(spec.get("bindings"), ctx, events_catalog)
-    if not eid:
+    binding = pick_interact_binding(spec.get("bindings"), ctx, events_catalog)
+    if not binding:
         return False
+    eid = str(binding.get("event_id") or "").strip()
     if player is not None:
         try:
             player.stop_moving()
         except Exception:
             pass
-    ok = start_catalog_event(
-        ev_mgr,
-        events_catalog,
-        eid,
-        player,
-        npcs,
-        objs,
-        field_tilt_snapshot,
-    )
-    if ok:
-        print(f"[Interact] event '{eid}' via {getattr(entity, 'name', '?')}")
-        if player is not None and getattr(entity, "char_def", None):
-            try:
-                from char_behavior import face_toward_player
+    if eid:
+        ok = start_catalog_event(
+            ev_mgr,
+            events_catalog,
+            eid,
+            player,
+            npcs,
+            objs,
+            field_tilt_snapshot,
+        )
+        if ok:
+            print(f"[Interact] event '{eid}' via {getattr(entity, 'name', '?')}")
+            if player is not None and getattr(entity, "char_def", None):
+                try:
+                    from char_behavior import face_toward_player
 
-                face_toward_player(entity, player)
-            except Exception:
-                pass
-    return ok
+                    face_toward_player(entity, player)
+                except Exception:
+                    pass
+        return ok
+
+    from char_behavior import apply_state_patch, apply_talk_after
+
+    st = binding.get("state")
+    if isinstance(st, dict):
+        apply_state_patch(entity, st)
+    else:
+        row = {
+            k: v
+            for k, v in binding.items()
+            if k not in ("condition", "event_id", "priority", "after")
+        }
+        apply_state_patch(entity, row)
+    apply_talk_after(binding.get("after"), flow, entity)
+    if player is not None and getattr(entity, "char_def", None):
+        try:
+            from char_behavior import face_toward_player
+
+            face_toward_player(entity, player)
+        except Exception:
+            pass
+    print(f"[Interact] inline state via {getattr(entity, 'name', '?')}")
+    return True
 
 
 def start_system_event(
@@ -1465,6 +2051,11 @@ class GameFlow:
             inst = getattr(o, "interact_instance", None)
             if isinstance(inst, dict) and inst:
                 row["interact"] = inst
+            we = getattr(o, "_world_entry", None) or {}
+            if isinstance(we.get("spawn_state"), dict) and we["spawn_state"]:
+                row["spawn_state"] = dict(we["spawn_state"])
+            if isinstance(we.get("progress_apply"), list) and we["progress_apply"]:
+                row["progress_apply"] = list(we["progress_apply"])
             return row
 
         self.world_data[map_id]["objects"] = [_object_entry_from_instance(o) for o in objs]
@@ -1580,6 +2171,8 @@ class GameFlow:
             # 상호작용(progress→events.json): 타입(object_defs)+맵 인스턴스 병합
             it.interact_instance = dict(o.get("interact") or {}) if isinstance(o.get("interact"), dict) else {}
             it.interact_spec = merge_interact_spec(OBJ_ASSETS.get(o["name"], {}), o)
+            it.obj_def = build_obj_def(o["name"], o)
+            it._world_entry = dict(o)
             objs.append(it)
         npcs = []
         for n in m.get("npcs", []):
@@ -1599,6 +2192,13 @@ class GameFlow:
                 ch = BaseCharacter(nm, n["pos"], ch_info)
             attach_npc_from_entry(ch, n)
             npcs.append(ch)
+
+        from char_behavior import apply_map_progress_states
+
+        sd = dict(self.save_data or {})
+        if save_data:
+            sd.update(save_data)
+        objs, npcs = apply_map_progress_states(objs, npcs, sd)
 
         return map_id, bg, mask, player, objs, npcs
 

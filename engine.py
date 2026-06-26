@@ -300,7 +300,11 @@ def _load_image_cached(path: str):
     if img is not None:
         return img
     try:
-        img = pygame.image.load(p).convert_alpha()
+        raw = pygame.image.load(p)
+        try:
+            img = raw.convert_alpha()
+        except Exception:
+            img = raw.convert()
     except Exception:
         return None
     _IMG_CACHE[p] = img
@@ -1269,11 +1273,26 @@ def load_anim_auto(char_name, state, direction):
             return None
         return None
 
+    def _missing_anim_placeholder():
+        """에셋 누락 표시 — 검은 상자 대신 분홍(누락) 타일."""
+        s = pygame.Surface((24, 32), pygame.SRCALPHA)
+        s.fill((255, 0, 255, 200))
+        return s
+
     path = os.path.join("assets", "images", "character", char_name, f"{state}_{direction}")
     frames = _load_char_anim_dir_cached(path, state, direction, char_name)
     if not frames:
-        img = _root_fallback_image()
-        return [img] if img is not None else [pygame.Surface((24, 32))]
+        st = (state or "").strip().lower()
+        if st not in ("idle", ""):
+            idle_path = os.path.join(
+                "assets", "images", "character", char_name, f"idle_{direction}"
+            )
+            frames = _load_char_anim_dir_cached(idle_path, "idle", direction, char_name)
+        if not frames:
+            img = _root_fallback_image()
+            if img is not None:
+                return [img]
+            return [_missing_anim_placeholder()]
     return frames
 
 
@@ -1669,6 +1688,59 @@ class BaseCharacter:
             self.event_entity_zoom_speed = float(CONFIG.get("ENTITY_ZOOM_LERP", 0.12))
         except Exception:
             self.event_entity_zoom_speed = 0.12
+
+    def retarget_char_def(self, new_name: str) -> bool:
+        """
+        char_defs 키만 바꿔 외형(애니메이션 세트)·표시 속성을 갱신 (이벤트 CHANGE).
+        위치/방향/이동 경로/들고 있는 물건 등 인스턴스 상태는 그대로 둔다.
+        ACTION_ANIM hold 등 남아 있던 애니 오버라이드는 해제하고 idle 로 맞춘다.
+        """
+        key = str(new_name or "").strip()
+        if not key or key not in CHAR_ASSETS:
+            return False
+        self.clear_anim_override()
+        self.state = "idle"
+        self.name = key
+        _ch = CHAR_ASSETS.get(key, {}) or {}
+        # 표시 속성: __init__과 동일 규칙(인스턴스 info 우선, 없으면 char_def).
+        if "layer" not in self.info:
+            self.layer = int(_ch.get("layer", 0) or 0)
+        if "ysort" not in self.info:
+            self.ysort_mode = _normalize_ysort_mode(_ch.get("ysort", "ground"))
+        if "height" not in self.info:
+            self.height = _clamp_draw_height(_ch.get("height", 0))
+        # 애니메이션 세트 재로딩 (__init__과 동일한 상태·폴백 규칙).
+        self.anims_l = {
+            "idle": load_anim_auto(key, "idle", "left"),
+            "walk": load_anim_auto(key, "walk", "left"),
+            "jump": _load_char_state_or_fallback(key, "jump", "walk"),
+            "run": _load_char_state_or_fallback(key, "run", "walk"),
+        }
+        _fallback_by_state = {"seating": "seat", "seat_idle": "seat"}
+        for st in ("hurt", "laugh", "attack", "lie", "seat", "seating", "seat_idle", "question", "surprise", "say", "sleep", "sad"):
+            fb = _fallback_by_state.get(st, "idle")
+            self.anims_l[st] = _load_char_state_or_fallback(key, st, fb)
+        self.anims_r = {
+            k: [pygame.transform.flip(img, True, False) for img in v]
+            for k, v in self.anims_l.items()
+        }
+        # 방향은 유지, 표시는 idle 기준으로 초기화.
+        self.frame_idx = 0
+        self.last_anim_time = 0
+        try:
+            anims = self.anims_r if getattr(self, "direction", "left") == "right" else self.anims_l
+            cur = anims.get("idle") or self.anims_l.get("idle")
+            if cur:
+                self.image = cur[0]
+        except Exception:
+            pass
+        try:
+            from char_behavior import apply_char_type_retarget
+
+            apply_char_type_retarget(self, key)
+        except Exception:
+            pass
+        return True
 
     def stop_moving(self, preserve_anim_override=False):
         if not preserve_anim_override:
@@ -3277,6 +3349,7 @@ class FieldItem:
         self.blink_timer = 0 # 깜빡임용
         
         self.is_holdable = info.get("is_holdable", False)
+        self.is_visible = True
         # progress→events.json 상호작용 (flow.merge_interact_spec, 맵 인스턴스는 load_map 에서 덮어씀)
         self.interact_instance = {}
         try:
@@ -3432,6 +3505,12 @@ class FieldItem:
             self.interact_spec = merge_interact_spec(info, {"interact": inst} if inst else {})
         except Exception:
             self.interact_spec = dict(info.get("interact") or {})
+        try:
+            from char_behavior import apply_object_type_retarget
+
+            apply_object_type_retarget(self, key)
+        except Exception:
+            pass
         return True
 
     def _anim_frame_idx(self):
@@ -3449,7 +3528,10 @@ class FieldItem:
                 self.image = self.frames[idx]
 
     def draw(self, screen, cam_x, cam_y, player=None, global_frame=0, zoom=1.0, y_transform=None, x_offset_fn=None, sprite_perspective_q=None, shear_lod=False):
-        if self.is_held: return
+        if self.is_held:
+            return
+        if not bool(getattr(self, "is_visible", True)):
+            return
 
         try:
             ez = float(getattr(self, "event_entity_zoom", 1.0) or 1.0)
@@ -4270,12 +4352,18 @@ def _overlay_anchor_xy(anchor: str, w: int, h: int, mx: int, my: int, sw: int, s
     a = (anchor or "center").strip().lower()
     if a in ("tl", "top_left", "left_top"):
         return (mx, my)
-    if a in ("tr", "top_right", "right_top"):
+    if a in ("tr", "top_right", "right_top", "right"):
         return (sw - w - mx, my)
     if a in ("bl", "bottom_left", "left_bottom"):
         return (mx, sh - h - my)
     if a in ("br", "bottom_right", "right_bottom"):
         return (sw - w - mx, sh - h - my)
+    if a in ("left", "l", "west"):
+        return (mx, (sh - h) // 2 + my)
+    if a in ("top", "upper", "north"):
+        return ((sw - w) // 2 + mx, my)
+    if a in ("bottom", "lower", "south"):
+        return ((sw - w) // 2 + mx, sh - h - my)
     # center
     return ((sw - w) // 2 + mx, (sh - h) // 2 + my)
 
@@ -4314,6 +4402,44 @@ def _load_obj_surface_ui(obj_name: str):
 
 def _build_overlay_surface_from_step(step: dict):
     ct = (step.get("content") or step.get("content_type") or "text").strip().lower()
+    if ct == "button":
+        font_key = (step.get("font") or "default").strip() or "default"
+        try:
+            fs = int(float(step.get("size") or step.get("font_size") or 14))
+        except Exception:
+            fs = 14
+        col = _parse_overlay_rgb(step)
+        font = _resolve_ui_font(font_key, fs)
+        label = str(step.get("text") or step.get("label") or "OK")
+        try:
+            ts = font.render(label, True, col)
+        except Exception:
+            ts = font.render("OK", True, col)
+        pad_x, pad_y = 10, 6
+        try:
+            pad_x = int(float(step.get("pad_x", pad_x)))
+            pad_y = int(float(step.get("pad_y", pad_y)))
+        except Exception:
+            pass
+        w = ts.get_width() + pad_x * 2
+        h = ts.get_height() + pad_y * 2
+        out = pygame.Surface((max(4, w), max(4, h)), pygame.SRCALPHA)
+        try:
+            bg = step.get("bg_color") or step.get("button_bg") or "40,60,80"
+            if isinstance(bg, str):
+                parts = [int(x.strip()) for x in bg.split(",") if x.strip() != ""]
+                if len(parts) >= 3:
+                    bgc = tuple(parts[:3])
+                else:
+                    bgc = (40, 60, 80)
+            else:
+                bgc = (40, 60, 80)
+        except Exception:
+            bgc = (40, 60, 80)
+        pygame.draw.rect(out, bgc, (0, 0, out.get_width(), out.get_height()), border_radius=4)
+        pygame.draw.rect(out, (180, 200, 220), (0, 0, out.get_width(), out.get_height()), 1, border_radius=4)
+        out.blit(ts, (pad_x, pad_y))
+        return out
     if ct == "image":
         name = (step.get("object") or step.get("obj") or "").strip()
         if not name:
@@ -4664,6 +4790,7 @@ class EventManager:
         self._effect_wait_ref = None  # EFFECT wait:true — 재생 끝날 때까지 next_step 보류
         self._carry_wait_item = None  # CARRY wait — fly 중인 FieldItem (완료 시 next_step)
         self.active_event_result = None  # events.json의 result (종료 시 적용)
+        self._progress_refresh_pending = False
         # SCREEN overlay (인트로/슬라이드 같은 화면 덮개)
         self.active_screen = None  # dict or None
         # UI 오버레이 (로고/텍스트, 논리 해상도 좌표)
@@ -4708,6 +4835,88 @@ class EventManager:
         # SYNC: 맵 로드 후 순차 실행 대기열 (main.py가 채움)
         self.pending_sync_queue = []
         self._is_sync_event = False
+        self._active_minigame = None  # {"session", "step"}
+
+    def is_minigame_active(self) -> bool:
+        mg = self._active_minigame
+        if not mg:
+            return False
+        session = mg.get("session")
+        return session is not None and not bool(getattr(session, "done", True))
+
+    def _clear_minigame(self):
+        self._active_minigame = None
+
+    def minigame_push_event(self, event) -> None:
+        mg = self._active_minigame
+        if not mg:
+            return
+        session = mg.get("session")
+        if session is None or getattr(session, "done", False):
+            return
+        handle = getattr(session, "handle_event", None)
+        if callable(handle):
+            handle(event)
+
+    def tick_minigame(self, dt_sec: float) -> None:
+        mg = self._active_minigame
+        if not mg:
+            return
+        session = mg.get("session")
+        if session is None or getattr(session, "done", False):
+            return
+        tick = getattr(session, "tick", None)
+        if callable(tick):
+            tick(dt_sec)
+
+    def draw_minigame(self, surf, font_fn) -> None:
+        mg = self._active_minigame
+        if not mg:
+            return
+        session = mg.get("session")
+        draw = getattr(session, "draw", None) if session is not None else None
+        if callable(draw):
+            draw(surf, font_fn)
+
+    def _finish_minigame(self, session, step) -> None:
+        """미니게임 종료 시 세이브 플래그·점수 반영."""
+        if not self.flow:
+            return
+        res = session.result() if hasattr(session, "result") else {}
+        won = bool(res.get("won", False))
+        sd = self.flow.save_data
+        win_key = (step.get("win_flag") or "progress_frog_minigame_win").strip()
+        sd[win_key] = 1 if won else 0
+        try:
+            score = int(res.get("score", 0) or 0)
+        except (TypeError, ValueError):
+            score = 0
+        last_key = (step.get("last_score_key") or "score_frog_trial_last").strip()
+        sd[last_key] = score
+        best_key = (step.get("best_score_key") or "score_frog_trial_best").strip()
+        try:
+            prev_best = int(sd.get(best_key, 0) or 0)
+        except (TypeError, ValueError):
+            prev_best = 0
+        if score > prev_best:
+            sd[best_key] = score
+        if won and _step_bool_true(step.get("seed_on_win", True)):
+            seed_key = (step.get("seed_key") or "progress_frog_seed").strip()
+            try:
+                have = int(sd.get(seed_key, 0) or 0)
+            except (TypeError, ValueError):
+                have = 0
+            if have < 1:
+                sd[seed_key] = 1
+        extra = step.get("result_win") if won else step.get("result_lose")
+        if isinstance(extra, dict):
+            for rk, rv in extra.items():
+                if rv is None or (isinstance(rv, str) and str(rv).strip() == ""):
+                    continue
+                sd[rk] = rv
+        print(
+            f"[MINIGAME] done won={won} score={score} caught={res.get('caught', '?')}"
+        )
 
     def set_fragment_catalog(self, catalog: dict):
         """CALL_EVENT target 카탈로그 (LOCAL/GLOBAL/SYNC/FRAGMENTS)."""
@@ -4723,6 +4932,7 @@ class EventManager:
         self._event_call_stack = []
         self._fragment_call_depth = 0
         self._fragment_call_set = set()
+        self._clear_minigame()
         self.active_event = event_list
         self.active_event_id = event_id  # 이벤트 ID 저장 (예: 'EV001')
         self.active_event_result = result
@@ -4963,6 +5173,7 @@ class EventManager:
         sx, sy = _scroll_enter_delta(scroll_enter, w, h, sw, sh)
         ex, ey = _scroll_exit_delta(scroll_enter, w, h, sw, sh)
 
+        ct = (step.get("content") or step.get("content_type") or "text").strip().lower()
         now = pygame.time.get_ticks()
         ov = {
             "id": oid,
@@ -4989,6 +5200,10 @@ class EventManager:
             "draw_alpha": 0,
             "draw_dx": 0.0,
             "draw_dy": 0.0,
+            "clickable": bool(
+                step.get("clickable") or step.get("button") or ct == "button"
+            ),
+            "click_action": (step.get("click_action") or step.get("on_click") or "").strip(),
         }
         if mode == "scroll":
             ov["draw_dx"] = float(sx)
@@ -6392,10 +6607,10 @@ class EventManager:
             ent = _event_resolve_entity(tgt_raw, player, npcs, objs)
             if ent is getattr(player, "held_item", None):
                 item = ent
-            elif isinstance(ent, FieldItem):
+            elif isinstance(ent, (FieldItem, BaseCharacter)):
                 item = ent
             else:
-                print(f"[CHANGE] '{tgt_raw}' 는 FieldItem 이 아님")
+                print(f"[CHANGE] '{tgt_raw}' 는 FieldItem/캐릭터 가 아님")
                 self.next_step()
                 return
         else:
@@ -6405,15 +6620,19 @@ class EventManager:
                 self.next_step()
                 return
 
-        if not isinstance(item, FieldItem):
-            print("[CHANGE] 대상이 FieldItem 이 아님")
-            self.next_step()
-            return
         old = getattr(item, "name", "?")
-        if item.retarget_object_def(new_name):
-            print(f"[CHANGE] {old} -> {new_name}")
+        if isinstance(item, BaseCharacter):
+            if item.retarget_char_def(new_name):
+                print(f"[CHANGE] {old} -> {new_name} (char)")
+            else:
+                print(f"[CHANGE] 실패: to='{new_name}' 없음(char_defs)")
+        elif isinstance(item, FieldItem):
+            if item.retarget_object_def(new_name):
+                print(f"[CHANGE] {old} -> {new_name}")
+            else:
+                print(f"[CHANGE] 실패: to='{new_name}' 없음(object_defs)")
         else:
-            print(f"[CHANGE] 실패: to='{new_name}' 없음(object_defs)")
+            print("[CHANGE] 대상이 FieldItem/캐릭터 가 아님")
         self.next_step()
 
     def _execute_step(self, step, player, camera, npcs, objs):
@@ -6610,6 +6829,24 @@ class EventManager:
             except (TypeError, ValueError):
                 sec = 0.0
             self.wait_timer = pygame.time.get_ticks() + int(max(0.0, sec) * 1000)
+
+        elif s_type == "MINIGAME_PLAY":
+            from minigames import create_session
+
+            game_id = (step.get("game") or step.get("val") or step.get("name") or "").strip()
+            try:
+                lw = int(CONFIG.get("WIDTH", 640))
+                lh = int(CONFIG.get("HEIGHT", 480))
+            except Exception:
+                lw, lh = 640, 480
+            save = dict(self.flow.save_data) if self.flow else {}
+            session = create_session(game_id, lw, lh, step, save)
+            if session is None:
+                print(f"[MINIGAME] unknown game: {game_id!r}")
+                self.next_step()
+            else:
+                self._active_minigame = {"session": session, "step": step}
+                print(f"[MINIGAME] start {game_id!r}")
 
         elif s_type in ("ANIM", "ACTION_ANIM"):
             self._run_char_anim_step(step, player, npcs, objs)
@@ -6824,6 +7061,7 @@ class EventManager:
                     flow=self.flow,
                     map_id=mid,
                     player=player,
+                    step=step if isinstance(step, dict) else None,
                 )
             self.next_step()
 
@@ -7526,6 +7764,15 @@ class EventManager:
             if pygame.time.get_ticks() >= self.wait_timer:
                 self.next_step()
 
+        elif s_type == "MINIGAME_PLAY":
+            mg = self._active_minigame
+            session = mg.get("session") if isinstance(mg, dict) else None
+            if session is not None and bool(getattr(session, "done", False)):
+                st = mg.get("step") if isinstance(mg, dict) else {}
+                self._finish_minigame(session, st if isinstance(st, dict) else {})
+                self._clear_minigame()
+                self.next_step()
+
         elif s_type in ("ANIM", "ACTION_ANIM"):
             if self._anim_wait_end_ms and pygame.time.get_ticks() >= int(self._anim_wait_end_ms):
                 self._anim_wait_end_ms = 0
@@ -7620,6 +7867,7 @@ class EventManager:
         if self._end_zoom is not None and self._last_camera:
             self._last_camera.target_zoom = float(self._end_zoom)
         self.active_screen = None
+        self._clear_minigame()
         # 이벤트 강제 종료 시에도 BGM은 유지 (MUSIC_STOP/END가 있을 때만 끈다)
         self.step_idx = len(self.active_event)
         self.end_event()
@@ -7633,6 +7881,40 @@ class EventManager:
             return False
         self._trigger_event_escape()
         return True
+
+    def try_overlay_ui_click(self, mx: int, my: int):
+        """OVERLAY_UI clickable 영역 클릭. click_action 문자열 또는 None."""
+        try:
+            ix, iy = int(mx), int(my)
+        except Exception:
+            return None
+        for ov in reversed(list(self._ui_overlays or [])):
+            if not ov.get("clickable"):
+                continue
+            if ov.get("phase") == "done":
+                continue
+            try:
+                alpha = int(ov.get("draw_alpha", 255))
+            except Exception:
+                alpha = 255
+            if alpha <= 0:
+                continue
+            x = int(float(ov.get("rest_x", 0)) + float(ov.get("draw_dx", 0)))
+            y = int(float(ov.get("rest_y", 0)) + float(ov.get("draw_dy", 0)))
+            w = int(ov.get("w", 0) or 0)
+            h = int(ov.get("h", 0) or 0)
+            if w <= 0 or h <= 0:
+                continue
+            if x <= ix < x + w and y <= iy < y + h:
+                act = (ov.get("click_action") or "").strip()
+                return act or "click"
+        return None
+
+    def remove_ui_overlay(self, overlay_id: str) -> None:
+        rid = (overlay_id or "").strip()
+        if not rid:
+            return
+        self._ui_overlays = [o for o in (self._ui_overlays or []) if o.get("id") != rid]
 
     def try_escape_key(self, key):
         if not self.active_event or self._escape_mode != "key":
@@ -7675,6 +7957,7 @@ class EventManager:
                 self._apply_event_result_to_save(
                     self.active_event_result, self.active_event_id
                 )
+                self._progress_refresh_pending = True
             frame = self._event_call_stack.pop()
             self._fragment_call_depth = max(0, self._fragment_call_depth - 1)
             if self._fragment_call_depth <= 0:
@@ -7710,8 +7993,11 @@ class EventManager:
         self._move_sync_group = None
         if ended_id and self.active_event_result:
             self._apply_event_result_to_save(self.active_event_result, ended_id)
+        if ended_id:
+            self._progress_refresh_pending = True
 
         self.last_ended_event_id = ended_id
+        self._clear_minigame()
         try:
             self._ui_overlays = [o for o in (self._ui_overlays or []) if o.get("persist")]
         except Exception:

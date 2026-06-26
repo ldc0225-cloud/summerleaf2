@@ -122,18 +122,52 @@
     "jump_max_gap": 30
   },
   "fairy1": {
-    "jump_max_gap": 30
+    "jump_max_gap": 30,
+    "display_name": "fairy1"
   },
   "flower_fairy1": {
     "jump_max_gap": 30,
     "display_name": "flower_fairy1",
+    "spawn_state": {
+      "visible": false,
+      "dir": "left"
+    },
+    "progress_apply": [
+      {
+        "when": "progress_flower1_1 < 1003",
+        "visible": false
+      },
+      {
+        "when": "progress_flower1_1 == 1003",
+        "visible": true,
+        "anim": "idle",
+        "anim_mode": "hold",
+        "dir": "left"
+      },
+      {
+        "when": "progress_flower1_1 == 1004",
+        "visible": true,
+        "anim": "jump",
+        "anim_mode": "hold",
+        "dir": "left"
+      }
+    ],
     "interact": {
       "enabled": true,
       "range": 16.0,
+      "offset": [
+        0.0,
+        -10.0
+      ],
       "bindings": [
         {
-          "condition": "progress_flower1_1==1003",
+          "condition": "progress_wateringcan==1002",
           "event_id": "ev_flower1_3",
+          "priority": 100
+        },
+        {
+          "condition": "progress_flower1_1==1004",
+          "event_id": "ev_flower1_4",
           "priority": 100
         }
       ],

@@ -29,7 +29,7 @@ def ui_text_reference_width() -> float:
 
 
 def ui_layout_scale(*, screen_w: int | None = None) -> float:
-    """아이콘·머리 UI 오프셋용. NATIVE_640에서는 1.0 (추가 2배 스케일 없음)."""
+    """아이콘·말풍선·pushbutton 스케일. UI_LAYOUT_WIDTH(=논리 WIDTH) 기준 1:1 → 보통 1.0."""
     if screen_w is None:
         try:
             screen_w = int(CONFIG.get("WIDTH", 320) or 320)
@@ -702,8 +702,11 @@ def build_global_hotkey_event_map():
     return out
 
 
-def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player):
-    """DEV_CMD / 핫키용: 필드에서 즉시 실행되는 디버그·시스템 동작."""
+def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=None):
+    """DEV_CMD / 핫키용: 필드에서 즉시 실행되는 디버그·시스템 동작.
+
+    step: 이벤트 스텝 dict (선택). start_fishing 등에 pond·win_flag 전달.
+    """
     rt = FIELD_RUNTIME_UI
     n = (cmd or "").strip().lower()
     if n == "toggle_show_mask":
@@ -776,6 +779,47 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player):
             ev_mgr.swing_ride_request = {"action": "start"}
         except Exception:
             pass
+    elif n == "start_fishing":
+        from activities import request_field_activity
+
+        pond = "jjangpu_water1"
+        params = {"await_tap": True}
+        if isinstance(step, dict):
+            pond = str(step.get("pond") or step.get("pond_id") or pond).strip()
+            if step.get("win_flag"):
+                params["win_flag"] = step.get("win_flag")
+            if step.get("await_tap") is not None:
+                params["await_tap"] = step.get("await_tap")
+        request_field_activity(ev_mgr, "fishing", pond=pond, **params)
+    elif n == "stop_fishing":
+        try:
+            ev_mgr.field_activity_stop_request = True
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("fishing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+    elif n.startswith("start_activity_"):
+        # 범용: start_activity_fishing, start_activity_swing (추후)
+        from activities import request_field_activity
+
+        act_id = n[len("start_activity_") :].strip()
+        params = {}
+        if isinstance(step, dict):
+            for k in ("pond", "pond_id", "win_flag"):
+                if k in step and step.get(k) is not None:
+                    params[k] = step.get(k)
+        if act_id:
+            request_field_activity(ev_mgr, act_id, **params)
     elif n == "restart_delete_save":
         try:
             if os.path.isfile(flow.save_path):
