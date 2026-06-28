@@ -1563,6 +1563,10 @@ def main():
         "bg": [],
         "obj_draw": [],
         "mask": [],
+        # 틸트/쉬어 "변환 중(transition)" 프레임만 따로 집계 → FAST_TRANSITION ON/OFF 전후 비교용.
+        # bg_anim/mask_anim 의 median(ms)을 ON/OFF로 각각 측정하면 경량화 효과를 수치로 비교 가능.
+        "bg_anim": [],
+        "mask_anim": [],
         "cloud": [],
         "effects": [],
         "overlay": [],
@@ -1636,10 +1640,12 @@ def main():
             "cam_update",
             "render_cpu",
             "bg",
+            "bg_anim",
             "bg_zones",
             "obj_pool_sort",
             "obj_draw",
             "mask",
+            "mask_anim",
             "cloud",
             "effects",
             "overlay",
@@ -1652,6 +1658,8 @@ def main():
             "flip",
             "present",
         )
+        # 틸트/쉬어 "변환 중" 프레임 수(전후 비교 시 표본 크기 확인용). 비우기 전에 먼저 집계.
+        n_anim = len(perf_buf.get("bg_anim") or [])
         parts = []
         for k in keys:
             arr = perf_buf.get(k) or []
@@ -1663,6 +1671,8 @@ def main():
                 ms = arr[-1]
             parts.append(f"{k}:{ms:.2f}ms")
             arr.clear()
+        if n_anim:
+            parts.append(f"anim_frames:{n_anim}")
         msg = " | ".join(parts)
         if msg:
             print("[PERF] " + msg)
@@ -3665,6 +3675,17 @@ def main():
             anim_shear_draw = False
         cache_write_ok = not (is_zooming or anim_tilt_draw or anim_shear_draw)
 
+        # --- 틸트/쉬어 transition 경량화(이 프레임 1회 계산, 배경+마스크 공용) ---
+        # fast_ts: 마스터 스위치. anim_ts: 틸트 또는 쉬어가 "움직이는 중"인지.
+        # tilt_cache_ok: 변환 중에도 캐시를 허용할지. 변환 중엔 키를 굵게(coarse) 잡아
+        #   키 개수가 적으므로(=RSS 안전) 캐싱을 켜서 연속 프레임 재계산을 줄인다.
+        try:
+            fast_ts = bool(CONFIG.get("TILT_SHEAR_FAST_TRANSITION", True))
+        except Exception:
+            fast_ts = True
+        anim_ts = bool(anim_tilt_draw or anim_shear_draw)
+        tilt_cache_ok = bool(cache_write_ok or (fast_ts and anim_ts))
+
         # 틸트 계수(양자화)
         f_q = 1.0
         if use_perspective_branch and (not bg_direct_fallback) and s_bg is not None:
@@ -3682,7 +3703,15 @@ def main():
                 except Exception:
                     anim_tilt = False
                 if anim_tilt:
-                    tq = max(tq, 0.02)
+                    if fast_ts:
+                        # (C) 변환 중엔 f_q 양자화를 굵게 → 캐시 키 수를 줄여 캐싱을 켤 수 있게 함.
+                        try:
+                            tq_anim = float(CONFIG.get("RENDER_TILT_STEP_ANIM", 0.05))
+                        except Exception:
+                            tq_anim = 0.05
+                        tq = max(tq, max(0.02, tq_anim))
+                    else:
+                        tq = max(tq, 0.02)
                 if tilt_active:
                     f = max(tilt_factor_min, min(1.0, float(tilt_current)))
                     f_q = max(tilt_factor_min, min(1.0, round(round(f / tq) * tq, 4)))
@@ -3718,7 +3747,7 @@ def main():
                         use_perspective_branch = False
                         raise RuntimeError("skip_tilt_bg_large_surface")
                     s_bg2 = pygame.transform.scale(s_bg, (sw, nh))
-                    if cache_write_ok:
+                    if tilt_cache_ok:
                         _rc_put(key, s_bg2)
 
                 # s_bg2 자체가 이미 (sw, sh*f_q)로 만들어진 압축 결과다.
@@ -3740,6 +3769,16 @@ def main():
                 except Exception:
                     sh2f = cur_h_f
                 shear_eff = max(0, int(round(float(shear_render) * (float(sh2f) / cur_h_f))))
+
+                # (C) 변환 중엔 shear_eff(px)도 굵게 양자화 → 캐시 키 수 축소(키=변환 surface 1:1 매칭).
+                #     실제 변환 값 자체를 스냅하므로 캐시/렌더가 항상 일치(틀어짐 없음).
+                if fast_ts and anim_ts and shear_eff > 0:
+                    try:
+                        _sq = int(CONFIG.get("TILT_SHEAR_PX_QUANT_ANIM", 8) or 8)
+                    except Exception:
+                        _sq = 8
+                    _sq = max(1, _sq)
+                    shear_eff = int(round(float(shear_eff) / float(_sq)) * _sq)
 
                 # "플레이어의 화면 위치는 고정"되도록, 압축 변환을 플레이어 발 위치(screen y)에 앵커링
                 # 앵커는 렌더에 쓰는 스냅 줌(z)과 동일해야 1~몇 px 드리프트가 줄어든다.
@@ -3774,6 +3813,13 @@ def main():
                 except Exception:
                     slice_h = 8
                 slice_h = max(1, min(64, slice_h))
+                # (A) 변환 중엔 슬라이스를 굵게 → 쉬어 루프 blit 횟수 급감(움직이는 중엔 계단 안 보임).
+                if fast_ts and anim_ts:
+                    try:
+                        slice_h = max(slice_h, int(CONFIG.get("TILT_SHEAR_SLICE_H_PX_ANIM", 16) or 16))
+                    except Exception:
+                        slice_h = max(slice_h, 16)
+                    slice_h = max(1, min(64, slice_h))
 
                 # 쉬어 결과는 왼쪽에 shear_eff 만큼 투명 열이 있다. 전체 맵(bg_dx 큰 음수)에선 화면 밖으로 잘리지만
                 # 뷰포트(bg_blit_dx≈0)에선 그 열이 화면 왼쪽에 그대로 보이므로 그때만 blit X를 당긴다.
@@ -3822,9 +3868,13 @@ def main():
                             dxs = int(round((1.0 - rel) * shear_eff))
                             src = pygame.Rect(0, yy, sw, hh)
                             shear_bg_tmp.blit(tilt_bg_tmp, (dxs, yy), area=src)
-                        s_bg3 = shear_bg_tmp.copy()
-                        if cache_write_ok:
+                        # (B) 캐시에 넣지 않을 땐 .copy()가 순수 낭비(같은 프레임에서 즉시 blit됨).
+                        #     캐싱할 때만 복사해서 보관하고, 아니면 재사용 tmp를 그대로 그린다.
+                        if tilt_cache_ok:
+                            s_bg3 = shear_bg_tmp.copy()
                             _rc_put(skey, s_bg3)
+                        else:
+                            s_bg3 = shear_bg_tmp
 
                     def x_offset_fn(y_screen):
                         try:
@@ -3894,7 +3944,10 @@ def main():
         elif (not bg_direct_fallback) and (not flat_vp_ok) and s_bg is not None:
             render_surf.blit(s_bg, (bg_blit_dx, bg_blit_dy))
         if perf_enabled and t0 is not None:
-            _padd("bg", _pnow() - t0)
+            _dt_bg = _pnow() - t0
+            _padd("bg", _dt_bg)
+            if anim_ts:
+                _padd("bg_anim", _dt_bg)
 
         # --- 입력 역변환용: "렌더에서 실제로 사용한" 변환 파라미터 캐시 ---
         # 다음 프레임 입력에서 사용(줌+틸트에서도 클릭 좌표가 흔들리지 않게)
@@ -4234,6 +4287,13 @@ def main():
                     except Exception:
                         tq = 0.01
                     tq = max(0.001, min(0.1, tq))
+                    # 배경과 동일하게 변환 중엔 f_q 양자화를 굵게 → 배경/마스크 정렬 유지 + 캐시 키 축소.
+                    if fast_ts and anim_ts:
+                        try:
+                            tq_anim_m = float(CONFIG.get("RENDER_TILT_STEP_ANIM", 0.05))
+                        except Exception:
+                            tq_anim_m = 0.05
+                        tq = max(tq, max(0.02, tq_anim_m))
                     if tilt_active:
                         f = max(tilt_factor_min, min(1.0, float(tilt_current)))
                         f_q = max(tilt_factor_min, min(1.0, round(round(f / tq) * tq, 4)))
@@ -4251,7 +4311,7 @@ def main():
                             raise RuntimeError("skip_tilt_mask_large_surface")
                         s_mask2 = pygame.transform.scale(s_mask, (sw, nh))
                         s_mask2.set_alpha(120)
-                        if cache_write_ok:
+                        if tilt_cache_ok:
                             _rc_put(key, s_mask2)
 
                     if tilt_mask_tmp is None or tilt_mask_tmp.get_width() != s_mask2.get_width() or tilt_mask_tmp.get_height() != s_mask2.get_height():
@@ -4267,6 +4327,13 @@ def main():
                     except Exception:
                         slice_h = 8
                     slice_h = max(1, min(64, slice_h))
+                    # (A) 변환 중 마스크 쉬어 슬라이스도 굵게(배경과 동일 기준).
+                    if fast_ts and anim_ts:
+                        try:
+                            slice_h = max(slice_h, int(CONFIG.get("TILT_SHEAR_SLICE_H_PX_ANIM", 16) or 16))
+                        except Exception:
+                            slice_h = max(slice_h, 16)
+                        slice_h = max(1, min(64, slice_h))
 
                     sw = int(tilt_mask_tmp.get_width())
                     sh2 = int(tilt_mask_tmp.get_height())
@@ -4287,7 +4354,7 @@ def main():
                                 src = pygame.Rect(0, yy, sw, hh)
                                 s_mask3.blit(tilt_mask_tmp, (dxs, yy), area=src)
                             s_mask3.set_alpha(120)
-                        if cache_write_ok:
+                        if tilt_cache_ok:
                             _rc_put(skey, s_mask3)
                         render_surf.blit(s_mask3, (int(bg_dx), int(round(float(bg_dy) + float(shift_y)))))
                     else:
@@ -4299,7 +4366,10 @@ def main():
                 if s_mask is not None:
                     render_surf.blit(s_mask, (bg_dx, bg_dy))
             if perf_enabled and t0 is not None:
-                _padd("mask", _pnow() - t0)
+                _dt_mask = _pnow() - t0
+                _padd("mask", _dt_mask)
+                if anim_ts:
+                    _padd("mask_anim", _dt_mask)
         # --------------------------------------------------
 
         # --- 구름 그림자 FX (맵/캐릭터/오브젝트 위에 덮음: 월드에 붙이고 틸트/줌/쉬어와 함께 변형) ---
