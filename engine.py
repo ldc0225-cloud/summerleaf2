@@ -1,6 +1,6 @@
 import pygame, os, math, uuid
 import heapq
-from collections import deque
+from collections import deque, OrderedDict
 
 from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES
 try:
@@ -36,9 +36,11 @@ from field_runtime import (
 )
 
 # --- global image caches (reduce duplicate loads, critical for 1GB devices) ---
-_IMG_CACHE = {}   # abs_path -> pygame.Surface
-_ANIM_CACHE = {}  # norm_dir_path -> [pygame.Surface, ...]  (오브젝트 등)
-_CHAR_ANIM_CACHE = {}  # (norm_dir, state, direction) -> [pygame.Surface, ...]
+_IMG_CACHE = OrderedDict()   # abs_path -> pygame.Surface (LRU)
+_ANIM_CACHE = OrderedDict()  # norm_dir_path -> [pygame.Surface, ...]
+_CHAR_ANIM_CACHE = OrderedDict()  # (norm_dir, state, direction) -> [pygame.Surface, ...]
+_IMG_CACHE_MAX = 2048
+_ANIM_CACHE_MAX = 512
 
 # --- swing prototype caches (kept here to slim main.py) ---
 _SWING_IMG_IDLE = None
@@ -298,6 +300,10 @@ def _load_image_cached(path: str):
     p = os.path.normpath(path)
     img = _IMG_CACHE.get(p)
     if img is not None:
+        try:
+            _IMG_CACHE.move_to_end(p)
+        except Exception:
+            pass
         return img
     try:
         raw = pygame.image.load(p)
@@ -308,10 +314,15 @@ def _load_image_cached(path: str):
     except Exception:
         return None
     _IMG_CACHE[p] = img
-    # defensive cap: avoid unbounded growth on dev machines
-    if len(_IMG_CACHE) > 2048:
-        _IMG_CACHE.clear()
-        _IMG_CACHE[p] = img
+    try:
+        _IMG_CACHE.move_to_end(p)
+    except Exception:
+        pass
+    while len(_IMG_CACHE) > _IMG_CACHE_MAX:
+        try:
+            _IMG_CACHE.popitem(last=False)
+        except Exception:
+            break
     return img
 
 
@@ -494,6 +505,10 @@ def _load_anim_dir_cached(dir_path: str):
     d = os.path.normpath(dir_path)
     cached = _ANIM_CACHE.get(d)
     if cached is not None:
+        try:
+            _ANIM_CACHE.move_to_end(d)
+        except Exception:
+            pass
         return cached
     if not (os.path.exists(d) and os.path.isdir(d)):
         return None
@@ -512,9 +527,15 @@ def _load_anim_dir_cached(dir_path: str):
     if not frames:
         return None
     _ANIM_CACHE[d] = frames
-    if len(_ANIM_CACHE) > 512:
-        _ANIM_CACHE.clear()
-        _ANIM_CACHE[d] = frames
+    try:
+        _ANIM_CACHE.move_to_end(d)
+    except Exception:
+        pass
+    while len(_ANIM_CACHE) > _ANIM_CACHE_MAX:
+        try:
+            _ANIM_CACHE.popitem(last=False)
+        except Exception:
+            break
     return frames
 
 
@@ -605,6 +626,10 @@ def _load_char_anim_dir_cached(dir_path: str, state: str, direction: str, char_n
     cache_key = (d, str(state), str(direction))
     cached = _CHAR_ANIM_CACHE.get(cache_key)
     if cached is not None:
+        try:
+            _CHAR_ANIM_CACHE.move_to_end(cache_key)
+        except Exception:
+            pass
         return cached
     if not (os.path.exists(d) and os.path.isdir(d)):
         return None
@@ -629,9 +654,15 @@ def _load_char_anim_dir_cached(dir_path: str, state: str, direction: str, char_n
     if not frames:
         return None
     _CHAR_ANIM_CACHE[cache_key] = frames
-    if len(_CHAR_ANIM_CACHE) > 512:
-        _CHAR_ANIM_CACHE.clear()
-        _CHAR_ANIM_CACHE[cache_key] = frames
+    try:
+        _CHAR_ANIM_CACHE.move_to_end(cache_key)
+    except Exception:
+        pass
+    while len(_CHAR_ANIM_CACHE) > _ANIM_CACHE_MAX:
+        try:
+            _CHAR_ANIM_CACHE.popitem(last=False)
+        except Exception:
+            break
     return frames
 
 
@@ -882,6 +913,315 @@ def _scan_music_library():
     return out
 
 
+# --- vertical top-anchored shear (bg/mask) — main.py 와 동일 공식, dx 병합으로 blit 횟수 축소 ---
+_VERTICAL_TOP_SHEAR_PLAN_CACHE = OrderedDict()
+_VERTICAL_TOP_SHEAR_PLAN_MAX = 64
+
+
+def vertical_top_shear_merged_plan(surface_h: int, shear_px: int, slice_h: int):
+    """round((1 - yy/h) * shear) 슬라이스 계획. 연속 동일 dx 행은 blit 1회로 병합."""
+    try:
+        sh = int(surface_h)
+        spx = int(shear_px)
+        sh_slice = int(slice_h)
+    except Exception:
+        return ()
+    sh = max(0, sh)
+    spx = max(0, spx)
+    sh_slice = max(1, min(64, sh_slice))
+    key = (sh, spx, sh_slice)
+    cached = _VERTICAL_TOP_SHEAR_PLAN_CACHE.get(key)
+    if cached is not None:
+        try:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        except Exception:
+            pass
+        return cached
+    raw = []
+    for yy in range(0, sh, sh_slice):
+        hh = min(sh_slice, sh - yy)
+        rel = 0.0 if sh <= 1 else (yy / float(sh))
+        dxs = int(round((1.0 - rel) * float(spx)))
+        raw.append((yy, hh, dxs))
+    if not raw:
+        plan = ()
+    else:
+        merged = []
+        i = 0
+        n = len(raw)
+        while i < n:
+            yy0, hh0, dx0 = raw[i]
+            total_h = hh0
+            j = i + 1
+            while j < n and raw[j][2] == dx0:
+                total_h += raw[j][1]
+                j += 1
+            merged.append((yy0, total_h, dx0))
+            i = j
+        plan = tuple(merged)
+    try:
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE[key] = plan
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        while len(_VERTICAL_TOP_SHEAR_PLAN_CACHE) > _VERTICAL_TOP_SHEAR_PLAN_MAX:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.popitem(last=False)
+    except Exception:
+        pass
+    return plan
+
+
+def apply_vertical_top_shear(dst, src, shear_px, slice_h, *, plan=None, clear_dst=True):
+    """배경/마스크용 상단 고정 선형 쉬어 — 시각 결과는 main 슬라이스 루프와 동일."""
+    if dst is None or src is None:
+        return dst
+    try:
+        sw = int(src.get_width())
+        sh = int(src.get_height())
+    except Exception:
+        return dst
+    if sw <= 0 or sh <= 0:
+        return dst
+    try:
+        spx = int(shear_px)
+    except Exception:
+        spx = 0
+    if spx <= 0:
+        if clear_dst:
+            try:
+                dst.fill((0, 0, 0, 0))
+            except Exception:
+                pass
+        try:
+            dst.blit(src, (0, 0))
+        except Exception:
+            pass
+        return dst
+    try:
+        sh_slice = int(slice_h)
+    except Exception:
+        sh_slice = 8
+    sh_slice = max(1, min(64, sh_slice))
+    if plan is None:
+        plan = vertical_top_shear_merged_plan(sh, spx, sh_slice)
+    if clear_dst:
+        try:
+            dst.fill((0, 0, 0, 0))
+        except Exception:
+            pass
+    blit = dst.blit
+    Rect = pygame.Rect
+    for yy, hh, dxs in plan:
+        try:
+            blit(src, (dxs, yy), area=Rect(0, yy, sw, hh))
+        except Exception:
+            pass
+    return dst
+
+
+def vertical_top_shear_merged_plan_region(
+    surface_h_full: int,
+    shear_px: int,
+    slice_h: int,
+    row_start: int,
+    row_end: int,
+):
+    """전체 높이 sh_full 기준 rel 공식으로 [row_start, row_end) 구간만 슬라이스·병합."""
+    try:
+        shf = int(surface_h_full)
+        spx = int(shear_px)
+        sh_slice = int(slice_h)
+        r0 = int(row_start)
+        r1 = int(row_end)
+    except Exception:
+        return ()
+    shf = max(1, shf)
+    spx = max(0, spx)
+    sh_slice = max(1, min(64, sh_slice))
+    r0 = max(0, min(shf, r0))
+    r1 = max(r0, min(shf, r1))
+    if r1 <= r0 or spx <= 0:
+        return ()
+    key = (shf, spx, sh_slice, r0, r1)
+    cached = _VERTICAL_TOP_SHEAR_PLAN_CACHE.get(key)
+    if cached is not None:
+        try:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        except Exception:
+            pass
+        return cached
+    raw = []
+    for yy in range(r0, r1, sh_slice):
+        hh = min(sh_slice, r1 - yy, shf - yy)
+        if hh <= 0:
+            break
+        rel = 0.0 if shf <= 1 else (yy / float(shf))
+        dxs = int(round((1.0 - rel) * float(spx)))
+        raw.append((yy, hh, dxs))
+    if not raw:
+        plan = ()
+    else:
+        merged = []
+        i = 0
+        n = len(raw)
+        while i < n:
+            yy0, hh0, dx0 = raw[i]
+            total_h = hh0
+            j = i + 1
+            while j < n and raw[j][2] == dx0:
+                total_h += raw[j][1]
+                j += 1
+            merged.append((yy0, total_h, dx0))
+            i = j
+        plan = tuple(merged)
+    try:
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE[key] = plan
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        while len(_VERTICAL_TOP_SHEAR_PLAN_CACHE) > _VERTICAL_TOP_SHEAR_PLAN_MAX:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.popitem(last=False)
+    except Exception:
+        pass
+    return plan
+
+
+def apply_vertical_top_shear_region(
+    dst,
+    src,
+    shear_px,
+    slice_h,
+    row_start,
+    row_end,
+    surface_h_full,
+    *,
+    plan=None,
+    clear_dst=True,
+):
+    """전체 맵 쉬어의 [row_start,row_end) 부분만 dst(높이=row_end-row_start)에 기록."""
+    if dst is None or src is None:
+        return dst
+    try:
+        sw = int(src.get_width())
+        shf = int(surface_h_full)
+        r0 = int(row_start)
+        r1 = int(row_end)
+        spx = int(shear_px)
+    except Exception:
+        return dst
+    if sw <= 0 or shf <= 0 or spx <= 0 or r1 <= r0:
+        return dst
+    r0 = max(0, min(shf, r0))
+    r1 = max(r0, min(shf, r1))
+    strip_h = r1 - r0
+    try:
+        sh_slice = int(slice_h)
+    except Exception:
+        sh_slice = 8
+    sh_slice = max(1, min(64, sh_slice))
+    if plan is None:
+        plan = vertical_top_shear_merged_plan_region(shf, spx, sh_slice, r0, r1)
+    if clear_dst:
+        try:
+            dst.fill((0, 0, 0, 0))
+        except Exception:
+            pass
+    blit = dst.blit
+    Rect = pygame.Rect
+    for yy, hh, dxs in plan:
+        try:
+            blit(src, (dxs, yy - r0), area=Rect(0, yy, sw, hh))
+        except Exception:
+            pass
+    return dst
+
+
+def shear_strip_row_span(surface_h, blit_y, view_h, *, pad_px=64, bucket_px=128):
+    """화면에 보이는 tilt 행 구간 [r0,r1). bucket 으로 수직 팬 시 캐시 재사용."""
+    try:
+        sh = int(surface_h)
+        by = float(blit_y)
+        vh = int(view_h)
+        pad = max(0, int(pad_px))
+        bucket = max(16, int(bucket_px))
+    except Exception:
+        return 0, max(1, int(surface_h or 1))
+    sh = max(1, sh)
+    vh = max(1, vh)
+    r0 = max(0, int(math.floor(-by)) - pad)
+    r1 = min(sh, int(math.ceil(float(vh) - by)) + pad)
+    if r1 <= r0:
+        r0, r1 = 0, sh
+    r0b = (r0 // bucket) * bucket
+    r1b = min(sh, ((r1 + bucket - 1) // bucket) * bucket)
+    if r1b <= r0b:
+        r0b, r1b = 0, sh
+    return int(r0b), int(r1b)
+
+
+# --- sprite field shear cache (동일 qtop/qbot 밴드 오브젝트 간 공유) ---
+_SPRITE_FIELD_SHEAR_CACHE = OrderedDict()  # key -> (Surface, dx_adj, est_mb)
+_SPRITE_FIELD_SHEAR_CACHE_MB = 0.0
+
+
+def _sprite_field_shear_cache_get(key):
+    v = _SPRITE_FIELD_SHEAR_CACHE.get(key)
+    if v is None:
+        return None
+    try:
+        _SPRITE_FIELD_SHEAR_CACHE.move_to_end(key)
+    except Exception:
+        pass
+    return v[0], int(v[1])
+
+
+def _sprite_field_shear_cache_put(key, surf, dx_adj):
+    global _SPRITE_FIELD_SHEAR_CACHE_MB
+    if surf is None:
+        return
+    try:
+        w, h = surf.get_size()
+    except Exception:
+        return
+    est = _est_rgba_mb(w, h)
+    try:
+        mb_limit = float(CONFIG.get("SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT", 48.0))
+    except Exception:
+        mb_limit = 48.0
+    mb_limit = max(8.0, min(256.0, mb_limit))
+    try:
+        max_items = int(CONFIG.get("SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS", 128) or 128)
+    except Exception:
+        max_items = 128
+    max_items = max(16, min(1024, max_items))
+    if est <= 0.0 or est > mb_limit * 0.5:
+        return
+    old = _SPRITE_FIELD_SHEAR_CACHE.get(key)
+    if old is not None:
+        try:
+            _SPRITE_FIELD_SHEAR_CACHE_MB -= float(old[2])
+        except Exception:
+            pass
+        try:
+            del _SPRITE_FIELD_SHEAR_CACHE[key]
+        except Exception:
+            pass
+    try:
+        while (_SPRITE_FIELD_SHEAR_CACHE_MB + est) > mb_limit and _SPRITE_FIELD_SHEAR_CACHE:
+            _k, (_s, _dx, mb) = _SPRITE_FIELD_SHEAR_CACHE.popitem(last=False)
+            try:
+                _SPRITE_FIELD_SHEAR_CACHE_MB -= float(mb)
+            except Exception:
+                pass
+        while len(_SPRITE_FIELD_SHEAR_CACHE) >= max_items and _SPRITE_FIELD_SHEAR_CACHE:
+            _k, (_s, _dx, mb) = _SPRITE_FIELD_SHEAR_CACHE.popitem(last=False)
+            try:
+                _SPRITE_FIELD_SHEAR_CACHE_MB -= float(mb)
+            except Exception:
+                pass
+    except Exception:
+        _SPRITE_FIELD_SHEAR_CACHE.clear()
+        _SPRITE_FIELD_SHEAR_CACHE_MB = 0.0
+    _SPRITE_FIELD_SHEAR_CACHE[key] = (surf, int(dx_adj), float(est))
+    _SPRITE_FIELD_SHEAR_CACHE_MB += float(est)
+
+
 def _shear_surface_by_field_xoffset(
     render_img: pygame.Surface,
     top_y_screen: float,
@@ -942,13 +1282,21 @@ def _shear_surface_by_field_xoffset(
 
     out_w = w + (mx - mn)
     out = pygame.Surface((out_w, h), pygame.SRCALPHA)
+    bands = []
     i = 0
     for yy in range(0, h, slice_h):
         hh = min(slice_h, h - yy)
-        dx = (shifts[i] - mn)
+        dx = int(shifts[i] - mn)
         i += 1
+        if bands and bands[-1][2] == dx and bands[-1][0] + bands[-1][1] == yy:
+            bands[-1] = (bands[-1][0], bands[-1][1] + hh, dx)
+        else:
+            bands.append((yy, hh, dx))
+    blit = out.blit
+    Rect = pygame.Rect
+    for yy, hh, dx in bands:
         try:
-            out.blit(render_img, (dx, yy), area=pygame.Rect(0, yy, w, hh))
+            blit(render_img, (dx, yy), area=Rect(0, yy, w, hh))
         except Exception:
             pass
     # bottom 행은 shift=0 → 원래 x에 오도록 dx_adjust=mn 반환
@@ -1194,10 +1542,7 @@ def _blit_feet_shadow(
     # x_offset_fn에는 정수 픽셀 y를 넣는다(가벼운 안정화).
     cy_q = float(int(round(float(cy))))
     if callable(x_offset_fn):
-        try:
-            cx = float(cx) + float(x_offset_fn(float(cy_q)))
-        except Exception:
-            pass
+        cx = float(cx) + float(shear_base_offset_px(cy_q, x_offset_fn))
     base_rx = float(CONFIG.get("SHADOW_ELLIPSE_RX", 15))
     base_ry = float(CONFIG.get("SHADOW_ELLIPSE_RY", 7))
     rx = max(2, int(base_rx * zoom * size_scale * entity_scale_mul))
@@ -2004,10 +2349,7 @@ class BaseCharacter:
         feet_y_q = float(int(round(float(feet_y))))
         feet_x = float((self.pos[0] - cam_x) * zoom)
         if callable(x_offset_fn):
-            try:
-                feet_x = float(feet_x) + float(x_offset_fn(float(feet_y_q)))
-            except Exception:
-                pass
+            feet_x = float(feet_x) + float(shear_base_offset_px(feet_y_q, x_offset_fn))
         h_off = float(getattr(self, "height", 0) or 0)
         if h_off > 0.0:
             feet_y = float(feet_y_q) - h_off * float(zoom)
@@ -2103,6 +2445,11 @@ class MaskWalkingCharacter(BaseCharacter):
         self._follow_target = None  # (x,y) or None
         self._follow_slot_goal = None  # 리더 뒤 목표 슬롯; 도랑 점프 경로 덮어쓰기 방지용
         self._follow_last_plan_ms = 0
+        # 캐릭터/오브젝트 자연 회피(동적 A* 재계획) 상태 — 효율 위해 쿨다운/횟수 제한
+        self._avoid_block_since_ms = 0   # 현재 막힘이 시작된 시각(0=안 막힘)
+        self._avoid_replans = 0          # 연속 막힘 동안 누적 재계획 횟수
+        self._avoid_next_replan_ms = 0   # 다음 재계획 허용 시각(쿨다운)
+        self._steer_side = 0             # 장애물 비껴가기 선호 방향(+1/-1, 0=없음) — 좌우 떨림 방지
 
     def ground_feet_position(self):
         ja = self._jump_arc
@@ -2325,6 +2672,23 @@ class MaskWalkingCharacter(BaseCharacter):
         grids = job.get("grids") or []
         gi = int(job.get("grid_idx") or 0)
         if gi >= len(grids):
+            # 모든 격자 실패 → 마지막으로 코너 탈출(BFS로 빠져나간 뒤 A*) 1회 시도.
+            # 좁은 모서리/장애물 옆에 끼어 A* 시작점이 막힌 경우를 구제한다.
+            if (not job.get("escape_tried")) and bool(CONFIG.get("PATHFIND_CORNER_ESCAPE_ENABLED", True)):
+                job["escape_tried"] = True
+                base_vis = int(job.get("base_vis") or 200)
+                grid_anchor = min(grids) if grids else max(1, int(CONFIG.get("PATHFIND_GRID_PX", 5)))
+                mv_esc = max(base_vis * 2, 5200)
+                try:
+                    raw = self._plan_path_corner_escape(
+                        job["tx"], job["ty"], mask_img, objects or [], npcs or [],
+                        (job["sx"], job["sy"]), grid_anchor, mv_esc,
+                    )
+                except Exception:
+                    raw = []
+                if self._apply_raw_path(raw, grid_anchor):
+                    self._path_plan_job = None
+                    return
             self._path_plan_job = None
             return
 
@@ -2363,28 +2727,7 @@ class MaskWalkingCharacter(BaseCharacter):
         if raw:
             job["result"] = raw
             # 완료: 현재 위치에 가장 가까운 지점부터 경로를 적용(뒤로 돌아가는 현상 방지)
-            cx, cy = float(self.pos[0]), float(self.pos[1])
-            best_i = 0
-            best_d = None
-            for i, p in enumerate(raw):
-                try:
-                    d = math.hypot(float(p[0]) - cx, float(p[1]) - cy)
-                except Exception:
-                    continue
-                if best_d is None or d < best_d:
-                    best_d = d
-                    best_i = i
-            try:
-                near_cut = float(CONFIG.get("PATHFIND_ATTACH_NEAR_CUT_PX", max(6.0, float(g) * 2.0)))
-            except Exception:
-                near_cut = max(6.0, float(g) * 2.0)
-            if best_d is not None and best_d <= near_cut:
-                raw2 = raw[int(best_i):]
-            else:
-                raw2 = raw
-            # 현재 경로를 A* 결과로 자연스럽게 덮어쓰기
-            self.path = [(float(p[0]), float(p[1]), 0) for p in (raw2 or raw)]
-            self._strip_redundant_path_head()
+            self._apply_raw_path(raw, g)
             self._path_plan_job = None
             return
 
@@ -2526,14 +2869,18 @@ class MaskWalkingCharacter(BaseCharacter):
             target_x, target_y, mask_img, objects, npcs, (int(self.pos[0]), int(self.pos[1])), g, mv
         )
 
-    def check_walkable(self, x, y, mask_img, objects, npcs):
-        """기존의 복잡한 레이어 및 충돌 판정을 독립적으로 수행합니다."""
+    def _walk_probe(self, x, y, mask_img, objects, npcs):
+        """check_walkable 와 동일 판정 + 막힌 사유를 함께 반환.
+
+        반환: (walkable, layer, reason)
+          reason in (None, "bounds", "terrain", "layer", "object", "npc")
+        """
         cx, cy = int(x), int(y)
         if not (0 <= cx < mask_img.get_width() and 0 <= cy < mask_img.get_height()):
-            return False, self.layer
+            return False, self.layer, "bounds"
 
         if mask_terrain_class(mask_img, x, y) != "walk":
-            return False, self.layer
+            return False, self.layer, "terrain"
 
         col = mask_img.get_at((cx, cy))
         r, g, b = col[0], col[1], col[2]
@@ -2546,22 +2893,27 @@ class MaskWalkingCharacter(BaseCharacter):
         elif g > r and g > b: new_layer = 2; can_pass = True
         elif b > r and b > g: new_layer = 3; can_pass = True
 
-        if not can_pass: return False, self.layer
+        if not can_pass: return False, self.layer, "layer"
 
         # 오브젝트 충돌 (살짝 넉넉하게 판정하여 끼임 방지)
         for o in objects:
             if o.collision and not getattr(o, 'is_held', False) and getattr(o, 'layer', 0) == new_layer:
                 rw = o.rect_for_logic.width // 2 - 2 # 2픽셀 여유
                 if abs(o.pos[0] - x) < rw and -8 < y - o.pos[1] < 1:
-                    return False, new_layer
-        
+                    return False, new_layer, "object"
+
         if npcs:
             for n in npcs:
                 if n != self and getattr(n, 'layer', 0) == new_layer:
                     if abs(n.pos[0] - x) < 10 and -8 < y - n.pos[1] < 1:
-                        return False, new_layer
-                        
-        return True, new_layer
+                        return False, new_layer, "npc"
+
+        return True, new_layer, None
+
+    def check_walkable(self, x, y, mask_img, objects, npcs):
+        """기존의 복잡한 레이어 및 충돌 판정을 독립적으로 수행합니다."""
+        walkable, layer, _ = self._walk_probe(x, y, mask_img, objects, npcs)
+        return walkable, layer
 
     def move(self, mask_img, objects, npcs=None):
         """계산된 경로(Path)를 따라 한 스텝씩 이동합니다."""
@@ -2708,16 +3060,249 @@ class MaskWalkingCharacter(BaseCharacter):
                 self.event_waypoints = None
                 return
 
-            walkable, nl = self.check_walkable(nx, ny, mask_img, objects, npcs)
+            walkable, nl, block_reason = self._walk_probe(nx, ny, mask_img, objects, npcs)
             if walkable:
                 self.pos = [nx, ny]
                 self.layer = nl
                 self.state = "run" if str(getattr(self, "_move_mode", "walk")) == "run" else "walk"
                 self._fire_jump_pad_hooks(mask_img, objects, npcs)
+                # 직진 성공 → 회피/스티어 상태 초기화(다시 막히면 새로 판단)
+                self._avoid_block_since_ms = 0
+                self._avoid_replans = 0
+                self._steer_side = 0
             else:
+                # 캐릭터/오브젝트에 막힌 경우: 멈추지 말고 목표 방향으로 비껴 가며 우회 시도
+                if self._try_avoid(block_reason, mask_img, objects, npcs, desired_dx=dx, desired_dy=dy):
+                    return
                 self.path = []
                 self.state = "idle"
                 self.event_waypoints = None
+                self._avoid_reset()
+
+    def _avoid_reset(self):
+        self._avoid_block_since_ms = 0
+        self._avoid_replans = 0
+        self._avoid_next_replan_ms = 0
+        self._steer_side = 0
+
+    def _steer_around_step(self, desired_dx, desired_dy, mask_img, objects, npcs):
+        """막힌 목표 방향 기준으로 좌우로 각도를 틀어, 갈 수 있는 가장 가까운 방향으로 한 칸 전진.
+
+        명령 즉시 그 방향으로 움직이며 장애물을 따라 비껴 가도록 한다(벽 슬라이드/스티어링).
+        좌우 떨림 방지를 위해 직전에 택한 방향(_steer_side)을 우선 시도한다.
+        실제로 한 칸 전진했으면 True.
+        """
+        if mask_img is None:
+            return False
+        if abs(float(desired_dx)) < 1e-9 and abs(float(desired_dy)) < 1e-9:
+            return False
+        try:
+            spd = float(CONFIG["CHAR_SPEED"]) * float(getattr(self, "event_speed_mul", 1.0) or 1.0)
+        except Exception:
+            spd = float(CONFIG.get("CHAR_SPEED", 1.6))
+        base = math.atan2(float(desired_dy), float(desired_dx))
+        try:
+            max_deg = float(CONFIG.get("AVOID_STEER_MAX_DEG", 105))
+        except Exception:
+            max_deg = 105.0
+        try:
+            step_deg = float(CONFIG.get("AVOID_STEER_STEP_DEG", 18))
+        except Exception:
+            step_deg = 18.0
+        step_deg = max(5.0, min(45.0, step_deg))
+        max_deg = max(step_deg, min(150.0, max_deg))
+
+        pref = int(getattr(self, "_steer_side", 0) or 0)
+        # 시도 각도(라디안) 목록: 크기를 키워 가며, 같은 크기에서는 선호 방향 먼저.
+        offsets = []
+        d = step_deg
+        while d <= max_deg + 1e-6:
+            if pref >= 0:
+                offsets.append(+d)
+                offsets.append(-d)
+            else:
+                offsets.append(-d)
+                offsets.append(+d)
+            d += step_deg
+
+        for off_deg in offsets:
+            a = base + math.radians(off_deg)
+            nx = self.pos[0] + math.cos(a) * spd
+            ny = self.pos[1] + math.sin(a) * spd
+            walkable, nl, _ = self._walk_probe(nx, ny, mask_img, objects, npcs)
+            if walkable:
+                self.pos = [nx, ny]
+                self.layer = nl
+                stepx = math.cos(a) * spd
+                try:
+                    dir_eps = float(CONFIG.get("DIR_CHANGE_EPS_X", 0.28))
+                except Exception:
+                    dir_eps = 0.28
+                if abs(stepx) >= dir_eps:
+                    self.direction = "left" if stepx < 0 else "right"
+                self.state = "run" if str(getattr(self, "_move_mode", "walk")) == "run" else "walk"
+                self._steer_side = 1 if off_deg > 0 else -1
+                self._fire_jump_pad_hooks(mask_img, objects, npcs)
+                return True
+        return False
+
+    def _terrain_walk_ok(self, x, y, mask_img):
+        """엔티티는 무시하고 지형만 walk 인지(끼임 탈출용)."""
+        cx, cy = int(x), int(y)
+        if not (0 <= cx < mask_img.get_width() and 0 <= cy < mask_img.get_height()):
+            return False
+        return mask_terrain_class(mask_img, x, y) == "walk"
+
+    def _nearest_blocker_pos(self, objects, npcs):
+        """현재 위치와 겹쳐 있는 가장 가까운 오브젝트/NPC 의 중심 좌표(없으면 None)."""
+        px, py = float(self.pos[0]), float(self.pos[1])
+        best = None
+        best_d = None
+        for o in objects or []:
+            if getattr(o, "collision", False) and not getattr(o, "is_held", False) and getattr(o, "layer", 0) == self.layer:
+                try:
+                    rw = o.rect_for_logic.width // 2 - 2
+                except Exception:
+                    rw = 8
+                if abs(o.pos[0] - px) < rw and -8 < py - o.pos[1] < 1:
+                    d = math.hypot(px - o.pos[0], py - o.pos[1])
+                    if best_d is None or d < best_d:
+                        best_d = d
+                        best = (float(o.pos[0]), float(o.pos[1]))
+        for n in npcs or []:
+            if n is not self and getattr(n, "layer", 0) == self.layer:
+                if abs(n.pos[0] - px) < 10 and -8 < py - n.pos[1] < 1:
+                    d = math.hypot(px - n.pos[0], py - n.pos[1])
+                    if best_d is None or d < best_d:
+                        best_d = d
+                        best = (float(n.pos[0]), float(n.pos[1]))
+        return best
+
+    def _unstick_step(self, mask_img, objects, npcs):
+        """현재 위치가 엔티티와 겹쳐 끼었으면 장애물 반대 방향으로 한 칸 빠져나온다.
+
+        처리(이동)했으면 True. 겹침이 아니거나 빠져나갈 지형이 없으면 False.
+        지형(벽/도랑)만 검사하고 엔티티는 무시한다 — 겹친 상태에서 빠져나오는 동작이므로.
+        """
+        if mask_img is None:
+            return False
+        walkable, _, reason = self._walk_probe(self.pos[0], self.pos[1], mask_img, objects, npcs)
+        if walkable or reason not in ("object", "npc"):
+            return False
+        blocker = self._nearest_blocker_pos(objects, npcs)
+        if blocker is None:
+            return False
+        dx = float(self.pos[0]) - blocker[0]
+        dy = float(self.pos[1]) - blocker[1]
+        ln = math.hypot(dx, dy)
+        base = math.atan2(dy, dx) if ln > 1e-6 else math.pi  # 겹침 중심이면 좌측으로
+        try:
+            spd = float(CONFIG["CHAR_SPEED"]) * float(getattr(self, "event_speed_mul", 1.0) or 1.0)
+        except Exception:
+            spd = float(CONFIG.get("CHAR_SPEED", 1.6))
+        # 반대방향을 중심으로 약간씩 각도를 틀어 지형이 허용하는 첫 후보로 빠져나온다.
+        for off in (0.0, 0.6, -0.6, 1.2, -1.2, math.pi):
+            a = base + off
+            nx = self.pos[0] + math.cos(a) * spd
+            ny = self.pos[1] + math.sin(a) * spd
+            if not self._terrain_walk_ok(nx, ny, mask_img):
+                continue
+            self.pos = [nx, ny]
+            if abs(math.cos(a)) > 0.05:
+                self.direction = "left" if math.cos(a) < 0 else "right"
+            self.state = "walk"
+            return True
+        return False
+
+    def _apply_raw_path(self, raw, grid_for_cut):
+        """A* raw 결과를 현재 위치 기준으로 잘라 self.path 에 적용. 적용하면 True."""
+        if not raw:
+            return False
+        cx, cy = float(self.pos[0]), float(self.pos[1])
+        best_i = 0
+        best_d = None
+        for i, p in enumerate(raw):
+            try:
+                d = math.hypot(float(p[0]) - cx, float(p[1]) - cy)
+            except Exception:
+                continue
+            if best_d is None or d < best_d:
+                best_d = d
+                best_i = i
+        try:
+            near_cut = float(CONFIG.get("PATHFIND_ATTACH_NEAR_CUT_PX", max(6.0, float(grid_for_cut) * 2.0)))
+        except Exception:
+            near_cut = max(6.0, float(grid_for_cut) * 2.0)
+        if best_d is not None and best_d <= near_cut:
+            raw2 = raw[int(best_i):]
+        else:
+            raw2 = raw
+        self.path = [(float(p[0]), float(p[1]), 0) for p in (raw2 or raw)]
+        self._strip_redundant_path_head()
+        return True
+
+    def _try_avoid(self, reason, mask_img, objects, npcs, desired_dx=0.0, desired_dy=0.0):
+        """이동 중 엔티티에 막혔을 때: 멈추지 말고 즉시 목표 방향으로 비껴 가며 우회. 처리했으면 True.
+
+        우선순위:
+          1) 끼임(겹침) → 장애물 반대로 빠져나옴
+          2) 스티어링(벽 슬라이드) → 목표 방향 기준 좌우로 틀어 한 칸 전진(즉각 반응)
+          3) 스티어 불가(거의 갇힘)일 때만 A* 재계획/양보로 폴백
+        지형(벽/도랑/경계)·층 변화·강제이동·달리기에는 관여하지 않는다(기존처럼 정지).
+        백그라운드 A* 경로가 완성되면 자연스럽게 그 경로로 전환된다.
+        """
+        # 엔티티(object/npc)뿐 아니라 맵 마스크 벽/모서리/경계(terrain/bounds/layer)도
+        # 멈추지 말고 벽을 따라 미끄러지며 목표 방향으로 가도록 처리한다.
+        if reason not in ("object", "npc", "terrain", "bounds", "layer"):
+            return False
+        if not bool(CONFIG.get("AVOID_ENABLED", True)):
+            return False
+        if getattr(self, "_event_force_move", False):
+            return False
+        if str(getattr(self, "_move_mode", "walk")) == "run":
+            return False
+
+        now = pygame.time.get_ticks()
+        if int(getattr(self, "_avoid_block_since_ms", 0) or 0) == 0:
+            self._avoid_block_since_ms = now
+        blocked_ms = now - int(self._avoid_block_since_ms)
+
+        # 1) 끼임 해소 최우선(엔티티와 겹친 경우만): 겹친 상태에선 경로를 못 따라가므로 반대로 빠져나온다.
+        if reason in ("object", "npc") and self._unstick_step(mask_img, objects, npcs):
+            return True
+
+        # 2) 스티어링: 목표 방향으로 즉시 비껴 가며 전진(명령 즉시 반응 + 장애물 따라 돌기).
+        #    움직이는 NPC가 막은 경우엔 잠깐(AVOID_NPC_WAIT_MS) 양보 후 비껴 간다.
+        npc_wait = reason == "npc" and blocked_ms < int(CONFIG.get("AVOID_NPC_WAIT_MS", 250))
+        if not npc_wait:
+            if self._steer_around_step(desired_dx, desired_dy, mask_img, objects, npcs):
+                return True
+
+        # 3) 스티어 실패(거의 갇힘) → A* 재계획으로 우회로 확보(백그라운드 진행 중이면 대기).
+        if getattr(self, "_path_plan_job", None):
+            self.state = "idle"
+            return True
+        if blocked_ms > int(CONFIG.get("AVOID_GIVEUP_MS", 1500)):
+            return False  # 너무 오래 못 뚫으면 정지
+        if npc_wait:
+            self.state = "idle"
+            return True
+        if now >= int(getattr(self, "_avoid_next_replan_ms", 0) or 0) and \
+           int(getattr(self, "_avoid_replans", 0) or 0) < int(CONFIG.get("AVOID_MAX_REPLANS", 4)):
+            self._avoid_next_replan_ms = now + int(CONFIG.get("AVOID_REPLAN_COOLDOWN_MS", 350))
+            self._avoid_replans = int(getattr(self, "_avoid_replans", 0) or 0) + 1
+            tgt = list(getattr(self, "target", None) or self.pos)
+            self.set_new_target(
+                tgt[0], tgt[1], mask_img, objects, npcs,
+                preserve_path_anim=True, clear_event_waypoints=False,
+                avoid_replan=True,
+            )
+            self.path = []
+            self.state = "idle"
+            return True
+
+        self.state = "idle"
+        return True
 
     def follow_step(self, leader_pos, desired_dist, mask_img, objects, npcs, speed_mul=1.0, leader=None):
         """
@@ -2836,8 +3421,11 @@ class MaskWalkingCharacter(BaseCharacter):
                 break
             self.path.pop(0)
 
-    def set_new_target(self, tx, ty, mask_img=None, objects=None, npcs=None, preserve_path_anim=False, clear_event_waypoints=True):
+    def set_new_target(self, tx, ty, mask_img=None, objects=None, npcs=None, preserve_path_anim=False, clear_event_waypoints=True, avoid_replan=False):
         """목표가 생기면 경로를 미리 짜둡니다."""
+        # 외부에서 새 목표를 줄 때만 회피 누적 상태 초기화(회피 재계획은 누적 유지).
+        if not avoid_replan:
+            self._avoid_reset()
         if clear_event_waypoints:
             self.event_waypoints = None
         if not preserve_path_anim:
@@ -2847,7 +3435,9 @@ class MaskWalkingCharacter(BaseCharacter):
         self._path_plan_job = None
         tx, ty = float(tx), float(ty)
         self.target = [tx, ty]
-        self.direction = "left" if tx < self.pos[0] else "right"
+        # 회피 재계획 중에는 방향을 목표 쪽으로 강제로 돌리지 않는다(좌우 흔들림 방지).
+        if not avoid_replan:
+            self.direction = "left" if tx < self.pos[0] else "right"
         sx, sy = float(self.pos[0]), float(self.pos[1])
         objects = objects or []
         npcs = npcs or []
@@ -2869,7 +3459,8 @@ class MaskWalkingCharacter(BaseCharacter):
                     return
                 tx, ty = float(sn[0]), float(sn[1])
                 self.target = [tx, ty]
-                self.direction = "left" if tx < self.pos[0] else "right"
+                if not avoid_replan:
+                    self.direction = "left" if tx < self.pos[0] else "right"
             # 이동 모드: 기본은 걷기(A* 분할), 더블클릭은 직선 달리기(길찾기 없이)
             move_mode = str(getattr(self, "_move_mode", "walk") or "walk")
             if move_mode == "run":
@@ -2896,6 +3487,7 @@ class MaskWalkingCharacter(BaseCharacter):
         self.event_waypoints = None
         self._move_mode = "walk"
         self._follow_slot_goal = None
+        self._avoid_reset()
         # 이벤트 MOVE force(true): 마스크/충돌 무시 플래그 해제
         try:
             self._event_force_move = False
@@ -3123,6 +3715,36 @@ class Player(MaskWalkingCharacter):
         return "move", None
 
 
+def shear_base_offset_px(y_screen, x_offset_fn):
+    """쉬어(기울기) 가로 오프셋을 '정수 + y 격자 양자화'로 계산한다.
+
+    연속 실수 오프셋을 매 프레임 final round 직전에 더하면, 카메라가 미세하게 흔들릴 때
+    입력 y(→오프셋)가 흔들리고 그것이 스프라이트 월드좌표 소수부(짝/홀)와 맞물려 ±1px로 떨린다.
+    입력 y를 슬라이스 양자화(SPRITE_SHEAR_Y_QUANT_PX, 배경/필드 슬라이스 쉬어와 동일)에 맞추고
+    결과를 정수로 만들어, 본체·그림자·필드 오브젝트가 모두 같은 정수 오프셋으로 lockstep 이동하게 한다.
+    """
+    if not callable(x_offset_fn):
+        return 0
+    if not bool(CONFIG.get("SHEAR_SPRITE_STABILIZE", True)):
+        try:
+            return int(round(float(x_offset_fn(float(y_screen)))))
+        except Exception:
+            return 0
+    try:
+        q = int(CONFIG.get("SPRITE_SHEAR_Y_QUANT_PX", 2) or 2)
+    except Exception:
+        q = 2
+    q = max(1, min(32, q))
+    try:
+        yq = round(float(y_screen) / q) * q
+        return int(round(float(x_offset_fn(float(yq)))))
+    except Exception:
+        try:
+            return int(round(float(x_offset_fn(float(y_screen)))))
+        except Exception:
+            return 0
+
+
 def _field_world_to_screen_anchor(
     world_x,
     world_y,
@@ -3154,10 +3776,8 @@ def _field_world_to_screen_anchor(
             pass
     dy_q = float(int(round(float(dy_base))))
     if callable(x_offset_fn):
-        try:
-            dx_base = float(dx_base) + float(x_offset_fn(float(dy_q)))
-        except Exception:
-            pass
+        # 슬라이스 쉬어(_prepare_field_sprite_blit)의 qbot 양자화와 일치하도록 반올림 전 dy_base 사용.
+        dx_base = float(dx_base) + float(shear_base_offset_px(dy_base, x_offset_fn))
     anc = (anchor or "feet").strip().lower()
     if anc in ("feet", "foot", "ground", "bottom"):
         h_off = float(height or 0.0)
@@ -3256,30 +3876,35 @@ def _prepare_field_sprite_blit(
         except Exception:
             qtop, qbot, base_off_i = int(round(top_y)), int(round(bot_y)), 0
         skey = (id(render_img), int(slice_h), int(qtop), int(qbot), int(base_off_i))
-        cached = getattr(shear_cache_holder, "_sprite_shear_cache", None) if shear_cache_holder else None
-        if cached is not None and cached.get("key") == skey:
-            render_img = cached.get("surf", render_img)
-            dx_adj = int(cached.get("dx", 0) or 0)
+        g_cached = _sprite_field_shear_cache_get(skey)
+        if g_cached is not None:
+            render_img, dx_adj = g_cached[0], int(g_cached[1])
         else:
-            if int(slice_h) >= 999999:
-                dx_adj = 0
+            cached = getattr(shear_cache_holder, "_sprite_shear_cache", None) if shear_cache_holder else None
+            if cached is not None and cached.get("key") == skey:
+                render_img = cached.get("surf", render_img)
+                dx_adj = int(cached.get("dx", 0) or 0)
             else:
-                render_img, dx_adj = _shear_surface_by_field_xoffset(
-                    render_img,
-                    top_y_screen=float(qtop),
-                    bottom_y_screen=float(qbot),
-                    x_offset_fn=x_offset_fn,
-                    slice_h=slice_h,
-                )
-            if shear_cache_holder is not None:
-                try:
-                    shear_cache_holder._sprite_shear_cache = {
-                        "key": skey,
-                        "surf": render_img,
-                        "dx": int(dx_adj),
-                    }
-                except Exception:
-                    pass
+                if int(slice_h) >= 999999:
+                    dx_adj = 0
+                else:
+                    render_img, dx_adj = _shear_surface_by_field_xoffset(
+                        render_img,
+                        top_y_screen=float(qtop),
+                        bottom_y_screen=float(qbot),
+                        x_offset_fn=x_offset_fn,
+                        slice_h=slice_h,
+                    )
+                _sprite_field_shear_cache_put(skey, render_img, dx_adj)
+                if shear_cache_holder is not None:
+                    try:
+                        shear_cache_holder._sprite_shear_cache = {
+                            "key": skey,
+                            "surf": render_img,
+                            "dx": int(dx_adj),
+                        }
+                    except Exception:
+                        pass
         shear_applied = int(render_img.get_width()) != int(pre_w)
 
     feet_sx = int(round(float(dx_base)))
@@ -3554,14 +4179,13 @@ class FieldItem:
         )
 
         # --- [2. 이미지 준비 & 크기 파악] ---
-        # 최적화 검사 전에 이미지 크기를 알아야 정확한 마진을 잡을 수 있습니다.
-        # anim_delay_ms 기준(전역 global_frame은 사용하지 않음 — 예전 100ms 고정 타이머)
         current_img = self.image
         if len(self.frames) > 1:
             idx = self._anim_frame_idx()
-            current_img = self.frames[idx]
-            self.frame_idx = idx
-            self.image = current_img
+            if idx != self.frame_idx:
+                self.frame_idx = idx
+                self.image = self.frames[idx]
+            current_img = self.image
 
         # 실제 그려질 이미지의 너비와 높이 (카메라 줌 × 이벤트 엔티티 배율)
         img_w = int(current_img.get_width() * eff_z)
@@ -3585,7 +4209,6 @@ class FieldItem:
             margin_w = max(50, img_w // 2 + 10)
         margin_h = max(50, img_h + 10)
 
-        from data import CONFIG
         screen_w = CONFIG["WIDTH"]
         screen_h = CONFIG["HEIGHT"]
 
@@ -3640,15 +4263,20 @@ class FieldItem:
 
             # 최종 판정: 뒤에 있거나 아래층에 있으면서, '실제 이미지 영역(X, Y)' 안에 들어왔을 때만!
             if (is_lower or is_same_layer_behind) and is_inside_x and is_inside_y:
-                # shared frame surface를 직접 set_alpha 하지 않도록 copy
                 try:
-                    ci = current_img.copy()
-                    ci.set_alpha(150)
-                    current_img = ci
+                    cid = id(current_img)
+                    cached_dim = getattr(self, "_hide_dim_surf", None)
+                    cached_key = getattr(self, "_hide_dim_key", None)
+                    if cached_dim is not None and cached_key == cid:
+                        current_img = cached_dim
+                    else:
+                        ci = current_img.copy()
+                        ci.set_alpha(150)
+                        self._hide_dim_surf = ci
+                        self._hide_dim_key = cid
+                        current_img = ci
                 except Exception:
                     pass
-            else:
-                pass
 
         # 줌·쉬어·발 앵커 (Effect/ANIM_ONCE 와 동일 — _prepare_field_sprite_blit)
         prepared = _prepare_field_sprite_blit(
@@ -4642,10 +5270,7 @@ def _head_top_center_screen(ent, head_ctx):
     feet_y_q = float(int(round(float(feet_y))))
     feet_x = float((wx - cam_x) * z)
     if callable(x_offset_fn):
-        try:
-            feet_x = float(feet_x) + float(x_offset_fn(float(feet_y_q)))
-        except Exception:
-            pass
+        feet_x = float(feet_x) + float(shear_base_offset_px(feet_y_q, x_offset_fn))
     h_off = float(getattr(ent, "height", 0) or 0)
     if h_off > 0.0:
         feet_y = float(feet_y_q) - h_off * z
@@ -4788,6 +5413,7 @@ class EventManager:
         self._pending_fade_in_after_fadeout_sec = None  # 페이드아웃 완료 직후 페이드인(초)
         self.active_effects = [] # 현재 화면에 떠 있는 이펙트들
         self._effect_wait_ref = None  # EFFECT wait:true — 재생 끝날 때까지 next_step 보류
+        self._change_fade = None  # CHANGE fade — 디졸브 진행 상태 dict (완료 시 next_step)
         self._carry_wait_item = None  # CARRY wait — fly 중인 FieldItem (완료 시 next_step)
         self.active_event_result = None  # events.json의 result (종료 시 적용)
         self._progress_refresh_pending = False
@@ -4795,6 +5421,8 @@ class EventManager:
         self.active_screen = None  # dict or None
         # UI 오버레이 (로고/텍스트, 논리 해상도 좌표)
         self._ui_overlays = []  # list of dict, see _apply_overlay_ui_step
+        self._ui_overlay_pending = []  # [{execute_at_ms, step}] — 트랙별 예약
+        self._overlay_track_free_at = {}  # overlay_id → ms (해당 트랙 다음 스텝 가능 시각)
         self.pending_map_change = None # {"map_id": ..., "pos": ...}
         self.cursor_visible = True # 커서 가시성 제어 추가
         self._cursor_visible_persist = False  # True면 이벤트 종료 후에도 cursor_visible 유지
@@ -4971,6 +5599,8 @@ class EventManager:
         self._camera_saved_slots = {}
         self._say_bubble = None
         self._emote_overlay = None
+        self._ui_overlay_pending = []
+        self._overlay_track_free_at = {}
 
     def _restore_all_move_speed_overrides(self):
         if not self._restore_speed_after_move:
@@ -5061,6 +5691,172 @@ class EventManager:
             self._pending_fade_in_after_fadeout_sec = max(0.05, float(duration_sec))
         except Exception:
             self._pending_fade_in_after_fadeout_sec = 0.5
+
+    @staticmethod
+    def _parse_overlay_delay_sec(step) -> float:
+        raw = step.get("delay")
+        if raw is None:
+            raw = step.get("delay_sec")
+        if raw is None or raw == "":
+            return 0.0
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _clear_overlay_pending(self, *, keep_persist_scheduled=False):
+        if not keep_persist_scheduled:
+            self._ui_overlay_pending = []
+            self._overlay_track_free_at = {}
+            return
+        kept = []
+        for item in list(self._ui_overlay_pending or []):
+            st = item.get("step") if isinstance(item, dict) else None
+            if not isinstance(st, dict):
+                continue
+            act = (st.get("action") or "show").strip().lower()
+            if act != "remove" and bool(st.get("persist")):
+                kept.append(item)
+        self._ui_overlay_pending = kept
+        if kept:
+            free = {}
+            now = pygame.time.get_ticks()
+            for item in kept:
+                st = item.get("step") or {}
+                oid = self._overlay_step_track_id(st)
+                if not oid:
+                    continue
+                try:
+                    end = int(item.get("execute_at_ms") or now)
+                except (TypeError, ValueError):
+                    end = now
+                end = self._overlay_step_track_end_ms(st, end)
+                free[oid] = max(int(free.get(oid, 0)), int(end))
+            self._overlay_track_free_at = free
+        else:
+            self._overlay_track_free_at = {}
+
+    @staticmethod
+    def _overlay_step_track_id(step) -> str:
+        if not isinstance(step, dict):
+            return ""
+        return str(step.get("overlay_id") or step.get("id") or "").strip()
+
+    def _overlay_step_timing_ms(self, step):
+        """show/remove 스텝의 appear·hold·disappear 길이(ms). hold=표시 유지 시간."""
+        act = (step.get("action") or "show").strip().lower()
+        if act == "remove":
+            try:
+                diss_raw = step.get("disappear")
+                if diss_raw is None:
+                    diss_raw = step.get("disappear_sec")
+                if diss_raw is None or diss_raw == "":
+                    diss = 0.0
+                else:
+                    diss = float(diss_raw)
+            except (TypeError, ValueError):
+                diss = 0.0
+            out_ms = max(0, int(diss * 1000))
+            return 0, 0, out_ms
+
+        try:
+            appear = float(
+                step.get("appear")
+                if step.get("appear") is not None
+                else step.get("appear_sec", 0.5)
+            )
+        except (TypeError, ValueError):
+            appear = 0.5
+        try:
+            disappear = float(
+                step.get("disappear")
+                if step.get("disappear") is not None
+                else step.get("disappear_sec", 0.5)
+            )
+        except (TypeError, ValueError):
+            disappear = 0.5
+        hold_forever = bool(step.get("hold_forever") or step.get("infinite_hold"))
+        hold_ms = 0
+        if not hold_forever:
+            hold_raw = step.get("hold") if "hold" in step else step.get("hold_sec")
+            try:
+                hs = float(hold_raw if hold_raw is not None and hold_raw != "" else 2.0)
+            except (TypeError, ValueError):
+                hs = 2.0
+            hold_ms = max(0, int(hs * 1000))
+        in_ms = max(0, int(appear * 1000))
+        out_ms = 0 if hold_forever else max(0, int(disappear * 1000))
+        return in_ms, hold_ms, out_ms
+
+    def _overlay_step_track_end_ms(self, step, execute_at_ms: int) -> int:
+        """이 스텝이 끝난 뒤 같은 overlay_id 트랙이 비는 시각."""
+        act = (step.get("action") or "show").strip().lower()
+        in_ms, hold_ms, out_ms = self._overlay_step_timing_ms(step)
+        if act == "remove":
+            return int(execute_at_ms) + int(out_ms)
+        hold_forever = bool(step.get("hold_forever") or step.get("infinite_hold"))
+        if hold_forever:
+            return int(execute_at_ms) + int(in_ms)
+        return int(execute_at_ms) + int(in_ms) + int(hold_ms) + int(out_ms)
+
+    def _dispatch_overlay_ui_step(self, step):
+        """overlay_id 트랙: 이전 연출 종료 + delay 후 실행. 다른 id는 병렬."""
+        if not isinstance(step, dict):
+            return
+        step = dict(step)
+        act = (step.get("action") or "show").strip().lower()
+        oid = self._overlay_step_track_id(step)
+        if not oid:
+            if act == "remove":
+                self._apply_overlay_ui_step(step)
+                return
+            oid = "ov_" + uuid.uuid4().hex[:10]
+            step["overlay_id"] = oid
+
+        delay_sec = self._parse_overlay_delay_sec(step)
+        now = pygame.time.get_ticks()
+        if oid in self._overlay_track_free_at:
+            base_ms = int(self._overlay_track_free_at[oid])
+        else:
+            base_ms = int(now)
+
+        execute_at = int(base_ms + delay_sec * 1000.0)
+        if execute_at < now:
+            execute_at = int(now)
+
+        end_at = self._overlay_step_track_end_ms(step, execute_at)
+        self._overlay_track_free_at[oid] = int(end_at)
+
+        if execute_at <= now:
+            self._apply_overlay_ui_step(step)
+        else:
+            self._ui_overlay_pending.append(
+                {
+                    "execute_at_ms": int(execute_at),
+                    "step": step,
+                }
+            )
+
+    def _tick_pending_overlay_ui_steps(self):
+        if not self._ui_overlay_pending:
+            return
+        now = pygame.time.get_ticks()
+        ready = []
+        remain = []
+        for item in list(self._ui_overlay_pending):
+            try:
+                at = int(item.get("execute_at_ms") or 0)
+            except (TypeError, ValueError):
+                at = 0
+            if now >= at:
+                ready.append(item)
+            else:
+                remain.append(item)
+        self._ui_overlay_pending = remain
+        for item in ready:
+            st = item.get("step")
+            if isinstance(st, dict):
+                self._apply_overlay_ui_step(st)
 
     def _apply_overlay_ui_step(self, step):
         """OVERLAY_UI: 화면 고정 로고/텍스트 (논리 해상도).
@@ -5213,6 +6009,7 @@ class EventManager:
         self._ui_overlays.append(ov)
 
     def _tick_ui_overlays(self):
+        self._tick_pending_overlay_ui_steps()
         now = pygame.time.get_ticks()
         alive = []
         for ov in list(self._ui_overlays or []):
@@ -6070,8 +6867,21 @@ class EventManager:
     def update(self, player, camera, objs, npcs, mask_img=None, dt_sec=1.0 / 60.0):
         if mask_img is not None:
             self._event_mask_img = mask_img
-        # escape에서 속도 복구용 (가장 최근 프레임 엔티티 풀)
-        self._active_entities = [player] + list(npcs) + list(objs)
+        # escape에서 속도 복구용 (가장 최근 프레임 엔티티 풀) — 리스트 재사용
+        ents = getattr(self, "_active_entities", None)
+        if ents is None:
+            ents = []
+            self._active_entities = ents
+        ents.clear()
+        ents.append(player)
+        try:
+            ents.extend(npcs)
+        except Exception:
+            pass
+        try:
+            ents.extend(objs)
+        except Exception:
+            pass
         self._last_camera = camera
         # 0. 화면 전체 페이드 (검은 화면) — FADEIN/FADEOUT의 val은 초(duration), dt_sec 기준
         if self.is_fading and float(getattr(self, "fade_duration_sec", 0.0) or 0.0) > 0.0:
@@ -6620,6 +7430,30 @@ class EventManager:
                 self.next_step()
                 return
 
+        # fade(초)가 주어지면 즉시 교체 대신 디졸브: 현재 외형이 사라진 뒤(alpha→0)
+        # 새 외형으로 교체하고 다시 나타난다(alpha→255). 한 인스턴스라 위치/정렬은 유지됨.
+        try:
+            fade_sec = float(step.get("fade", step.get("fade_sec", 0)) or 0)
+        except (TypeError, ValueError):
+            fade_sec = 0.0
+
+        if fade_sec > 0.0 and isinstance(item, (BaseCharacter, FieldItem)):
+            self._change_fade = {
+                "item": item,
+                "new_name": new_name,
+                "phase": "out",          # out(사라짐) -> in(나타남)
+                "half_sec": max(0.05, fade_sec / 2.0),
+                "start_alpha": int(getattr(item, "alpha", 255)),
+                "applied": False,        # 교체 적용 여부
+            }
+            self.is_busy = True
+            return
+
+        self._apply_change_retarget(item, new_name)
+        self.next_step()
+
+    def _apply_change_retarget(self, item, new_name):
+        """CHANGE 외형 교체 실제 적용 (즉시/디졸브 공통)."""
         old = getattr(item, "name", "?")
         if isinstance(item, BaseCharacter):
             if item.retarget_char_def(new_name):
@@ -6633,7 +7467,6 @@ class EventManager:
                 print(f"[CHANGE] 실패: to='{new_name}' 없음(object_defs)")
         else:
             print("[CHANGE] 대상이 FieldItem/캐릭터 가 아님")
-        self.next_step()
 
     def _execute_step(self, step, player, camera, npcs, objs):
         s_type = step["type"]
@@ -7505,7 +8338,7 @@ class EventManager:
             self.next_step()
 
         elif s_type == "OVERLAY_UI":
-            self._apply_overlay_ui_step(step)
+            self._dispatch_overlay_ui_step(step)
             self.next_step()
 
         elif s_type == "MUSIC_PLAY":
@@ -7603,6 +8436,29 @@ class EventManager:
             else:
                 self.is_waiting_for_appear = False
                 self.next_step()
+            return
+
+        if s_type == "CHANGE":
+            cf = getattr(self, "_change_fade", None)
+            if not cf:
+                self.next_step()
+                return
+            item = cf["item"]
+            delta = (255.0 / float(cf["half_sec"])) * max(0.0, float(dt_sec))
+            if cf["phase"] == "out":
+                item.alpha = max(0, int(getattr(item, "alpha", 255)) - int(round(delta)))
+                if item.alpha <= 0:
+                    item.alpha = 0
+                    if not cf["applied"]:
+                        self._apply_change_retarget(item, cf["new_name"])
+                        cf["applied"] = True
+                    cf["phase"] = "in"
+            else:  # in
+                item.alpha = min(255, int(getattr(item, "alpha", 0)) + int(round(delta)))
+                if item.alpha >= 255:
+                    item.alpha = 255
+                    self._change_fade = None
+                    self.next_step()
             return
 
         if s_type in ("EFFECT", "ANIM_ONCE"):
@@ -8002,6 +8858,7 @@ class EventManager:
             self._ui_overlays = [o for o in (self._ui_overlays or []) if o.get("persist")]
         except Exception:
             self._ui_overlays = []
+        self._clear_overlay_pending(keep_persist_scheduled=True)
         # 2. 상태 초기화
         self.active_event = None
         self.active_event_id = None
@@ -8013,6 +8870,16 @@ class EventManager:
         self._say_bubble = None
         self._emote_overlay = None
         self._effect_wait_ref = None
+        # CHANGE 디졸브가 끝나기 전에 이벤트가 종료되면 외형 교체를 마저 적용하고 alpha 복구
+        cf_end = getattr(self, "_change_fade", None)
+        if cf_end:
+            try:
+                if not cf_end.get("applied"):
+                    self._apply_change_retarget(cf_end["item"], cf_end["new_name"])
+                cf_end["item"].alpha = 255
+            except Exception:
+                pass
+            self._change_fade = None
         self.active_effects = []
         self._carry_wait_item = None
         snap = getattr(self, "field_tilt_snapshot", None)

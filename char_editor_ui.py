@@ -30,6 +30,173 @@ PROGRESS_RULE_COUNT = DEFAULT_PROGRESS_RULES
 VISIBLE_OPTS = [("—", ""), ("Yes", "true"), ("No", "false")]
 ANIM_MODE_OPTS = [("—", ""), ("hold", "hold"), ("once", "once")]
 DIR_OPTS = [("—", ""), ("left", "left"), ("right", "right")]
+YSORT_OPTS = [("—", ""), ("ground", "ground"), ("visual", "visual")]
+SHEAR_ON_OPTS = [("—", ""), ("On", "true"), ("Off", "false")]
+DEFAULT_PRESENCE_TARGETS = 3
+
+
+def _tune_value_modal_rows(prefix: str) -> list:
+    """TUNE 스텝과 동일 필드 — prefix 예: player_, tgt1_."""
+    p = str(prefix or "")
+    return [
+        (f"sprite_tilt (0~1, 비우면 유지)", f"{p}sprite_tilt", "text"),
+        (f"height (px, 비우면 유지)", f"{p}height", "text"),
+        (f"ysort (비우면 유지)", f"{p}ysort", "dropdown", YSORT_OPTS),
+        (f"layer (비우면 유지)", f"{p}layer", "text"),
+        (f"visible (비우면 유지)", f"{p}visible", "dropdown", VISIBLE_OPTS),
+        (f"alpha (0~255, 비우면 유지)", f"{p}alpha", "text"),
+        (f"anim (비우면 유지)", f"{p}anim", "text"),
+        (f"dir (비우면 유지)", f"{p}dir", "dropdown", DIR_OPTS),
+    ]
+
+
+def _tune_fields_from_patch(patch: dict, fields: dict, prefix: str) -> None:
+    p = dict(patch or {})
+    fields[f"{prefix}sprite_tilt"] = "" if p.get("sprite_tilt") is None else str(p.get("sprite_tilt"))
+    fields[f"{prefix}height"] = "" if p.get("height") is None else str(p.get("height"))
+    fields[f"{prefix}ysort"] = str(p.get("ysort") or "")
+    fields[f"{prefix}layer"] = "" if p.get("layer") is None else str(p.get("layer"))
+    fields[f"{prefix}visible"] = _opt_bool_field(p.get("visible"), "")
+    fields[f"{prefix}alpha"] = "" if p.get("alpha") is None else str(p.get("alpha"))
+    fields[f"{prefix}anim"] = str(p.get("anim") or p.get("state") or "")
+    d = str(p.get("dir") or p.get("face") or "").strip().lower()
+    fields[f"{prefix}dir"] = d if d in ("left", "right") else ""
+
+
+def _tune_patch_from_fields(fields: dict, prefix: str) -> dict:
+    from flow import build_tune_patch_from_dict
+
+    raw = {
+        "sprite_tilt": fields.get(f"{prefix}sprite_tilt"),
+        "height": fields.get(f"{prefix}height"),
+        "ysort": fields.get(f"{prefix}ysort"),
+        "layer": fields.get(f"{prefix}layer"),
+        "visible": fields.get(f"{prefix}visible"),
+        "alpha": fields.get(f"{prefix}alpha"),
+        "anim": fields.get(f"{prefix}anim"),
+        "dir": fields.get(f"{prefix}dir"),
+    }
+    return build_tune_patch_from_dict(raw)
+
+
+def _field_screen_from_patch(patch: dict, fields: dict) -> None:
+    p = dict(patch or {})
+    fields["field_tilt_target"] = "" if p.get("tilt_target") is None else str(p.get("tilt_target"))
+    fields["field_shear_on"] = _opt_bool_field(p.get("shear_on"), "")
+    fields["field_shear_strength"] = "" if p.get("shear_strength") is None else str(p.get("shear_strength"))
+    fields["field_shear_max_px"] = "" if p.get("shear_max_px") is None else str(p.get("shear_max_px"))
+
+
+def _field_screen_to_patch(fields: dict) -> dict:
+    from flow import build_field_patch_from_dict
+
+    return build_field_patch_from_dict(
+        {
+            "tilt_target": fields.get("field_tilt_target"),
+            "shear_on": fields.get("field_shear_on"),
+            "shear_strength": fields.get("field_shear_strength"),
+            "shear_max_px": fields.get("field_shear_max_px"),
+        }
+    )
+
+
+def presence_zone_to_fields(zone: dict, *, target_count: int = DEFAULT_PRESENCE_TARGETS) -> dict:
+    z = dict(zone or {})
+    fields = {
+        "name": str(z.get("name") or ""),
+        "cond_mainprogress": str((z.get("conditions") or {}).get("mainprogress") or ""),
+        "cond_min_laugh_point": str((z.get("conditions") or {}).get("min_laugh_point") or ""),
+    }
+    _field_screen_from_patch(z.get("field") or {}, fields)
+    _tune_fields_from_patch(z.get("player") or {}, fields, "player_")
+    targets = z.get("targets") or []
+    if not isinstance(targets, list):
+        targets = []
+    n = max(target_count, len(targets), DEFAULT_PRESENCE_TARGETS)
+    for i in range(1, n + 1):
+        row = targets[i - 1] if i - 1 < len(targets) else {}
+        fields[f"tgt{i}_name"] = str((row or {}).get("name") or "")
+        _tune_fields_from_patch(row or {}, fields, f"tgt{i}_")
+    return fields, n
+
+
+def presence_zone_from_fields(fields: dict, rect, *, target_count: int) -> dict:
+    z = {
+        "name": str(fields.get("name") or "").strip() or "presence_zone",
+        "rect": [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])],
+        "conditions": {},
+    }
+    mp = str(fields.get("cond_mainprogress") or "").strip()
+    if mp:
+        z["conditions"]["mainprogress"] = mp
+    mlp = str(fields.get("cond_min_laugh_point") or "").strip()
+    if mlp:
+        try:
+            z["conditions"]["min_laugh_point"] = int(float(mlp))
+        except (TypeError, ValueError):
+            pass
+    fp = _field_screen_to_patch(fields)
+    if fp:
+        z["field"] = fp
+    pp = _tune_patch_from_fields(fields, "player_")
+    if pp:
+        z["player"] = pp
+    targets = []
+    for i in range(1, int(target_count) + 1):
+        name = str(fields.get(f"tgt{i}_name") or "").strip()
+        tp = _tune_patch_from_fields(fields, f"tgt{i}_")
+        if not name and not tp:
+            continue
+        row = dict(tp)
+        if name:
+            row["name"] = name
+        targets.append(row)
+    if targets:
+        z["targets"] = targets
+    return z
+
+
+def presence_zone_modal_section_rows(*, target_count: int = DEFAULT_PRESENCE_TARGETS) -> dict:
+    basic = [
+        (
+            "※ 체류 존 — 플레이어가 영역 안에 있을 때만 상태 적용, 나가면 복구",
+            "_hint_presence_intro",
+            "hint",
+        ),
+        ("Box Name", "name", "text"),
+        ("Cond mainprogress", "cond_mainprogress", "text"),
+        ("Cond min_laugh_point", "cond_min_laugh_point", "text"),
+        ("Area — Set Area 버튼으로 맵에 사각형 지정", "_hint_presence_area", "hint"),
+        ("맵에서 영역 지정", "_area:pick", "add_btn"),
+    ]
+    field_rows = [
+        ("── 화면(틸트/쉬어) — 비운 칸은 변경 없음 ──", "_hint_field", "hint"),
+        ("tilt_target (0~1, 비우면 유지)", "field_tilt_target", "text"),
+        ("shear on (비우면 유지)", "field_shear_on", "dropdown", SHEAR_ON_OPTS),
+        ("shear strength (0~1)", "field_shear_strength", "text"),
+        ("shear max_px", "field_shear_max_px", "text"),
+    ]
+    player_rows = [
+        ("── 플레이어 — TUNE 과 동일 필드 ──", "_hint_player", "hint"),
+    ]
+    player_rows.extend(_tune_value_modal_rows("player_"))
+    target_rows = [
+        (
+            "── 지정 오브젝트/NPC — 이름 + TUNE 필드 (플레이어 제외) ──",
+            "_hint_targets",
+            "hint",
+        ),
+    ]
+    for i in range(1, target_count + 1):
+        target_rows.append((f"#{i} 이름 (입력 또는 List)", f"tgt{i}_name", "events"))
+        target_rows.extend(_tune_value_modal_rows(f"tgt{i}_"))
+    target_rows.append(("+ 대상 추가", "_add:tgt", "add_btn"))
+    return {
+        "basic": basic,
+        "field": field_rows,
+        "player": player_rows,
+        "targets": target_rows,
+    }
 
 
 def _max_numbered_slot(fields: dict, prefix: str) -> int:
@@ -1546,10 +1713,96 @@ class ObjInstModal(_ConfigModal):
             cb()
 
 
+class PresenceZoneModal(_ConfigModal):
+    """MAP presence_zones — 화면/플레이어/지정 오브젝트 상태 오버레이."""
+
+    tag = "presence_zone"
+    title = "PRESENCE BOX"
+
+    def __init__(self):
+        super().__init__()
+        self.edit_idx: Optional[int] = None
+        self.rect: Optional[list] = None
+        self.target_count: int = DEFAULT_PRESENCE_TARGETS
+
+    def get_sections(self):
+        return [
+            ("basic", "기본"),
+            ("field", "화면(틸트/쉬어)"),
+            ("player", "플레이어"),
+            ("targets", "지정 오브젝트"),
+        ]
+
+    def get_section_rows(self):
+        return presence_zone_modal_section_rows(target_count=self.target_count)
+
+    def _event_id_options(self, ctx) -> list:
+        if (self.dd_key or "").startswith("tgt") and (self.dd_key or "").endswith("_name"):
+            names = list(ctx.get("map_entity_names") or [])
+            return [""] + sorted({str(n) for n in names if str(n).strip() and str(n).lower() != "player"})
+        return super()._event_id_options(ctx)
+
+    def _on_add_slot_click(self, add_id: str, ctx) -> None:
+        if add_id == "_area:pick":
+            cb = ctx.get("on_presence_area_pick")
+            if callable(cb):
+                cb()
+            return
+        if add_id == "_add:tgt":
+            if self.target_count >= MAX_EXPAND_SLOTS:
+                return
+            self.target_count += 1
+            p = f"tgt{self.target_count}_"
+            self.fields[f"{p}name"] = ""
+            _tune_fields_from_patch({}, self.fields, p)
+            self.dd_open = False
+            self.active_field = None
+            self._scroll_to_bottom(ctx)
+            return
+        super()._on_add_slot_click(add_id, ctx)
+
+    def open_new(self):
+        self.edit_idx = None
+        self.rect = None
+        self.target_count = DEFAULT_PRESENCE_TARGETS
+        self.fields = presence_zone_to_fields({}, target_count=self.target_count)[0]
+        self.show = True
+        self.scroll = 0
+        self._reset_section()
+        self.active_field = None
+        self.dd_open = False
+
+    def open_edit(self, zone: dict, edit_idx: int):
+        self.edit_idx = int(edit_idx)
+        rect = zone.get("rect")
+        self.rect = list(rect) if isinstance(rect, (list, tuple)) and len(rect) >= 4 else None
+        self.fields, self.target_count = presence_zone_to_fields(zone, target_count=DEFAULT_PRESENCE_TARGETS)
+        self.show = True
+        self.scroll = 0
+        self._reset_section()
+        self.active_field = None
+        self.dd_open = False
+
+    def set_rect(self, rect):
+        if isinstance(rect, (list, tuple)) and len(rect) >= 4:
+            self.rect = [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])]
+
+    def on_save(self, ctx):
+        rect = self.rect
+        if not rect or rect[2] <= 0 or rect[3] <= 0:
+            print("[PresenceZone] rect 미지정 — 저장 취소")
+            return
+        z = presence_zone_from_fields(self.fields, rect, target_count=self.target_count)
+        cb = ctx.get("on_presence_zone_saved")
+        if callable(cb):
+            cb(z, self.edit_idx)
+
+
 char_def_modal = CharDefModal()
 char_inst_modal = CharInstModal()
 obj_def_modal = ObjDefModal()
 obj_inst_modal = ObjInstModal()
+presence_zone_modal = PresenceZoneModal()
 
 
 def any_char_modal_open() -> bool:
@@ -1558,6 +1811,7 @@ def any_char_modal_open() -> bool:
         or char_inst_modal.show
         or obj_def_modal.show
         or obj_inst_modal.show
+        or presence_zone_modal.show
     )
 
 
@@ -1566,3 +1820,4 @@ def close_all_char_modals():
     char_inst_modal.close()
     obj_def_modal.close()
     obj_inst_modal.close()
+    presence_zone_modal.close()

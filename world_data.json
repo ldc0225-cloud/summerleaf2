@@ -11,7 +11,7 @@
         "bg_img": "bg_jjangpu2.png",
         "mask_img": "bg_jjangpu2_mask.png",
         "event_zones": [
-            { "name": "테스트이벤트2", "rect": [538, 1894, 41, 30], "trigger": "contact_player", "event_id": "ev_jjangpu_tutorial_010500" },
+            { "name": "테스트이벤트2", "rect": [432, 1952, 41, 30], "trigger": "contact_player", "event_id": "ev_jjangpu_tutorial_010500" },
             { "name": "bench", "rect": [519, 2097, 36, 38], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_bench" },
             { "name": "그네타기", "rect": [794, 1892, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_swing" },
             { "name": "호숫가낚시", "rect": [544, 992, 64, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_fishing" }
@@ -298,13 +298,29 @@
             { "name": "jjangpu2_stair1", "pos": [551, 1933], "sprite_tilt": 1.0, "height": 51, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_stair2", "pos": [488, 1952], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_column", "pos": [812, 1878], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_column", "pos": [812, 1837], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+            { "name": "jjangpu2_column", "pos": [812, 1837], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence1", "pos": [736, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
         ],
         "npcs": [
-            { "name": "flower_fairy1", "pos": [662, 2141], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "flower_fairy1@662_2141" }
+            { "name": "flower_fairy1", "pos": [662, 2146], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "flower_fairy1@662_2141", "interact": { "range": 28.0 }
+            }
         ],
         "bg_zones": [
             { "name": "jjangpubgbox", "rect": [-48, -800, 1648, 2072], "layer": -50, "draw_only_when_tilt": true, "update_policy": "none", "sort_policy": "cached", "cull_margin_px": 160 }
+        ],
+        "presence_zones": [
+            { "name": "jjangpu_stair1", "rect": [444, 1876, 91, 74], "conditions": {}, "field": { "shear_on": false },
+                "player": {
+                    "layer": 2
+                }
+            },
+            { "name": "jjangpu_stair2", "rect": [464, 1826, 196, 50], "conditions": {}, "field": { "shear_on": false },
+                "targets": [
+                    { "layer": -1, "name": "jjangpu2_house" },
+                    { "layer": -1, "name": "jjangpu2_houseroof" },
+                    { "layer": -1, "name": "jjangpu2_house2" }
+                ]
+            }
         ]
     },
     "bg_town": {

@@ -8,6 +8,7 @@ import math
 import os
 import random
 import sys
+from collections import OrderedDict
 
 import pygame
 
@@ -863,7 +864,7 @@ class CloudShadowSystem:
         self._last_enabled = None
         self._active_dir_setting = None
         self._active_dir_vec = None
-        self._render_cache = {}
+        self._render_cache = OrderedDict()
 
     def _cell_size(self, settings):
         g = settings.get("grid_cell") if isinstance(settings, dict) else None
@@ -951,6 +952,10 @@ class CloudShadowSystem:
         key = (int(img_i), qscale, qzoom, qfq, a, qsof)
         surf = self._render_cache.get(key)
         if surf is not None:
+            try:
+                self._render_cache.move_to_end(key)
+            except Exception:
+                pass
             return surf
         base = self._base_imgs[int(img_i)]
         w0, h0 = base.get_size()
@@ -969,8 +974,15 @@ class CloudShadowSystem:
                 except Exception:
                     pass
         self._render_cache[key] = s
-        if len(self._render_cache) > 160:
-            self._render_cache.clear()
+        try:
+            self._render_cache.move_to_end(key)
+        except Exception:
+            pass
+        while len(self._render_cache) > 160:
+            try:
+                self._render_cache.popitem(last=False)
+            except Exception:
+                break
         return s
 
     def _wind_velocity(self, speed):

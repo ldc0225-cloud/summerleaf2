@@ -290,6 +290,10 @@ CONFIG = {
     # 쉬어 샘플 Y를 픽셀 단위로 양자화해 캐시 재사용/떨림 완화
     "SPRITE_SHEAR_Y_QUANT_PX": 1,
     "SPRITE_SHEAR_Y_QUANT_PX_LOD": 2,
+    # 틸트/쉬어 중 카메라가 움직일 때 일부 캐릭터/오브젝트가 ±1px로 떨리는 현상 방지:
+    # 쉬어 가로 오프셋을 '정수 + y격자 양자화'로 적용해 본체/그림자/필드가 lockstep 이동.
+    # 끄면(=False) 예전처럼 연속 실수 오프셋(떨림 가능).
+    "SHEAR_SPRITE_STABILIZE": True,
     # 쉬어 목표값→화면 반영 보간 (0~1). 값이 클수록 더 빨리 수렴.
     # 감속(ease-out)은 사용하지 않음(항상 일정 speed로 수렴).
     "SHEAR_SMOOTH_SPEED": 0.3,
@@ -466,6 +470,17 @@ CONFIG = {
     "PATHFIND_ESCAPE_MAX_DIST_PX": 96.0,
     "PATHFIND_ESCAPE_MIN_BEFORE_REPLAN_PX": 4.0,
     "PATHFIND_ESCAPE_MIN_OPEN_NEIGHBORS": 0,
+
+    # 캐릭터/오브젝트 자연 회피: 이동 중 엔티티에 막히면 멈추지 않고 A* 재계획으로 우회.
+    # 성능 위해 재계획은 쿨다운/누적횟수/포기시간으로 제한한다(밀어내기 separation 없음).
+    "AVOID_ENABLED": True,
+    "AVOID_REPLAN_COOLDOWN_MS": 350,  # 재계획 사이 최소 간격
+    "AVOID_MAX_REPLANS": 4,           # 연속 막힘 동안 허용할 재계획 최대 횟수
+    "AVOID_NPC_WAIT_MS": 250,         # 움직이는 NPC가 막으면 이만큼만 양보 후 비껴 감
+    "AVOID_GIVEUP_MS": 1500,          # 이 시간 내내 못 뚫으면 정지
+    # 스티어링(벽 슬라이드): 막히면 즉시 목표 방향 기준 좌우로 틀어 비껴 간다.
+    "AVOID_STEER_STEP_DEG": 18,       # 각도 탐색 간격(작을수록 촘촘/부드럽지만 약간 더 연산)
+    "AVOID_STEER_MAX_DEG": 105,       # 최대 비껴가기 각도(이보다 더 틀어야 하면 A*에 맡김)
 
     # FOLLOW 재경로계산(성능): 목표점이 바뀌어도 매 프레임 A* 하지 않도록 제한
     "FOLLOW_REPLAN_MS": 220, #220

@@ -1,5 +1,6 @@
 import json, os, pygame, math
 import re
+import copy
 from data import CONFIG, CHAR_ASSETS, OBJ_ASSETS
 
 def merge_event_catalog(event_data):
@@ -2077,6 +2078,7 @@ class GameFlow:
             compact_json = _compact_named_array_objects_to_single_lines(compact_json, "npcs")
             # 5. bg_zones도 한 줄로(에디터에서 보기 편하게)
             compact_json = _compact_named_array_objects_to_single_lines(compact_json, "bg_zones")
+            compact_json = _compact_named_array_objects_to_single_lines(compact_json, "presence_zones")
 
             with open("world_data.json", "w", encoding="utf-8") as f:
                 f.write(compact_json)
@@ -2232,3 +2234,557 @@ class GameFlow:
             print("이벤트 데이터가 가독성 최적화되어 저장되었습니다!")
         except Exception as e:
             print(f"이벤트 저장 실패: {e}")
+
+
+# ---------------------------------------------------------------------------
+# [Presence zones] 체류 존 — 플레이어가 rect 안에 있을 때만 상태 오버레이, 이탈 시 복구
+#
+# world_data.json: presence_zones[]
+#   rect, conditions, field(틸트/쉬어), player(TUNE 필드), targets[{name, ...TUNE}]
+#
+# event_zones 와 달리 진입 엣지 이벤트가 아니라, 체류(level) 동안만 적용 후 복구합니다.
+# ---------------------------------------------------------------------------
+
+
+def _presence_nonempty_str(val) -> bool:
+    return str(val or "").strip() != ""
+
+
+def _presence_parse_opt_float(val):
+    if not _presence_nonempty_str(val):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _presence_parse_opt_int(val):
+    if not _presence_nonempty_str(val):
+        return None
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return None
+
+
+def _presence_parse_opt_bool(val):
+    if isinstance(val, bool):
+        return val
+    if not _presence_nonempty_str(val):
+        return None
+    s = str(val).strip().lower()
+    if s in ("0", "false", "f", "no", "n", "off", ""):
+        return False
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    return None
+
+
+def build_tune_patch_from_dict(src: dict) -> dict:
+    """TUNE/ACTION_ANIM 과 동일 의미 — 비어 있지 않은 필드만."""
+    if not isinstance(src, dict):
+        return {}
+    out = {}
+    st = _presence_parse_opt_float(src.get("sprite_tilt"))
+    if st is not None:
+        out["sprite_tilt"] = max(0.0, min(1.0, float(st)))
+    h = _presence_parse_opt_float(src.get("height"))
+    if h is not None:
+        out["height"] = max(0.0, float(h))
+    ys = str(src.get("ysort") or "").strip().lower()
+    if ys in ("ground", "visual"):
+        out["ysort"] = ys
+    ly = _presence_parse_opt_int(src.get("layer"))
+    if ly is not None:
+        out["layer"] = int(ly)
+    vb = _presence_parse_opt_bool(src.get("visible"))
+    if vb is not None:
+        out["visible"] = bool(vb)
+    al = _presence_parse_opt_int(src.get("alpha"))
+    if al is not None:
+        out["alpha"] = max(0, min(255, int(al)))
+    anim = str(src.get("anim") or src.get("state") or "").strip()
+    if anim:
+        out["anim"] = anim
+    d = str(src.get("dir") or src.get("face") or "").strip().lower()
+    if d in ("left", "l", "right", "r"):
+        out["dir"] = "left" if d in ("left", "l") else "right"
+    return out
+
+
+def build_field_patch_from_dict(src: dict) -> dict:
+    """화면(틸트/쉬어) 패치 — 비어 있지 않은 필드만."""
+    if not isinstance(src, dict):
+        return {}
+    out = {}
+    tt = _presence_parse_opt_float(src.get("tilt_target"))
+    if tt is not None:
+        out["tilt_target"] = max(0.02, min(1.0, float(tt)))
+    sh_on = _presence_parse_opt_bool(src.get("shear_on"))
+    if sh_on is not None:
+        out["shear_on"] = bool(sh_on)
+    sh_st = _presence_parse_opt_float(src.get("shear_strength"))
+    if sh_st is not None:
+        out["shear_strength"] = max(0.0, min(1.0, float(sh_st)))
+    sh_px = _presence_parse_opt_int(src.get("shear_max_px"))
+    if sh_px is not None:
+        out["shear_max_px"] = max(0, min(256, int(sh_px)))
+    return out
+
+
+def capture_entity_tune_baseline(entity, patch: dict) -> dict:
+    """패치에 들어 있는 키만 스냅샷."""
+    base = {}
+    if not patch:
+        return base
+    if "sprite_tilt" in patch:
+        base["sprite_tilt"] = float(getattr(entity, "sprite_tilt", 1.0) or 1.0)
+    if "height" in patch:
+        base["height"] = float(getattr(entity, "height", 0) or 0)
+    if "ysort" in patch:
+        base["ysort"] = str(getattr(entity, "ysort_mode", "ground") or "ground")
+    if "layer" in patch:
+        base["layer"] = int(getattr(entity, "layer", 0) or 0)
+    if "visible" in patch:
+        if hasattr(entity, "is_visible"):
+            base["visible"] = bool(getattr(entity, "is_visible", True))
+        elif hasattr(entity, "visible"):
+            base["visible"] = bool(getattr(entity, "visible", True))
+    if "alpha" in patch:
+        base["alpha"] = int(getattr(entity, "alpha", 255) or 255)
+    if "dir" in patch:
+        base["dir"] = str(getattr(entity, "direction", "right") or "right")
+    if "anim" in patch:
+        base["anim"] = str(getattr(entity, "state", "idle") or "idle")
+        ao = getattr(entity, "_anim_override", None)
+        base["_anim_override"] = copy.deepcopy(ao) if isinstance(ao, dict) else None
+    return base
+
+
+def apply_entity_tune_patch(entity, patch: dict) -> None:
+    """engine TUNE 스텝과 동일 필드 적용."""
+    if not patch or not entity:
+        return
+    try:
+        from engine import _clamp_sprite_tilt, _clamp_draw_height, _normalize_ysort_mode
+    except Exception:
+        _clamp_sprite_tilt = lambda v: v
+        _clamp_draw_height = lambda v: v
+        _normalize_ysort_mode = lambda v: v or "ground"
+    if "sprite_tilt" in patch and hasattr(entity, "sprite_tilt"):
+        entity.sprite_tilt = _clamp_sprite_tilt(patch["sprite_tilt"])
+    if "height" in patch and hasattr(entity, "height"):
+        entity.height = _clamp_draw_height(patch["height"])
+    if "ysort" in patch and hasattr(entity, "ysort_mode"):
+        entity.ysort_mode = _normalize_ysort_mode(patch.get("ysort"))
+    if "layer" in patch and hasattr(entity, "layer"):
+        entity.layer = int(patch["layer"])
+    if "visible" in patch:
+        v = bool(patch["visible"])
+        if hasattr(entity, "is_visible"):
+            entity.is_visible = v
+        elif hasattr(entity, "visible"):
+            entity.visible = v
+    if "alpha" in patch and hasattr(entity, "alpha"):
+        entity.alpha = max(0, min(255, int(patch["alpha"])))
+    if "dir" in patch and hasattr(entity, "direction"):
+        entity.direction = patch["dir"]
+    if "anim" in patch:
+        try:
+            from char_behavior import _apply_char_anim
+            _apply_char_anim(entity, patch)
+        except Exception:
+            if hasattr(entity, "state"):
+                entity.state = str(patch["anim"])
+
+
+def restore_entity_tune_baseline(entity, baseline: dict) -> None:
+    if not baseline or not entity:
+        return
+    patch = {k: v for k, v in baseline.items() if k not in ("_anim_override",)}
+    apply_entity_tune_patch(entity, patch)
+    if "_anim_override" in baseline:
+        ao = baseline.get("_anim_override")
+        clr = getattr(entity, "clear_anim_override", None)
+        if callable(clr):
+            clr()
+        if isinstance(ao, dict):
+            pa = getattr(entity, "play_anim", None)
+            if callable(pa):
+                try:
+                    pa(
+                        ao.get("state") or ao.get("anim") or "idle",
+                        hold=bool(ao.get("loop")),
+                    )
+                except Exception:
+                    pass
+
+
+def _find_entity_by_name(name, player, objs, npcs):
+    n = str(name or "").strip()
+    if not n:
+        return None
+    if n.lower() == "player":
+        return player
+    nl = n.lower()
+    for pool in (npcs or []), (objs or []):
+        for x in pool:
+            try:
+                xn = str(getattr(x, "name", "") or "")
+                if xn == n or xn.lower() == nl:
+                    return x
+            except Exception:
+                continue
+    return None
+
+
+def presence_zone_conditions_ok(zone: dict, save_data: dict) -> bool:
+    cond = zone.get("conditions") or {}
+    if not isinstance(cond, dict):
+        cond = {}
+    save = save_data or {}
+    mp = cond.get("mainprogress")
+    if mp and str(mp) != str(save.get("mainprogress", "")):
+        return False
+    if "min_laugh_point" in cond:
+        try:
+            if int(save.get("laugh_point", 0) or 0) < int(cond["min_laugh_point"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def pick_presence_zone_index(zones, map_id, player_pos, save_data) -> int:
+    """플레이어 위치·조건 — 첫 매칭 존 인덱스 (없으면 -1)."""
+    px, py = player_pos[0], player_pos[1]
+    for zi, z in enumerate(zones or []):
+        if not isinstance(z, dict):
+            continue
+        if not presence_zone_conditions_ok(z, save_data):
+            continue
+        rect = z.get("rect")
+        if not (isinstance(rect, (list, tuple)) and len(rect) >= 4):
+            continue
+        try:
+            zx, zy, zw, zh = int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+        except (TypeError, ValueError):
+            continue
+        if zw <= 0 or zh <= 0:
+            continue
+        if zx <= px <= zx + zw and zy <= py <= zy + zh:
+            return int(zi)
+    return -1
+
+
+def _presence_point_in_zone_rect(zone: dict, player_pos) -> bool:
+    if not isinstance(zone, dict):
+        return False
+    rect = zone.get("rect")
+    if not (isinstance(rect, (list, tuple)) and len(rect) >= 4):
+        return False
+    try:
+        px, py = float(player_pos[0]), float(player_pos[1])
+        zx, zy, zw, zh = int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+    except (TypeError, ValueError, IndexError):
+        return False
+    if zw <= 0 or zh <= 0:
+        return False
+    return zx <= px <= zx + zw and zy <= py <= zy + zh
+
+
+def compile_presence_zone_overlays(zone: dict) -> dict:
+    """존 진입 시 1회 — build_tune_patch 반복 비용 제거."""
+    if not isinstance(zone, dict):
+        return {}
+    player_patch = build_tune_patch_from_dict(zone.get("player") or {})
+    target_patches = []
+    for row in zone.get("targets") or []:
+        if not isinstance(row, dict):
+            continue
+        tname = str(row.get("name") or "").strip()
+        if not tname or tname.lower() == "player":
+            continue
+        tpatch = build_tune_patch_from_dict(row)
+        if tpatch:
+            target_patches.append((tname, tpatch))
+    field_patch = build_field_patch_from_dict(zone.get("field") or {})
+    return {
+        "player": player_patch,
+        "targets": target_patches,
+        "field": field_patch,
+    }
+
+
+class PresenceZoneRuntime:
+    """
+    체류 존 런타임 — main 루프에서 매 프레임 tick.
+    이벤트 진행 중·activity 중에는 적용하지 않고, 활성 존이 있으면 복구합니다.
+    """
+
+    __slots__ = ("_active_key", "_baseline", "_overlay_compiled")
+
+    def __init__(self):
+        self._active_key = None  # (map_id, zone_index) | None
+        self._baseline = {}  # entity_id or "__field__" -> snapshot
+        self._overlay_compiled = None  # compile_presence_zone_overlays 결과
+
+    def reset(self, map_id=None):
+        if map_id is None:
+            self._active_key = None
+            self._baseline = {}
+            self._overlay_compiled = None
+        elif self._active_key and str(self._active_key[0]) == str(map_id):
+            self._active_key = None
+            self._baseline = {}
+            self._overlay_compiled = None
+
+    def _restore_all(self, player, objs, npcs, ev_mgr, ui):
+        for key, snap in list(self._baseline.items()):
+            if key == "__field__":
+                try:
+                    if "tilt_target" in snap and ui is not None:
+                        ui.tilt_target = float(snap["tilt_target"])
+                    if "tilt_current" in snap and ui is not None:
+                        pass  # caller may set tilt_current separately
+                    if ev_mgr is not None and "shear_control" in snap:
+                        ev_mgr.shear_control = copy.deepcopy(snap["shear_control"])
+                except Exception:
+                    pass
+                continue
+            ent = None
+            if key == "__player__":
+                ent = player
+            else:
+                ent = _find_entity_by_name(key, player, objs, npcs)
+            if ent is not None:
+                restore_entity_tune_baseline(ent, snap)
+        self._baseline = {}
+        self._active_key = None
+        self._overlay_compiled = None
+
+    def _apply_zone_field_patch(self, zone: dict, ev_mgr, ui, field_patch=None):
+        """화면(틸트/쉬어) — 존 진입 시 1회만. 보간은 main 루프 shear_smooth가 담당."""
+        if field_patch is None:
+            if not isinstance(zone, dict):
+                return
+            field_patch = build_field_patch_from_dict(zone.get("field") or {})
+        if not field_patch:
+            return
+        if "tilt_target" in field_patch and ui is not None:
+            ui.tilt_target = float(field_patch["tilt_target"])
+        if ev_mgr is not None and any(
+            k in field_patch for k in ("shear_on", "shear_strength", "shear_max_px")
+        ):
+            sc = {}
+            if field_patch.get("shear_on") is False:
+                sc["enabled"] = False
+            else:
+                sc["enabled"] = True
+                if "shear_strength" in field_patch:
+                    sc["strength_mul"] = float(field_patch["shear_strength"])
+                if "shear_max_px" in field_patch:
+                    sc["max_px"] = int(field_patch["shear_max_px"])
+            ev_mgr.shear_control = sc
+
+    def _apply_zone_entity_overlay(
+        self,
+        zone: dict,
+        player,
+        objs,
+        npcs,
+        *,
+        compiled=None,
+    ):
+        """플레이어·지정 오브젝트 — 체류 중 매 프레임 재적용(layer 등 마스크 덮어쓰기 상쇄)."""
+        if compiled is not None:
+            player_patch = compiled.get("player") or {}
+            target_patches = compiled.get("targets") or []
+        else:
+            if not isinstance(zone, dict):
+                return
+            player_patch = build_tune_patch_from_dict(zone.get("player") or {})
+            target_patches = []
+            target_rows = zone.get("targets") or []
+            if not isinstance(target_rows, list):
+                target_rows = []
+            for row in target_rows:
+                if not isinstance(row, dict):
+                    continue
+                tname = str(row.get("name") or "").strip()
+                if not tname or tname.lower() == "player":
+                    continue
+                tpatch = build_tune_patch_from_dict(row)
+                if tpatch:
+                    target_patches.append((tname, tpatch))
+
+        if player_patch and player is not None:
+            apply_entity_tune_patch(player, player_patch)
+
+        for tname, tpatch in target_patches:
+            ent = _find_entity_by_name(tname, player, objs, npcs)
+            if ent is None:
+                continue
+            apply_entity_tune_patch(ent, tpatch)
+
+    def _apply_zone_overlay(
+        self,
+        zone: dict,
+        player,
+        objs,
+        npcs,
+        ev_mgr,
+        ui,
+        *,
+        apply_field=False,
+        compiled=None,
+    ):
+        if apply_field:
+            fp = None
+            if compiled is not None:
+                fp = compiled.get("field") or {}
+            self._apply_zone_field_patch(zone, ev_mgr, ui, field_patch=fp)
+        self._apply_zone_entity_overlay(zone, player, objs, npcs, compiled=compiled)
+
+    def _capture_zone_baseline(self, zone: dict, player, objs, npcs, ev_mgr, ui):
+        """존 진입 시 1회 — 복구용 스냅샷."""
+        if not isinstance(zone, dict):
+            return
+        field_patch = build_field_patch_from_dict(zone.get("field") or {})
+        player_patch = build_tune_patch_from_dict(zone.get("player") or {})
+        target_rows = zone.get("targets") or []
+        if not isinstance(target_rows, list):
+            target_rows = []
+
+        if field_patch:
+            fsnap = {}
+            if "tilt_target" in field_patch and ui is not None:
+                fsnap["tilt_target"] = float(ui.tilt_target)
+            if ev_mgr is not None and any(
+                k in field_patch for k in ("shear_on", "shear_strength", "shear_max_px")
+            ):
+                fsnap["shear_control"] = copy.deepcopy(getattr(ev_mgr, "shear_control", None))
+            if fsnap:
+                self._baseline["__field__"] = fsnap
+
+        if player_patch and player is not None:
+            self._baseline["__player__"] = capture_entity_tune_baseline(player, player_patch)
+
+        for row in target_rows:
+            if not isinstance(row, dict):
+                continue
+            tname = str(row.get("name") or "").strip()
+            if not tname or tname.lower() == "player":
+                continue
+            tpatch = build_tune_patch_from_dict(row)
+            if not tpatch:
+                continue
+            ent = _find_entity_by_name(tname, player, objs, npcs)
+            if ent is None:
+                continue
+            self._baseline[tname] = capture_entity_tune_baseline(ent, tpatch)
+
+    def tick(
+        self,
+        map_id,
+        player_pos,
+        player,
+        objs,
+        npcs,
+        ev_mgr,
+        ui,
+        world_data,
+        save_data,
+        *,
+        blocked=False,
+        tilt_current_holder=None,
+    ):
+        """
+        blocked=True: 이벤트·activity 등 — 활성 오버레이 해제.
+        tilt_current_holder: {"value": float} — 복구 시 tilt_current 동기화용(선택).
+        """
+        if blocked:
+            if self._active_key is not None:
+                field_snap = self._baseline.get("__field__")
+                self._restore_all(player, objs, npcs, ev_mgr, ui)
+                if (
+                    tilt_current_holder is not None
+                    and isinstance(field_snap, dict)
+                    and "tilt_target" in field_snap
+                ):
+                    try:
+                        tilt_current_holder["value"] = float(field_snap["tilt_target"])
+                    except Exception:
+                        pass
+            return
+
+        m = (world_data or {}).get(map_id, {}) if map_id else {}
+        zones = m.get("presence_zones", []) or []
+        if not zones:
+            if self._active_key is not None:
+                field_snap = self._baseline.get("__field__")
+                self._restore_all(player, objs, npcs, ev_mgr, ui)
+                if (
+                    tilt_current_holder is not None
+                    and isinstance(field_snap, dict)
+                    and "tilt_target" in field_snap
+                ):
+                    try:
+                        tilt_current_holder["value"] = float(field_snap["tilt_target"])
+                    except Exception:
+                        pass
+            return
+
+        hit = -1
+        if self._active_key is not None and str(self._active_key[0]) == str(map_id):
+            zi_prev = int(self._active_key[1])
+            if 0 <= zi_prev < len(zones):
+                z_prev = zones[zi_prev]
+                if presence_zone_conditions_ok(z_prev, save_data) and _presence_point_in_zone_rect(
+                    z_prev, player_pos
+                ):
+                    hit = zi_prev
+        if hit < 0:
+            hit = pick_presence_zone_index(zones, map_id, player_pos, save_data)
+        new_key = (str(map_id), int(hit)) if hit >= 0 else None
+
+        if new_key == self._active_key:
+            if new_key is not None and 0 <= new_key[1] < len(zones):
+                self._apply_zone_overlay(
+                    zones[new_key[1]],
+                    player,
+                    objs,
+                    npcs,
+                    ev_mgr,
+                    ui,
+                    apply_field=False,
+                    compiled=self._overlay_compiled,
+                )
+            return
+
+        self._restore_all(player, objs, npcs, ev_mgr, ui)
+
+        if new_key is None:
+            self._overlay_compiled = None
+            return
+
+        zi = new_key[1]
+        zone = zones[zi] if 0 <= zi < len(zones) else None
+        if not isinstance(zone, dict):
+            self._overlay_compiled = None
+            return
+
+        self._capture_zone_baseline(zone, player, objs, npcs, ev_mgr, ui)
+        self._overlay_compiled = compile_presence_zone_overlays(zone)
+        self._apply_zone_overlay(
+            zone,
+            player,
+            objs,
+            npcs,
+            ev_mgr,
+            ui,
+            apply_field=True,
+            compiled=self._overlay_compiled,
+        )
+        self._active_key = new_key
