@@ -698,6 +698,181 @@ def _draw_dropdown_with_scrollbar(screen, font, rect, options, selected_index, s
     }
 
 
+def _editor_parse_rgb_triplet(s):
+    """'R,G,B' 또는 [r,g,b] → (r,g,b) 튜플. 실패 시 None."""
+    if isinstance(s, (list, tuple)) and len(s) >= 3:
+        try:
+            return (int(s[0]), int(s[1]), int(s[2]))
+        except Exception:
+            return None
+    raw = str(s or "").strip()
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.replace(" ", "").split(",")]
+    if len(parts) < 3:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except Exception:
+        return None
+
+
+def _editor_color_palette_entries():
+    """CONFIG EDITOR_COLOR_PALETTE → [(이름, 'r,g,b'), ...]."""
+    from data import CONFIG
+
+    raw = CONFIG.get("EDITOR_COLOR_PALETTE") or []
+    out = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("label") or "").strip()
+            rgb = item.get("rgb") or item.get("color")
+            if isinstance(rgb, (list, tuple)) and len(rgb) >= 3:
+                rgb_s = f"{int(rgb[0])},{int(rgb[1])},{int(rgb[2])}"
+            else:
+                rgb_s = str(rgb or "").strip()
+            if rgb_s:
+                out.append((name or rgb_s, rgb_s))
+        elif isinstance(item, (list, tuple)) and len(item) >= 3:
+            rgb_s = f"{int(item[0])},{int(item[1])},{int(item[2])}"
+            out.append((rgb_s, rgb_s))
+    if not out:
+        out = [
+            ("흰색", "255,255,255"),
+            ("금색", "255,220,100"),
+            ("빨강", "255,80,80"),
+            ("파랑", "80,140,255"),
+            ("초록", "100,220,120"),
+        ]
+    return out
+
+
+def _editor_color_palette_option_to_rgb(option):
+    s = str(option or "").strip()
+    if "|" in s:
+        return s.split("|", 1)[1].strip()
+    if "·" in s:
+        return s.split("·", 1)[1].strip()
+    return s
+
+
+def _step_row_color_palette(step_type, field_key):
+    t = (step_type or "").upper()
+    fk = (field_key or "").strip()
+    return fk in ("color", "efx_color", "sfx_color", "sfx_rain_color", "sfx_vignette_color", "sfx_tone_color") and t in (
+        "OVERLAY_UI",
+        "ENTITY_FX",
+        "SCREEN_FX",
+    )
+
+
+def _editor_normalize_step_type(step_type, step=None):
+    """에디터 표시용 스텝 타입. 구형 FX+kind / SCREEN_FLASH 등 → 전용 타입."""
+    t = (step_type or "MOVE").upper()
+    if t in ("SCREEN_FLASH", "SCREEN_SHAKE"):
+        return "SCREEN_FX"
+    if t != "FX" or not isinstance(step, dict):
+        return t
+    kind = str(step.get("kind") or step.get("name") or "").strip().lower()
+    if kind in (
+        "entity_fx",
+        "entity_glow",
+        "entity_tint",
+        "entity_pulse",
+        "entity_shimmer",
+        "entity",
+    ):
+        return "ENTITY_FX"
+    return "SCREEN_FX"
+
+
+def _editor_screen_fx_kind_from_step(step, step_type_raw=""):
+    """SCREEN_FX 편집용 kind (cloud|flash|shake|rain)."""
+    tr = (step_type_raw or "").upper()
+    if tr == "SCREEN_FLASH":
+        return "flash"
+    if tr == "SCREEN_SHAKE":
+        return "shake"
+    if tr == "FX":
+        return "cloud"
+    if not isinstance(step, dict):
+        return "cloud"
+    return _screen_fx_tab_kind({"sfx_kind": step.get("kind") or step.get("sfx_kind")})
+
+
+def _draw_color_palette_dropdown(screen, font, rect, entries, selected_index, scroll_px, item_h, colors):
+    """색상 팔레트 드롭다운 — 각 행에 스와치 + 이름."""
+    bg = colors.get("bg", (28, 28, 36))
+    border = colors.get("border", (150, 155, 175))
+    hover = colors.get("hover", (52, 56, 70))
+    cur_bg = colors.get("cur_bg", (60, 60, 90))
+    text = colors.get("text", (235, 235, 240))
+    text_dim = colors.get("text_dim", (200, 200, 200))
+    sb_track = colors.get("sb_track", (18, 18, 24))
+    sb_thumb = colors.get("sb_thumb", (110, 120, 150))
+    sb_thumb2 = colors.get("sb_thumb2", (140, 150, 180))
+
+    pygame.draw.rect(screen, bg, rect)
+    pygame.draw.rect(screen, border, rect, 1)
+
+    n_opt = len(entries or [])
+    total_h = n_opt * item_h
+    vis_h = max(1, rect.height)
+    max_scroll = max(0, total_h - vis_h)
+    sp = int(max(0, min(max_scroll, scroll_px or 0)))
+
+    prev_clip = screen.get_clip()
+    screen.set_clip(rect)
+    mx, my = pygame.mouse.get_pos()
+    for i, row_entry in enumerate(entries or []):
+        if isinstance(row_entry, (list, tuple)) and len(row_entry) >= 2:
+            name, rgb_s = str(row_entry[0]), str(row_entry[1])
+        else:
+            name, rgb_s = str(row_entry), str(row_entry)
+        iy = rect.y + i * item_h - sp
+        if iy + item_h <= rect.y or iy >= rect.bottom:
+            continue
+        row = pygame.Rect(rect.x, iy, rect.width, item_h)
+        is_cur = i == selected_index
+        is_hover = row.collidepoint(mx, my)
+        if is_cur:
+            pygame.draw.rect(screen, cur_bg, row)
+        elif is_hover:
+            pygame.draw.rect(screen, hover, row)
+        triplet = _editor_parse_rgb_triplet(rgb_s) or (128, 128, 128)
+        sw = pygame.Rect(row.x + 6, row.y + max(2, (item_h - 14) // 2), 14, min(14, item_h - 4))
+        pygame.draw.rect(screen, triplet, sw)
+        pygame.draw.rect(screen, (90, 90, 90), sw, 1)
+        label = f"{name} · {rgb_s}" if name != rgb_s else rgb_s
+        if len(label) > 34:
+            label = label[:31] + "..."
+        screen.blit(
+            font.render(label, True, text if (is_cur or is_hover) else text_dim),
+            (row.x + 26, row.y + 4),
+        )
+    screen.set_clip(prev_clip)
+
+    track = None
+    thumb = None
+    thumb_h = None
+    if max_scroll > 0:
+        sb_w = 10
+        track = pygame.Rect(rect.right - sb_w, rect.y + 1, sb_w - 1, rect.height - 2)
+        pygame.draw.rect(screen, sb_track, track)
+        thumb_h = max(18, int(track.height * (vis_h / total_h)))
+        thumb_y = track.y + int((track.height - thumb_h) * (sp / max_scroll))
+        thumb = pygame.Rect(track.x + 1, thumb_y, track.width - 2, thumb_h)
+        pygame.draw.rect(screen, sb_thumb, thumb, border_radius=3)
+        pygame.draw.rect(screen, sb_thumb2, thumb, 1, border_radius=3)
+    return {
+        "max_scroll": max_scroll,
+        "scroll_px": sp,
+        "track": track,
+        "thumb": thumb,
+        "thumb_h": thumb_h,
+    }
+
+
 def _ui_font_options():
     try:
         return sorted((UI_FONT_FILES or {}).keys())
@@ -742,13 +917,79 @@ def _overlay_ui_dropdown_options(field_key):
 STEP_BODY_ROW_H = 50
 STEP_MODAL_LABEL_W = 158
 STEP_OVERLAY_SB_W = 12
+SCREEN_FX_TAB_H = 34
+SCREEN_FX_TABS = (
+    ("cloud", "구름"),
+    ("flash", "번쩍"),
+    ("shake", "흔들"),
+    ("rain", "비"),
+    ("vignette", "비네팅"),
+    ("tone", "톤"),
+)
+
+
+def _screen_fx_tab_kind(step_fields):
+    """SCREEN_FX 편집 탭 kind (cloud|flash|shake|rain)."""
+    k = str((step_fields or {}).get("sfx_kind") or "cloud").strip().lower()
+    if k in ("cloud_shadow", "cloud", "cloudshadow", "cloud-shadow"):
+        return "cloud"
+    if k in ("screen_flash", "flash", "fullscreen_flash", "screen_glow"):
+        return "flash"
+    if k in ("screen_shake", "shake", "screen_quake", "quake"):
+        return "shake"
+    if k in ("rain", "screen_rain"):
+        return "rain"
+    if k in ("vignette", "screen_vignette"):
+        return "vignette"
+    if k in ("tone", "screen_tone", "white_balance", "whitebalance", "wb"):
+        return "tone"
+    if k in ("cloud", "flash", "shake", "rain", "vignette", "tone"):
+        return k
+    return "cloud"
+
+
+def _step_config_body_top(panel_rect, step_fields):
+    top = panel_rect.y + 120
+    if (step_fields.get("type") or "").upper() == "SCREEN_FX":
+        top += SCREEN_FX_TAB_H
+    return top
+
+
+def _screen_fx_tab_rects(panel_rect):
+    x0 = panel_rect.x + 12
+    y0 = panel_rect.y + 118
+    n = max(1, len(SCREEN_FX_TABS))
+    w = max(40, (panel_rect.width - 24) // n)
+    out = []
+    for i, (kind, label) in enumerate(SCREEN_FX_TABS):
+        out.append((kind, label, pygame.Rect(x0 + i * w, y0, w - 2, SCREEN_FX_TAB_H - 4)))
+    return out
+
+
+def _screen_fx_tab_at_pos(panel_rect, pos):
+    for kind, _lb, rect in _screen_fx_tab_rects(panel_rect):
+        if rect.collidepoint(pos):
+            return kind
+    return None
+
+
+def _draw_screen_fx_tabs(screen, font, panel_rect, active_kind):
+    for kind, label, rect in _screen_fx_tab_rects(panel_rect):
+        on = kind == active_kind
+        bg = (55, 75, 95) if on else (32, 34, 42)
+        border = (140, 180, 220) if on else (70, 75, 90)
+        pygame.draw.rect(screen, bg, rect, border_radius=3)
+        pygame.draw.rect(screen, border, rect, 1, border_radius=3)
+        tx = rect.x + max(4, (rect.width - font.size(label)[0]) // 2)
+        screen.blit(font.render(label, True, (240, 248, 255) if on else (170, 175, 185)), (tx, rect.y + 7))
 
 
 def _step_settings_panel_rect(sw, sh, step_fields):
     ft = (step_fields.get("type") or "MOVE").upper()
-    rows = _step_field_rows(ft)
+    rows = _step_field_rows(ft, step_fields)
     body_rows = max(1, len(rows))
-    ph = min(max(420, 120 + body_rows * STEP_BODY_ROW_H + 80), int(sh * 0.92))
+    tab_extra = SCREEN_FX_TAB_H if ft == "SCREEN_FX" else 0
+    ph = min(max(420, 120 + tab_extra + body_rows * STEP_BODY_ROW_H + 80), int(sh * 0.92))
     if ft == "OVERLAY_UI":
         ph = max(ph, 620)
     elif ft == "ACTION_ANIM":
@@ -759,9 +1000,10 @@ def _step_settings_panel_rect(sw, sh, step_fields):
     return pygame.Rect(sw // 2 - 280, y0, 560, ph)
 
 
-def _step_overlay_body_geometry(panel_rect, rows_layout):
-    """OVERLAY_UI 필드 목록: 클립 영역 + 패널 오른쪽 스크롤바 영역."""
-    body_top = panel_rect.y + 120
+def _step_overlay_body_geometry(panel_rect, rows_layout, *, body_top=None):
+    """스텝 필드 목록: 클립 영역 + 패널 오른쪽 스크롤바 영역."""
+    if body_top is None:
+        body_top = panel_rect.y + 120
     body_bottom = panel_rect.bottom - 55
     body_h = max(1, int(body_bottom - body_top))
     pad = 4
@@ -1521,7 +1763,7 @@ def _parse_waypoints_semicolon(text):
     return out
 
 
-def _step_field_rows(step_type):
+def _step_field_rows(step_type, step_fields=None):
     """스텝 타입별 (라벨, 필드키) — 입력/그리기/히트테스트 공통."""
     t = (step_type or "MOVE").upper()
     if t == "MOVE":
@@ -1624,7 +1866,7 @@ def _step_field_rows(step_type):
         return [
             ("ZOOM: target 비우면 카메라(월드), 이름이면 스프라이트", "_hint_zoom"),
             ("on (true/false)", "zoom_on"),
-            ("strength (0~1, 0=1x 1=최대줌)", "zoom_strength"),
+            ("strength (카메라: 0~1 슬라이더 / 엔티티: 직접 배율)", "zoom_strength"),
             ("duration_sec (0=즉시)", "zoom_duration_sec"),
             ("val (배율 직접지정, 비우면 strength 사용)", "val"),
             ("Target (비우면 카메라)", "target"),
@@ -1772,17 +2014,65 @@ def _step_field_rows(step_type):
             ("duration_sec (0=즉시)", "shear_duration_sec"),
             ("px (선택, data 기본 대신)", "shear_px"),
         ]
-    if t == "FX":
-        return [
-            ("FX: 화면 효과(현재 cloud_shadow)", "_hint_fx"),
-            ("kind (cloud_shadow)", "fx_kind"),
+    if t == "SCREEN_FX":
+        kind = _screen_fx_tab_kind(step_fields or {})
+        rows = [
+            ("SCREEN_FX: 탭으로 구름·번쩍·흔들·비·비네팅·톤 선택", "_hint_screen_fx"),
             ("on (true/false)", "fx_on"),
-            ("dir (SE/SW/NE/NW/RANDOM)", "fx_dir"),
-            ("speed (px/sec)", "fx_speed"),
-            ("freq (spawns/sec)", "fx_freq"),
-            ("grid_cell (비우면 data)", "fx_grid_cell"),
-            ("grid_jitter (0~0.49, 비우면 data)", "fx_grid_jitter"),
-            ("grid_max (비우면 data)", "fx_grid_max"),
+        ]
+        if kind == "cloud":
+            rows += [
+                ("dir (SE/SW/NE/NW/RANDOM)", "fx_dir"),
+                ("speed (px/sec)", "fx_speed"),
+                ("freq (spawns/sec)", "fx_freq"),
+                ("grid_cell (비우면 data)", "fx_grid_cell"),
+                ("grid_jitter (0~0.49)", "fx_grid_jitter"),
+                ("grid_max (비우면 data)", "fx_grid_max"),
+            ]
+        elif kind == "flash":
+            rows += [
+                ("mode pulse|tint", "sfx_mode"),
+                ("color R,G,B", "sfx_color"),
+                ("alpha 0~255", "sfx_alpha"),
+                ("cycle_sec", "sfx_cycle_sec"),
+            ]
+        elif kind == "shake":
+            rows += [
+                ("amp_px", "sfx_amp"),
+                ("freq_hz", "sfx_freq"),
+            ]
+        elif kind == "rain":
+            rows += [
+                ("density 0~1", "sfx_rain_density"),
+                ("speed px/sec", "sfx_rain_speed"),
+                ("angle deg (0=수직↓, 45=대각)", "sfx_rain_angle"),
+                ("drop_len px", "sfx_rain_len"),
+                ("alpha", "sfx_rain_alpha"),
+                ("color R,G,B", "sfx_rain_color"),
+            ]
+        elif kind == "vignette":
+            rows += [
+                ("strength 0~1", "sfx_vignette_strength"),
+                ("size 0~1 (중앙 밝은 영역)", "sfx_vignette_size"),
+                ("softness 0~1", "sfx_vignette_softness"),
+                ("color R,G,B", "sfx_vignette_color"),
+            ]
+        elif kind == "tone":
+            rows += [
+                ("preset warm|cool|neutral|custom", "sfx_tone_preset"),
+                ("strength 0~1", "sfx_tone_strength"),
+                ("color R,G,B (custom)", "sfx_tone_color"),
+            ]
+        return rows
+    if t == "ENTITY_FX":
+        return [
+            ("ENTITY_FX: 캐릭터·오브젝트 반짝임/틴트", "_hint_entity_fx"),
+            ("target (캐릭터/오브젝트 이름)", "target"),
+            ("mode pulse|tint", "efx_mode"),
+            ("action start|stop", "efx_action"),
+            ("color R,G,B", "efx_color"),
+            ("alpha 0~255", "efx_alpha"),
+            ("cycle_sec (pulse 주기)", "efx_cycle_sec"),
         ]
     if t == "CALL_EVENT":
         return [
@@ -1880,7 +2170,18 @@ def _step_row_entity_pick(step_type, field_key):
     t = (step_type or "").upper()
     fk = (field_key or "").strip()
     if fk == "target":
-        return t in ("MOVE", "PLACE", "TUNE", "ZOOM", "ACTION_ANIM", "EFFECT", "EMOTE", "CARRY", "CHANGE")
+        return t in (
+            "MOVE",
+            "PLACE",
+            "TUNE",
+            "ZOOM",
+            "ACTION_ANIM",
+            "EFFECT",
+            "EMOTE",
+            "CARRY",
+            "CHANGE",
+            "ENTITY_FX",
+        )
     if fk == "holder" and t == "CARRY":
         return True
     if fk == "cam_target" and t == "CAMERA":
@@ -1903,7 +2204,7 @@ def _step_entity_options_for_pick(step_type, field_key, steps_ref, before_ix, pl
         return _place_target_options()
     if fk == "target" and t == "ZOOM":
         return _zoom_target_options(steps_ref, before_ix, player, objs, npcs)
-    if fk == "target" and t in ("TUNE", "EFFECT", "EMOTE"):
+    if fk == "target" and t in ("TUNE", "EFFECT", "EMOTE", "ENTITY_FX"):
         return _move_target_options(steps_ref, before_ix, player, objs, npcs)
     if fk == "target" and t == "CHANGE":
         opts = ["held", "@held"]
@@ -1988,11 +2289,17 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["true", "false"]
     if fk in ("shear_on",) and t == "SHEAR":
         return ["true", "false"]
-    if fk == "fx_on" and t == "FX":
+    if fk == "fx_on" and t in ("SCREEN_FX",):
         return ["true", "false"]
-    if fk == "fx_kind" and t == "FX":
-        return ["cloud_shadow"]
-    if fk == "fx_dir" and t == "FX":
+    if fk == "sfx_mode" and t == "SCREEN_FX":
+        return ["pulse", "tint"]
+    if fk == "sfx_tone_preset" and t == "SCREEN_FX":
+        return ["warm", "cool", "neutral", "custom"]
+    if fk == "efx_mode" and t == "ENTITY_FX":
+        return ["pulse", "tint"]
+    if fk == "efx_action" and t == "ENTITY_FX":
+        return ["start", "stop"]
+    if fk == "fx_dir" and t == "SCREEN_FX":
         return ["SE", "SW", "NE", "NW", "RANDOM"]
     if fk == "val" and t in ("PLAYER_VISIBLE", "CURSOR_VISIBLE"):
         return ["true", "false"]
@@ -2125,6 +2432,68 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["overlay_id"] = ""
         if empt("delay"):
             step_fields["delay"] = ""
+    elif t == "ENTITY_FX":
+        if empt("efx_mode"):
+            step_fields["efx_mode"] = "pulse"
+        if empt("efx_action"):
+            step_fields["efx_action"] = "start"
+        if empt("efx_color"):
+            step_fields["efx_color"] = "255,220,100"
+        if empt("efx_alpha"):
+            step_fields["efx_alpha"] = "160"
+        if empt("efx_cycle_sec"):
+            try:
+                step_fields["efx_cycle_sec"] = str(float(CONFIG.get("ENTITY_FX_DEFAULT_CYCLE_SEC", 1.0) or 1.0))
+            except Exception:
+                step_fields["efx_cycle_sec"] = "1.0"
+    elif t == "SCREEN_FX":
+        if empt("fx_on"):
+            step_fields["fx_on"] = "true"
+        if empt("sfx_kind"):
+            step_fields["sfx_kind"] = "cloud"
+        if empt("fx_dir"):
+            step_fields["fx_dir"] = "RANDOM"
+        if empt("sfx_mode"):
+            step_fields["sfx_mode"] = "pulse"
+        if empt("sfx_color"):
+            step_fields["sfx_color"] = "255,255,255"
+        if empt("sfx_alpha"):
+            step_fields["sfx_alpha"] = "140"
+        if empt("sfx_cycle_sec"):
+            try:
+                step_fields["sfx_cycle_sec"] = str(float(CONFIG.get("SCREEN_FX_FLASH_DEFAULT_CYCLE_SEC", 0.7) or 0.7))
+            except Exception:
+                step_fields["sfx_cycle_sec"] = "0.7"
+        if empt("sfx_amp"):
+            step_fields["sfx_amp"] = str(int(CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_AMP_PX", 7) or 7))
+        if empt("sfx_freq"):
+            step_fields["sfx_freq"] = str(int(CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_FREQ_HZ", 14) or 14))
+        if empt("sfx_rain_density"):
+            step_fields["sfx_rain_density"] = str(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DENSITY", 0.35))
+        if empt("sfx_rain_speed"):
+            step_fields["sfx_rain_speed"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_SPEED", 280) or 280))
+        if empt("sfx_rain_angle"):
+            step_fields["sfx_rain_angle"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ANGLE", 82) or 82))
+        if empt("sfx_rain_len"):
+            step_fields["sfx_rain_len"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DROP_LEN", 7) or 7))
+        if empt("sfx_rain_alpha"):
+            step_fields["sfx_rain_alpha"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ALPHA", 170) or 170))
+        if empt("sfx_rain_color"):
+            step_fields["sfx_rain_color"] = "180,200,255"
+        if empt("sfx_vignette_strength"):
+            step_fields["sfx_vignette_strength"] = str(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_STRENGTH", 0.55))
+        if empt("sfx_vignette_size"):
+            step_fields["sfx_vignette_size"] = str(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SIZE", 0.42))
+        if empt("sfx_vignette_softness"):
+            step_fields["sfx_vignette_softness"] = str(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SOFTNESS", 0.65))
+        if empt("sfx_vignette_color"):
+            step_fields["sfx_vignette_color"] = "0,0,0"
+        if empt("sfx_tone_preset"):
+            step_fields["sfx_tone_preset"] = "warm"
+        if empt("sfx_tone_strength"):
+            step_fields["sfx_tone_strength"] = str(CONFIG.get("SCREEN_FX_TONE_DEFAULT_STRENGTH", 0.32))
+        if empt("sfx_tone_color"):
+            step_fields["sfx_tone_color"] = "255,210,170"
     elif t == "SAY" and empt("val"):
         step_fields["val"] = "0"
     elif t == "EMOTE":
@@ -3062,9 +3431,52 @@ def _editor_step_list_summary(index, step):
         if v is not None and str(v).strip() != "":
             parts.append(f"{v}s")
         _tip("val", v)
-    elif st == "FX":
-        parts.append((step.get("kind") or step.get("name") or "fx").strip())
+    elif st in ("FX", "SCREEN_FX"):
+        k = _editor_screen_fx_kind_from_step(step, st)
+        parts.append(k)
+        if k == "cloud":
+            d = (step.get("dir") or "").strip()
+            if d:
+                parts.append(d)
+            _tip("dir", step.get("dir"))
+        elif k == "flash":
+            md = (step.get("mode") or "").strip()
+            if md:
+                parts.append(md)
+            _tip("mode", md)
+            _tip("color", step.get("color"))
+            _tip("alpha", step.get("alpha"))
+            _tip("cycle_sec", step.get("cycle_sec"))
+        elif k == "shake":
+            _tip("amp_px", step.get("amp_px"))
+            _tip("freq_hz", step.get("freq_hz"))
+        elif k == "rain":
+            _tip("density", step.get("density"))
+            _tip("speed", step.get("speed"))
+        elif k == "vignette":
+            _tip("strength", step.get("strength"))
+            _tip("size", step.get("size"))
+        elif k == "tone":
+            pr = (step.get("preset") or "").strip()
+            if pr:
+                parts.append(pr)
+            _tip("preset", step.get("preset"))
+            _tip("strength", step.get("strength"))
         _tip("on", step.get("on"))
+        _tip("kind", k)
+    elif st == "ENTITY_FX":
+        tg = (step.get("target") or "").strip()
+        if tg:
+            parts.append(tg)
+        md = (step.get("mode") or "").strip()
+        if md:
+            parts.append(md)
+        _tip("target", tg)
+        _tip("mode", md)
+        _tip("color", step.get("color"))
+        _tip("alpha", step.get("alpha"))
+        _tip("cycle_sec", step.get("cycle_sec"))
+        _tip("action", step.get("action"))
     elif st == "CONDITION":
         c = (step.get("condition") or step.get("expr") or "").strip()
         if not c and step.get("var"):
@@ -3554,7 +3966,8 @@ def editor_main():
         "LOOP_END",
         "TILT",
         "SHEAR",
-        "FX",
+        "ENTITY_FX",
+        "SCREEN_FX",
         "OVERLAY_UI",
         # 이벤트 중도 스탑 입력(탈출) 구간 제어
         "EVT_STOP_BEGIN",
@@ -5066,7 +5479,7 @@ def editor_main():
                 canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
                 delete_btn = pygame.Rect(panel_rect.x + 20, panel_rect.bottom - 50, 100, 35)
                 t_cur = (step_fields.get("type") or "MOVE").upper()
-                rows_layout = _step_field_rows(step_fields.get("type", "MOVE"))
+                rows_layout = _step_field_rows(step_fields.get("type", "MOVE"), step_fields)
                 tgt_item_h = 22
 
                 if event.type == pygame.MOUSEWHEEL:
@@ -5097,7 +5510,9 @@ def editor_main():
                             step_type_scroll = max(0, min(max_sc, step_type_scroll + delta))
 
                     if (not step_target_dropdown_open) and (not step_type_dropdown_open):
-                        body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(panel_rect, rows_layout)
+                        body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(
+                            panel_rect, rows_layout, body_top=_step_config_body_top(panel_rect, step_fields)
+                        )
                         if max_bsc > 0 and _editor_rects_contain_point(px, py, body_r, sb_r, panel_rect):
                             step_body_scroll = max(0, min(max_bsc, step_body_scroll + delta))
 
@@ -5141,7 +5556,10 @@ def editor_main():
                             pick_i = int(rel // tgt_item_h)
                             if 0 <= pick_i < len(step_target_options):
                                 ky = step_target_field_key or "target"
-                                step_fields[ky] = step_target_options[pick_i]
+                                val = step_target_options[pick_i]
+                                if ky in ("color", "efx_color", "sfx_color", "sfx_rain_color", "sfx_vignette_color", "sfx_tone_color"):
+                                    val = _editor_color_palette_option_to_rgb(val)
+                                step_fields[ky] = val
                             step_target_dropdown_open = False
                             continue
                         step_target_dropdown_open = False
@@ -5191,6 +5609,14 @@ def editor_main():
                         step_target_dropdown_open = False
                         continue
 
+                    if t_cur == "SCREEN_FX":
+                        hit_tab = _screen_fx_tab_at_pos(panel_rect, event.pos)
+                        if hit_tab:
+                            step_fields["sfx_kind"] = hit_tab
+                            step_body_scroll = 0
+                            step_target_dropdown_open = False
+                            continue
+
                     # Delete 버튼 (수정 모드에서만)
                     if step_edit_index is not None and delete_btn.collidepoint(event.pos):
                         show_step_delete_confirm = True
@@ -5199,7 +5625,10 @@ def editor_main():
                         continue
 
                     scroll_off = step_body_scroll
-                    body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(panel_rect, rows_layout)
+                    body_top_px = _step_config_body_top(panel_rect, step_fields)
+                    body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(
+                        panel_rect, rows_layout, body_top=body_top_px
+                    )
                     step_body_scroll = min(step_body_scroll, max_bsc)
                     if max_bsc > 0:
                         ui_sb = _step_overlay_scrollbar_layout(sb_r, body_r.height, ch_ov, step_body_scroll)
@@ -5228,7 +5657,7 @@ def editor_main():
                         else:
                             before_ix = len(steps_ref)
                     for _label, key in rows_layout:
-                        row_top = panel_rect.y + 120 + cy - scroll_off
+                        row_top = body_top_px + cy - scroll_off
                         if key.startswith("_hint"):
                             cy += STEP_BODY_ROW_H
                             continue
@@ -5315,6 +5744,28 @@ def editor_main():
                                 break
                             if r.collidepoint(event.pos):
                                 active_step_field = "anim"
+                        elif _step_row_color_palette(t_cur, key):
+                            r = pygame.Rect(panel_rect.x + 180, row_top - 5, 168, 30)
+                            pal_btn = pygame.Rect(panel_rect.x + 180 + 172, row_top - 5, 58, 30)
+                            if pal_btn.collidepoint(event.pos):
+                                step_target_options = [
+                                    f"{name}|{rgb}" for name, rgb in _editor_color_palette_entries()
+                                ]
+                                step_target_scroll = 0
+                                step_target_dropdown_open = True
+                                step_target_field_key = key
+                                n_opt = len(step_target_options)
+                                dd_h = min(220, max(tgt_item_h, n_opt * tgt_item_h))
+                                step_target_dropdown_rect = pygame.Rect(
+                                    panel_rect.x + 180,
+                                    row_top + 28,
+                                    280,
+                                    dd_h,
+                                )
+                                step_field_click_done = True
+                                break
+                            if r.collidepoint(event.pos):
+                                active_step_field = key
                         elif _step_row_entity_pick(t_cur, key) and current_event_id and current_event_type:
                             r = pygame.Rect(panel_rect.x + 180, row_top - 5, 220, 30)
                             list_btn = pygame.Rect(panel_rect.x + 180 + 225, row_top - 5, 52, 30)
@@ -5708,28 +6159,110 @@ def editor_main():
                                 built = build_step_from_editor_fields(step_fields, t)
                                 if built:
                                     new_step = built
-                            elif t == "FX":
-                                if step_fields.get("fx_kind"):
-                                    new_step["kind"] = str(step_fields.get("fx_kind"))
+                            elif t == "SCREEN_FX":
+                                sk = _screen_fx_tab_kind(step_fields)
+                                new_step["kind"] = sk
                                 bo = parse_bool(step_fields.get("fx_on"))
                                 new_step["on"] = True if bo is None else bo
-                                if step_fields.get("fx_dir"):
-                                    new_step["dir"] = str(step_fields.get("fx_dir"))
-                                sp = parse_float(step_fields.get("fx_speed"), None)
-                                if sp is not None:
-                                    new_step["speed"] = float(sp)
-                                fr = parse_float(step_fields.get("fx_freq"), None)
-                                if fr is not None:
-                                    new_step["freq"] = float(fr)
-                                gc = parse_float(step_fields.get("fx_grid_cell"), None)
-                                if gc is not None:
-                                    new_step["grid_cell"] = float(gc)
-                                gj = parse_float(step_fields.get("fx_grid_jitter"), None)
-                                if gj is not None:
-                                    new_step["grid_jitter"] = float(gj)
-                                gm = parse_float(step_fields.get("fx_grid_max"), None)
-                                if gm is not None:
-                                    new_step["grid_max"] = int(gm)
+                                if sk == "cloud":
+                                    if step_fields.get("fx_dir"):
+                                        new_step["dir"] = str(step_fields.get("fx_dir"))
+                                    sp = parse_float(step_fields.get("fx_speed"), None)
+                                    if sp is not None:
+                                        new_step["speed"] = float(sp)
+                                    fr = parse_float(step_fields.get("fx_freq"), None)
+                                    if fr is not None:
+                                        new_step["freq"] = float(fr)
+                                    gc = parse_float(step_fields.get("fx_grid_cell"), None)
+                                    if gc is not None:
+                                        new_step["grid_cell"] = float(gc)
+                                    gj = parse_float(step_fields.get("fx_grid_jitter"), None)
+                                    if gj is not None:
+                                        new_step["grid_jitter"] = float(gj)
+                                    gm = parse_float(step_fields.get("fx_grid_max"), None)
+                                    if gm is not None:
+                                        new_step["grid_max"] = int(gm)
+                                elif sk == "flash":
+                                    sm = (step_fields.get("sfx_mode") or "pulse").strip().lower()
+                                    if sm:
+                                        new_step["mode"] = sm
+                                    sc = (step_fields.get("sfx_color") or "").strip()
+                                    if sc:
+                                        new_step["color"] = sc
+                                    al = parse_float(step_fields.get("sfx_alpha"), None)
+                                    if al is not None:
+                                        new_step["alpha"] = int(al)
+                                    cy = parse_float(step_fields.get("sfx_cycle_sec"), None)
+                                    if cy is not None:
+                                        new_step["cycle_sec"] = float(cy)
+                                elif sk == "shake":
+                                    ap = parse_float(step_fields.get("sfx_amp"), None)
+                                    if ap is not None:
+                                        new_step["amp_px"] = float(ap)
+                                    fq = parse_float(step_fields.get("sfx_freq"), None)
+                                    if fq is not None:
+                                        new_step["freq_hz"] = float(fq)
+                                elif sk == "rain":
+                                    dn = parse_float(step_fields.get("sfx_rain_density"), None)
+                                    if dn is not None:
+                                        new_step["density"] = float(dn)
+                                    sp = parse_float(step_fields.get("sfx_rain_speed"), None)
+                                    if sp is not None:
+                                        new_step["speed"] = float(sp)
+                                    ag = parse_float(step_fields.get("sfx_rain_angle"), None)
+                                    if ag is not None:
+                                        new_step["angle"] = float(ag)
+                                    dl = parse_float(step_fields.get("sfx_rain_len"), None)
+                                    if dl is not None:
+                                        new_step["drop_len"] = int(dl)
+                                    al = parse_float(step_fields.get("sfx_rain_alpha"), None)
+                                    if al is not None:
+                                        new_step["alpha"] = int(al)
+                                    rc = (step_fields.get("sfx_rain_color") or "").strip()
+                                    if rc:
+                                        new_step["color"] = rc
+                                elif sk == "vignette":
+                                    st = parse_float(step_fields.get("sfx_vignette_strength"), None)
+                                    if st is not None:
+                                        new_step["strength"] = float(st)
+                                    sz = parse_float(step_fields.get("sfx_vignette_size"), None)
+                                    if sz is not None:
+                                        new_step["size"] = float(sz)
+                                    sf = parse_float(step_fields.get("sfx_vignette_softness"), None)
+                                    if sf is not None:
+                                        new_step["softness"] = float(sf)
+                                    vc = (step_fields.get("sfx_vignette_color") or "").strip()
+                                    if vc:
+                                        new_step["color"] = vc
+                                elif sk == "tone":
+                                    tp = (step_fields.get("sfx_tone_preset") or "warm").strip().lower()
+                                    if tp:
+                                        new_step["preset"] = tp
+                                    ts = parse_float(step_fields.get("sfx_tone_strength"), None)
+                                    if ts is not None:
+                                        new_step["strength"] = float(ts)
+                                    tc = (step_fields.get("sfx_tone_color") or "").strip()
+                                    if tc:
+                                        new_step["color"] = tc
+                            elif t == "ENTITY_FX":
+                                tg = (step_fields.get("target") or "").strip()
+                                if tg:
+                                    new_step["target"] = tg
+                                em = (step_fields.get("efx_mode") or "pulse").strip().lower()
+                                if em:
+                                    new_step["mode"] = em
+                                ea = (step_fields.get("efx_action") or "start").strip().lower()
+                                if ea:
+                                    new_step["action"] = ea
+                                ec = (step_fields.get("efx_color") or "").strip()
+                                if ec:
+                                    new_step["color"] = ec
+                                al = parse_float(step_fields.get("efx_alpha"), None)
+                                if al is not None:
+                                    new_step["alpha"] = int(al)
+                                cy = parse_float(step_fields.get("efx_cycle_sec"), None)
+                                if cy is not None:
+                                    new_step["cycle_sec"] = float(cy)
                             elif t == "OVERLAY_UI":
                                 act = (step_fields.get("action") or "show").strip().lower()
                                 new_step["action"] = act
@@ -5858,8 +6391,9 @@ def editor_main():
                             step_target_scroll = sp
                     elif dd_drag_kind == "step_body":
                         panel_r = _step_settings_panel_rect(SCREEN_W, SCREEN_H, step_fields)
-                        rows_ov = _step_field_rows(step_fields.get("type", "MOVE"))
-                        b_r, s_r, _mx, ch0 = _step_overlay_body_geometry(panel_r, rows_ov)
+                        rows_ov = _step_field_rows(step_fields.get("type", "MOVE"), step_fields)
+                        b_top = _step_config_body_top(panel_r, step_fields)
+                        b_r, s_r, _mx, ch0 = _step_overlay_body_geometry(panel_r, rows_ov, body_top=b_top)
                         ui_b = _step_overlay_scrollbar_layout(s_r, b_r.height, ch0, step_body_scroll)
                         sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_b)
                         if sp is not None:
@@ -6571,7 +7105,7 @@ def editor_main():
                                 step_edit_index = None
                                 step_insert_index = None
                                 active_step_field = None
-                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                             else:
                                 head_ins_rect = pygame.Rect(
                                     base_x + 10,
@@ -6585,7 +7119,7 @@ def editor_main():
                                     step_edit_index = None
                                     step_insert_index = 0
                                     active_step_field = None
-                                    step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                    step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                                 else:
                                     # 각 스텝 행 + View 버튼 + 삽입(+) 버튼
                                     for i, step in enumerate(steps):
@@ -6600,7 +7134,7 @@ def editor_main():
                                             step_edit_index = None
                                             step_insert_index = i
                                             active_step_field = None
-                                            step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                            step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                                             break
 
                                         if view_rect.collidepoint(mx, my):
@@ -6612,7 +7146,8 @@ def editor_main():
                                             active_step_field = None
 
                                             t_raw = (step.get("type") or "MOVE").upper()
-                                            t = "DEV_CMD" if t_raw == "GLOBAL" else t_raw
+                                            t_raw = "DEV_CMD" if t_raw == "GLOBAL" else t_raw
+                                            t = _editor_normalize_step_type(t_raw, step)
                                             step_fields = {"type": t}
                                             step_fields["target"] = str(step.get("target", "") or "")
                                             step_fields["dir"] = str(step.get("dir", "") or "")
@@ -6673,20 +7208,88 @@ def editor_main():
                                                 step_fields["instant"] = str(ins or "")
                                             if t in ("TILT", "SHEAR", "ZOOM"):
                                                 fill_editor_fields_from_step(step_fields, step, t)
-                                            elif t == "FX":
-                                                step_fields["fx_kind"] = str(step.get("kind", "") or "")
+                                            elif t == "SCREEN_FX":
                                                 step_fields["fx_on"] = str(step.get("on", True))
-                                                step_fields["fx_dir"] = str(step.get("dir", "") or "")
-                                                sp = step.get("speed")
-                                                step_fields["fx_speed"] = "" if sp is None else str(sp)
-                                                fr = step.get("freq", step.get("frequency"))
-                                                step_fields["fx_freq"] = "" if fr is None else str(fr)
-                                                gc = step.get("grid_cell")
-                                                step_fields["fx_grid_cell"] = "" if gc is None else str(gc)
-                                                gj = step.get("grid_jitter")
-                                                step_fields["fx_grid_jitter"] = "" if gj is None else str(gj)
-                                                gm = step.get("grid_max")
-                                                step_fields["fx_grid_max"] = "" if gm is None else str(gm)
+                                                step_fields["sfx_kind"] = _editor_screen_fx_kind_from_step(step, t_raw)
+                                                sk = step_fields["sfx_kind"]
+                                                if sk == "cloud":
+                                                    step_fields["fx_dir"] = str(step.get("dir", "") or "")
+                                                    sp = step.get("speed")
+                                                    step_fields["fx_speed"] = "" if sp is None else str(sp)
+                                                    fr = step.get("freq", step.get("frequency"))
+                                                    step_fields["fx_freq"] = "" if fr is None else str(fr)
+                                                    gc = step.get("grid_cell")
+                                                    step_fields["fx_grid_cell"] = "" if gc is None else str(gc)
+                                                    gj = step.get("grid_jitter")
+                                                    step_fields["fx_grid_jitter"] = "" if gj is None else str(gj)
+                                                    gm = step.get("grid_max")
+                                                    step_fields["fx_grid_max"] = "" if gm is None else str(gm)
+                                                elif sk == "flash":
+                                                    step_fields["sfx_mode"] = str(step.get("mode", "") or "pulse")
+                                                    sc = step.get("color")
+                                                    if isinstance(sc, (list, tuple)) and len(sc) >= 3:
+                                                        step_fields["sfx_color"] = f"{sc[0]},{sc[1]},{sc[2]}"
+                                                    else:
+                                                        step_fields["sfx_color"] = str(sc or "")
+                                                    al = step.get("alpha")
+                                                    step_fields["sfx_alpha"] = "" if al is None else str(al)
+                                                    cy = step.get("cycle_sec")
+                                                    step_fields["sfx_cycle_sec"] = "" if cy is None else str(cy)
+                                                elif sk == "shake":
+                                                    ap = step.get("amp_px", step.get("amp"))
+                                                    step_fields["sfx_amp"] = "" if ap is None else str(ap)
+                                                    fq = step.get("freq_hz", step.get("freq"))
+                                                    step_fields["sfx_freq"] = "" if fq is None else str(fq)
+                                                elif sk == "rain":
+                                                    dn = step.get("density")
+                                                    step_fields["sfx_rain_density"] = "" if dn is None else str(dn)
+                                                    sp = step.get("speed")
+                                                    step_fields["sfx_rain_speed"] = "" if sp is None else str(sp)
+                                                    ag = step.get("angle")
+                                                    step_fields["sfx_rain_angle"] = "" if ag is None else str(ag)
+                                                    dl = step.get("drop_len")
+                                                    step_fields["sfx_rain_len"] = "" if dl is None else str(dl)
+                                                    al = step.get("alpha")
+                                                    step_fields["sfx_rain_alpha"] = "" if al is None else str(al)
+                                                    rc = step.get("color")
+                                                    if isinstance(rc, (list, tuple)) and len(rc) >= 3:
+                                                        step_fields["sfx_rain_color"] = f"{rc[0]},{rc[1]},{rc[2]}"
+                                                    else:
+                                                        step_fields["sfx_rain_color"] = str(rc or "")
+                                                elif sk == "vignette":
+                                                    st = step.get("strength")
+                                                    step_fields["sfx_vignette_strength"] = "" if st is None else str(st)
+                                                    sz = step.get("size")
+                                                    step_fields["sfx_vignette_size"] = "" if sz is None else str(sz)
+                                                    sf = step.get("softness")
+                                                    step_fields["sfx_vignette_softness"] = "" if sf is None else str(sf)
+                                                    vc = step.get("color")
+                                                    if isinstance(vc, (list, tuple)) and len(vc) >= 3:
+                                                        step_fields["sfx_vignette_color"] = f"{vc[0]},{vc[1]},{vc[2]}"
+                                                    else:
+                                                        step_fields["sfx_vignette_color"] = str(vc or "")
+                                                elif sk == "tone":
+                                                    step_fields["sfx_tone_preset"] = str(step.get("preset", "") or "warm")
+                                                    ts = step.get("strength")
+                                                    step_fields["sfx_tone_strength"] = "" if ts is None else str(ts)
+                                                    tc = step.get("color")
+                                                    if isinstance(tc, (list, tuple)) and len(tc) >= 3:
+                                                        step_fields["sfx_tone_color"] = f"{tc[0]},{tc[1]},{tc[2]}"
+                                                    else:
+                                                        step_fields["sfx_tone_color"] = str(tc or "")
+                                            elif t == "ENTITY_FX":
+                                                step_fields["target"] = str(step.get("target", "") or "")
+                                                step_fields["efx_mode"] = str(step.get("mode", "") or "pulse")
+                                                step_fields["efx_action"] = str(step.get("action", "") or "start")
+                                                ec = step.get("color")
+                                                if isinstance(ec, (list, tuple)) and len(ec) >= 3:
+                                                    step_fields["efx_color"] = f"{ec[0]},{ec[1]},{ec[2]}"
+                                                else:
+                                                    step_fields["efx_color"] = str(ec or "")
+                                                al = step.get("alpha")
+                                                step_fields["efx_alpha"] = "" if al is None else str(al)
+                                                cy = step.get("cycle_sec")
+                                                step_fields["efx_cycle_sec"] = "" if cy is None else str(cy)
                                             elif t == "OVERLAY_UI":
                                                 step_fields["action"] = str(step.get("action") or "show")
                                                 step_fields["delay"] = (
@@ -8979,9 +9582,14 @@ def editor_main():
 
             draw_t_cur = (step_fields.get("type") or "MOVE").upper()
             step_body_sb_ui = None
-            rows_draw = _step_field_rows(step_fields.get("type", "MOVE"))
+            rows_draw = _step_field_rows(step_fields.get("type", "MOVE"), step_fields)
+            if draw_t_cur == "SCREEN_FX":
+                _draw_screen_fx_tabs(screen, font, panel_rect, _screen_fx_tab_kind(step_fields))
+            body_top_px = _step_config_body_top(panel_rect, step_fields)
             scroll_draw = step_body_scroll
-            body_clip_rect, sb_draw_rect, max_body_scroll, ch_draw = _step_overlay_body_geometry(panel_rect, rows_draw)
+            body_clip_rect, sb_draw_rect, max_body_scroll, ch_draw = _step_overlay_body_geometry(
+                panel_rect, rows_draw, body_top=body_top_px
+            )
             step_body_scroll = min(step_body_scroll, max_body_scroll)
             prev_clip_fields = screen.get_clip()
             screen.set_clip(body_clip_rect)
@@ -8999,7 +9607,7 @@ def editor_main():
                 else:
                     before_ix_draw = len(steps_draw_ref)
             for label, key in rows_draw:
-                y_ptr = panel_rect.y + 120 + cy - scroll_draw
+                y_ptr = body_top_px + cy - scroll_draw
                 if key.startswith("_hint"):
                     show_hint = (
                         body_clip_rect is not None
@@ -9072,6 +9680,26 @@ def editor_main():
                     pygame.draw.rect(screen, (50, 70, 90), list_btn)
                     pygame.draw.rect(screen, (120, 160, 200), list_btn, 1)
                     screen.blit(font.render("List", True, (230, 240, 255)), (list_btn.x + 8, list_btn.y + 7))
+                elif _step_row_color_palette(draw_t_cur, key):
+                    r = pygame.Rect(panel_rect.x + 180, y_ptr - 5, 168, 30)
+                    pal_btn = pygame.Rect(panel_rect.x + 180 + 172, y_ptr - 5, 58, 30)
+                    triplet = _editor_parse_rgb_triplet(step_fields.get(key, ""))
+                    pygame.draw.rect(screen, (20, 20, 20), r)
+                    pygame.draw.rect(screen, color, r, 1)
+                    if triplet:
+                        sw = pygame.Rect(r.x + 4, r.y + 5, 20, 20)
+                        pygame.draw.rect(screen, triplet, sw)
+                        pygame.draw.rect(screen, (80, 80, 80), sw, 1)
+                        txt_x = sw.right + 6
+                    else:
+                        txt_x = r.x + 8
+                    txt = str(step_fields.get(key, ""))
+                    if len(txt) > 18:
+                        txt = txt[:15] + "..."
+                    screen.blit(font.render(txt, True, (255, 255, 255)), (txt_x, r.y + 5))
+                    pygame.draw.rect(screen, (55, 70, 55), pal_btn)
+                    pygame.draw.rect(screen, (140, 180, 140), pal_btn, 1)
+                    screen.blit(font.render("Pal", True, (240, 255, 240)), (pal_btn.x + 14, pal_btn.y + 7))
                 elif _step_row_entity_pick(draw_t_cur, key):
                     r = pygame.Rect(panel_rect.x + 180, y_ptr - 5, 220, 30)
                     list_btn = pygame.Rect(panel_rect.x + 180 + 225, y_ptr - 5, 52, 30)
@@ -9117,11 +9745,11 @@ def editor_main():
                     pygame.draw.rect(screen, (140, 150, 180), thm, 1, border_radius=3)
 
             if step_target_dropdown_open and step_target_options:
-                yy_sync = panel_rect.y + 120
+                yy_sync = body_top_px
                 fk = step_target_field_key or "target"
                 sy = 0
                 for _lb, ky in rows_draw:
-                    yy_sync = panel_rect.y + 120 + sy - scroll_draw
+                    yy_sync = body_top_px + sy - scroll_draw
                     if ky.startswith("_hint"):
                         sy += STEP_BODY_ROW_H
                         continue
@@ -9161,16 +9789,36 @@ def editor_main():
 
             if step_target_dropdown_open and step_target_dropdown_rect and step_target_options:
                 dr = step_target_dropdown_rect
-                step_target_dd_ui = _draw_dropdown_with_scrollbar(
-                    screen,
-                    font,
-                    dr,
-                    step_target_options,
-                    -1,
-                    step_target_scroll,
-                    d_titem_h,
-                    colors={},
-                )
+                fk_dd = step_target_field_key or "target"
+                if fk_dd in ("color", "efx_color", "sfx_color", "sfx_rain_color", "sfx_vignette_color", "sfx_tone_color"):
+                    pal_entries = _editor_color_palette_entries()
+                    cur_rgb = str(step_fields.get(fk_dd) or "").strip()
+                    pal_sel = -1
+                    for pi, (_pn, prgb) in enumerate(pal_entries):
+                        if prgb == cur_rgb:
+                            pal_sel = pi
+                            break
+                    step_target_dd_ui = _draw_color_palette_dropdown(
+                        screen,
+                        font,
+                        dr,
+                        pal_entries,
+                        pal_sel,
+                        step_target_scroll,
+                        d_titem_h,
+                        colors={},
+                    )
+                else:
+                    step_target_dd_ui = _draw_dropdown_with_scrollbar(
+                        screen,
+                        font,
+                        dr,
+                        step_target_options,
+                        -1,
+                        step_target_scroll,
+                        d_titem_h,
+                        colors={},
+                    )
 
             save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
             canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)

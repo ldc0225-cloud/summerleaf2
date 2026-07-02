@@ -19,6 +19,7 @@ from flow import (
 )
 from engine import Player, FieldItem, BaseCharacter, Camera, EventManager, MusicManager, mask_terrain_class
 import engine as engine_mod
+from engine import screen_fx_flash_alpha, screen_fx_shake_offset, draw_screen_fx_rain, draw_screen_fx_vignette, draw_screen_fx_tone
 from field_runtime import (
     CloudShadowSystem,
     FIELD_RUNTIME_UI,
@@ -34,6 +35,7 @@ from field_runtime import (
     install_game_exit_button,
     handle_overlay_ui_click_action,
     game_exit_confirm_open,
+    visual_smooth_step,
     timed_effect_finished,
     timed_effect_init,
     timed_effect_value,
@@ -1355,7 +1357,7 @@ def main():
 
     def _after_resolution_change(*, prev_scale_factor=1):
         """해상도 전환 후: 카메라/커서/캐시·서피스 정리 + 커서/카메라 오프셋 스케일 보정."""
-        nonlocal fade_overlay_surf, world_zoom_tmp, font
+        nonlocal fade_overlay_surf, world_zoom_tmp, font, screen_fx_overlay_surf, screen_shake_tmp, screen_rain_surf
         try:
             cam.width, cam.height = int(CONFIG["WIDTH"]), int(CONFIG["HEIGHT"])
         except Exception:
@@ -1402,6 +1404,9 @@ def main():
             lw_r = int(CONFIG["WIDTH"])
             lh_r = int(CONFIG["HEIGHT"])
             fade_overlay_surf = pygame.Surface((lw_r, lh_r))
+            screen_fx_overlay_surf = pygame.Surface((lw_r, lh_r))
+            screen_rain_surf = pygame.Surface((lw_r, lh_r), pygame.SRCALPHA)
+            screen_shake_tmp[0] = None
         except Exception:
             pass
         world_zoom_tmp = None
@@ -1425,6 +1430,9 @@ def main():
 
     # 페이드 오버레이: 매 프레임 Surface 새로 만들지 않음 (저사양/핸드헬드용)
     fade_overlay_surf = pygame.Surface((CONFIG["WIDTH"], CONFIG["HEIGHT"]))
+    screen_fx_overlay_surf = pygame.Surface((CONFIG["WIDTH"], CONFIG["HEIGHT"]))
+    screen_rain_surf = pygame.Surface((CONFIG["WIDTH"], CONFIG["HEIGHT"]), pygame.SRCALPHA)
+    screen_shake_tmp = [None]
 
     # 애니메이션 중 캐시 churn(쌓고 비우기)을 막기 위한 상태 추적
     last_tilt_draw = float(tilt_current)
@@ -1795,6 +1803,7 @@ def main():
     # draw 루프 lazy-load (locals() 체크 대신 루프 밖 1회 초기화)
     swing_jump_arrow_frames = None
     zone_prompt_frames = None
+    entity_prompt_frame_cache = {}
 
     def _draw_key(ent):
         cls = ent.__class__.__name__
@@ -1978,12 +1987,14 @@ def main():
                         mem_watch_base_rss = float(cur2) if cur2 is not None else None
 
         # Fixed timestep: render FPS can be low, but simulation runs in stable steps.
-        # We update dt_sec per sim step so movement/animation stays consistent at 30fps render.
         step_ms = float(dt_sim_ms)
         step_sec = step_ms / 1000.0
         if sim_steps < 1:
             sim_steps = 1
 
+        # 시각 연출(페이드·오버레이·틸트 보간 등): 렌더 프레임 실제 경과 시간.
+        # 물리/이동 sim 루프는 step_sec 유지.
+        dt_visual_sec = max(1e-6, float(dt_real_ms) / 1000.0)
         dt_sec = step_sec
 
         # --- 틸트/쉬어 보간(부드럽게 수렴) ---
@@ -2064,8 +2075,7 @@ def main():
         elif abs(ui.tilt_target - tilt_current) <= tilt_eps:
             tilt_current = ui.tilt_target
         else:
-            k = max(1e-6, float(step_ms) / 16.666)
-            alpha = 1.0 - pow(max(0.0, 1.0 - float(tilt_speed)), k)
+            alpha = visual_smooth_step(float(tilt_speed), dt_visual_sec)
             tilt_current = float(tilt_current) + (float(ui.tilt_target) - float(tilt_current)) * alpha
         
         # --- 1. 카메라 및 매니저 업데이트 ---
@@ -2074,10 +2084,10 @@ def main():
         # --- 미니게임 (로직은 minigames/ 패키지, 여기서는 ev_mgr 브릿지만) ---
         _tick_mg = getattr(ev_mgr, "tick_minigame", None)
         if callable(_tick_mg):
-            _tick_mg(dt_sec)
+            _tick_mg(dt_visual_sec)
         if field_activities.is_active:
             try:
-                field_activities.tick(dt_sec, player, int(pygame.time.get_ticks()))
+                field_activities.tick(dt_visual_sec, player, int(pygame.time.get_ticks()))
             except Exception:
                 pass
             act_res = field_activities.pop_finished_result()
@@ -2105,7 +2115,7 @@ def main():
                 }
             except Exception:
                 pass
-        ev_mgr.update(player, cam, objs, npcs, mask_img=mask, dt_sec=dt_sec)
+        ev_mgr.update(player, cam, objs, npcs, mask_img=mask, dt_sec=dt_visual_sec)
         if getattr(ev_mgr, "_progress_refresh_pending", False):
             from char_behavior import apply_map_progress_states
 
@@ -2218,7 +2228,7 @@ def main():
                     except (TypeError, ValueError):
                         _wz_spd_use = float(world_zoom_speed)
                     _wz_spd_use = max(0.05, min(20.0, _wz_spd_use))
-                    step = _wz_spd_use * max(0.0, float(dt_sec))
+                    step = _wz_spd_use * max(0.0, float(dt_visual_sec))
                     if abs(dz) <= step:
                         world_zoom_current = float(world_zoom_target)
                     else:
@@ -2356,8 +2366,7 @@ def main():
         elif abs(shear_goal - shear_smoothed) <= shear_eps:
             shear_smoothed = shear_goal
         else:
-            k_sh = max(1e-6, float(step_ms) / 16.666)
-            alpha_sh = 1.0 - pow(max(0.0, 1.0 - float(shear_speed)), k_sh)
+            alpha_sh = visual_smooth_step(float(shear_speed), dt_visual_sec)
             shear_smoothed = float(shear_smoothed) + (shear_goal - float(shear_smoothed)) * alpha_sh
         if perf_enabled and t0 is not None:
             _padd("shear_smooth", _pnow() - t0)
@@ -3599,7 +3608,7 @@ def main():
         except Exception:
             pass
         cam.update(
-            player, npcs, objs, bg_w, bg_h, shear_screen_px=float(shear_render), dt_sec=dt_sec
+            player, npcs, objs, bg_w, bg_h, shear_screen_px=float(shear_render), dt_sec=dt_visual_sec
         )
         if auto_res_hold_cam_pos is not None:
             try:
@@ -4662,7 +4671,7 @@ def main():
         t0 = _pnow() if perf_enabled else None
         cloud_fx.update_and_draw_world(
             render_surf,
-            dt_sec,
+            dt_visual_sec,
             {
                 "enabled": enabled,
                 "dir": dirv,
@@ -4989,6 +4998,122 @@ def main():
                         render_surf.blit(img2, (ox, oy))
                         shown += 1
 
+        # --- 엔티티(캐릭터·오브젝트) 상호작용 안내 아이콘 ---
+        # interact.enabled + 거리 안 + 조건 만족(binding/talk/들기) 시 pushbutton류 아이콘 표시.
+        try:
+            eprompt_on = bool(CONFIG.get("INTERACT_PROMPT_ENABLED", True))
+        except Exception:
+            eprompt_on = True
+        if (
+            eprompt_on
+            and (not ev_mgr.active_event)
+            and (not bool(getattr(ev_mgr, "is_busy", False)))
+            and (not bool(getattr(ev_mgr, "is_talking", False)))
+            and (not bool(getattr(ev_mgr, "active_screen", None)))
+            and (swing_ride_mode not in ("approach", "mount", "ride"))
+            and (not field_activities.is_active)
+        ):
+            from flow import (
+                entity_in_interact_range,
+                entity_interact_asset_key,
+                entity_interact_anchor_xy,
+                entity_interact_prompt_available,
+                entity_interact_prompt_world_xy,
+                entity_interact_spec,
+                interact_prompt_set_from_spec,
+            )
+
+            try:
+                ep_fms = int(
+                    CONFIG.get(
+                        "INTERACT_PROMPT_FRAME_MS",
+                        CONFIG.get("ZONE_CONFIRM_PROMPT_FRAME_MS", 110),
+                    )
+                    or 110
+                )
+            except Exception:
+                ep_fms = 110
+            ep_fms = max(40, min(600, ep_fms))
+            ep_tick = pygame.time.get_ticks()
+            _sess_ep = {"gamestart": flow.boot_phase}
+            ep_candidates = []
+            for ent in list(npcs or []) + list(objs or []):
+                try:
+                    if not entity_interact_prompt_available(
+                        ent,
+                        flow,
+                        events_catalog,
+                        map_id,
+                        player.pos,
+                        session_vars=_sess_ep,
+                    ):
+                        continue
+                    is_npc = getattr(ent, "char_def", None) is not None
+                    if not entity_in_interact_range(ent, player, is_npc=is_npc):
+                        continue
+                    wxy = entity_interact_prompt_world_xy(ent)
+                    if not wxy:
+                        continue
+                    anc = entity_interact_anchor_xy(ent)
+                    dist = math.dist(player.pos, anc) if anc else 1e9
+                    ep_candidates.append((dist, ent, wxy))
+                except Exception:
+                    continue
+            ep_candidates.sort(key=lambda x: x[0])
+            ep_shown = 0
+            try:
+                zmk_ep = snap_render_zoom(float(cam.current_zoom))
+            except Exception:
+                zmk_ep = 1.0
+            zmk_ep = max(1e-6, float(zmk_ep))
+            try:
+                sc_ep = float(ui_layout_scale())
+            except Exception:
+                sc_ep = 1.0
+            for _dist, ent, (cxw, cyw) in ep_candidates:
+                if ep_shown >= 8:
+                    break
+                ek = entity_interact_asset_key(ent)
+                ps = interact_prompt_set_from_spec(entity_interact_spec(ent))
+                cache_key = (ek, ps)
+                if cache_key not in entity_prompt_frame_cache:
+                    entity_prompt_frame_cache[cache_key] = engine_mod.load_interact_prompt_frames(
+                        ek, ps
+                    )
+                eframes = entity_prompt_frame_cache.get(cache_key) or []
+                if not eframes:
+                    continue
+                try:
+                    eidx = int(ep_tick // ep_fms) % len(eframes)
+                    eimg = eframes[eidx]
+                except Exception:
+                    eimg = eframes[0]
+                fx = (float(cxw) - float(cam_draw_x)) * zmk_ep
+                fy = (float(cyw) - float(cam_draw_y)) * zmk_ep
+                try:
+                    if callable(y_transform):
+                        fy = float(y_transform(float(fy)))
+                    if callable(x_offset_fn):
+                        fx = float(fx) + float(x_offset_fn(float(fy)))
+                except Exception:
+                    pass
+                try:
+                    iw, ih = eimg.get_width(), eimg.get_height()
+                    if abs(sc_ep - 1.0) > 1e-6:
+                        tw, th = int(round(iw * sc_ep)), int(round(ih * sc_ep))
+                        eimg2 = pygame.transform.scale(eimg, (max(1, tw), max(1, th)))
+                    else:
+                        eimg2 = eimg
+                except Exception:
+                    eimg2 = eimg
+                try:
+                    eox = int(round(float(fx) - float(eimg2.get_width()) / 2.0))
+                    eoy = int(round(float(fy) - float(eimg2.get_height()) / 2.0))
+                except Exception:
+                    eox, eoy = int(fx), int(fy)
+                render_surf.blit(eimg2, (eox, eoy))
+                ep_shown += 1
+
         # --- 필드 활동 오버레이 (낚시 찌·물고기 등 — 월드 줌 직전) ---
         if field_activities.is_active:
             try:
@@ -5109,15 +5234,9 @@ def main():
         if perf_enabled and t_ui is not None:
             _padd("ui_overlay", _pnow() - t_ui)
 
-        # 월드 후단: 페이드·대화·디버그 블릿·존 박스·커서 등(overlay 화면연출과 구분)
+        # 월드 후단: 대화·디버그 블릿·존 박스·커서 등(페이드는 screen FX 뒤 — 최상단)
         t_wtail0 = _pnow() if perf_detail else None
 
-        # [추가] 4.5 페이드 효과 (모든 물체 위에, UI 아래에 덮음)
-        if ev_mgr.fade_alpha > 0:
-            fade_overlay_surf.fill((0, 0, 0))
-            fade_overlay_surf.set_alpha(ev_mgr.fade_alpha)
-            render_surf.blit(fade_overlay_surf, (0, 0))
-            
         
 
         # (레거시) 대화창 UI
@@ -5377,6 +5496,68 @@ def main():
 
         if perf_detail and t_wtail0 is not None:
             _padd("world_tail", _pnow() - t_wtail0)
+
+        # --- 화면 전체 FX: 톤 · 비네팅 · 번쩍 · 비 · 흔들림 ---
+        t_sfx0 = _pnow() if perf_enabled else None
+        try:
+            draw_screen_fx_tone(
+                render_surf,
+                screen_fx_overlay_surf,
+                getattr(ev_mgr, "screen_fx_tone", None),
+            )
+        except Exception:
+            pass
+        try:
+            draw_screen_fx_vignette(
+                render_surf,
+                screen_rain_surf,
+                getattr(ev_mgr, "screen_fx_vignette", None),
+            )
+        except Exception:
+            pass
+        flash_fx = getattr(ev_mgr, "screen_fx_flash", None)
+        flash_a = screen_fx_flash_alpha(flash_fx)
+        if flash_a > 0:
+            try:
+                rgb = (255, 255, 255)
+                if isinstance(flash_fx, dict) and flash_fx.get("color"):
+                    c = flash_fx.get("color")
+                    if isinstance(c, (list, tuple)) and len(c) >= 3:
+                        rgb = (int(c[0]), int(c[1]), int(c[2]))
+            except Exception:
+                rgb = (255, 255, 255)
+            screen_fx_overlay_surf.fill(rgb)
+            screen_fx_overlay_surf.set_alpha(flash_a)
+            render_surf.blit(screen_fx_overlay_surf, (0, 0))
+        try:
+            draw_screen_fx_rain(
+                render_surf,
+                screen_rain_surf,
+                getattr(ev_mgr, "screen_fx_rain", None),
+                cam_draw_x=float(cam_draw_x),
+                cam_draw_y=float(cam_draw_y),
+                zoom=float(cam.current_zoom),
+            )
+        except Exception:
+            pass
+        shake_dx, shake_dy = screen_fx_shake_offset(getattr(ev_mgr, "screen_fx_shake", None))
+        if shake_dx or shake_dy:
+            tmp_sh = screen_shake_tmp[0]
+            if tmp_sh is None or tmp_sh.get_size() != render_surf.get_size():
+                tmp_sh = render_surf.copy()
+                screen_shake_tmp[0] = tmp_sh
+            else:
+                tmp_sh.blit(render_surf, (0, 0))
+            render_surf.fill((0, 0, 0))
+            render_surf.blit(tmp_sh, (shake_dx, shake_dy))
+        if perf_enabled and t_sfx0 is not None:
+            _padd("screen_fx", _pnow() - t_sfx0)
+
+        # 페이드 — screen FX(비·번쩍·흔들림) 포함 모든 연출 위에 덮음 (UI 오버레이 아래)
+        if ev_mgr.fade_alpha > 0:
+            fade_overlay_surf.fill((0, 0, 0))
+            fade_overlay_surf.set_alpha(ev_mgr.fade_alpha)
+            render_surf.blit(fade_overlay_surf, (0, 0))
 
         # 최종 프레임: 논리 해상도(draw_surf) → 물리 화면(screen)
         # NATIVE_640(scale_factor==1)에서도 draw_surf는 별도 Surface이므로 반드시 blit해야 한다.

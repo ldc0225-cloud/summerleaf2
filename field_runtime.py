@@ -237,6 +237,34 @@ def effect_now_ms():
     return int(pygame.time.get_ticks())
 
 
+# =============================================================================
+# 시각 연출 시간 통일 (프레임 수가 아닌 실제 경과 초)
+# 페이드·오버레이·틸트/쉬어/카메라 보간이 FPS·fixed timestep과 무관하게 동일 체감.
+# =============================================================================
+
+def visual_dt_ref_sec() -> float:
+    """지수 보간 기준 프레임 길이(초). 60fps 1프레임 ≈ 0.0167."""
+    try:
+        v = float(CONFIG.get("VISUAL_DT_REF_SEC", 1.0 / 60.0) or (1.0 / 60.0))
+    except Exception:
+        v = 1.0 / 60.0
+    return max(1e-6, v)
+
+
+def visual_smooth_step(speed_01: float, dt_sec: float) -> float:
+    """프레임율 무관 지수 보간 계수 (0~1). legacy step_ms/16.666 exponential과 60fps에서 동일."""
+    dt = max(0.0, float(dt_sec))
+    spd = max(0.0, min(1.0, float(speed_01)))
+    k = dt / visual_dt_ref_sec()
+    return 1.0 - pow(max(0.0, 1.0 - spd), k)
+
+
+def fade_alpha_delta(span: float, duration_sec: float, dt_sec: float) -> float:
+    """선형 알파 페이드 한 틱 변화량."""
+    dur = max(1e-6, float(duration_sec))
+    return (float(span) / dur) * max(0.0, float(dt_sec))
+
+
 def timed_effect_init(ctrl, start_value, target_value, duration_sec, *, now_ms=None):
     """ctrl dict에 시계 기반 선형 보간 상태를 기록."""
     if not isinstance(ctrl, dict):
@@ -426,12 +454,51 @@ def parse_shear_step(step):
 
 
 def parse_zoom_step(step):
-    """ZOOM: on, strength(0~1), duration_sec(초)만 사용. val은 구형 호환 읽기만."""
+    """ZOOM: 카메라는 strength(0~1)→WORLD_ZOOM_MIN~MAX, 엔티티는 val/strength=직접 배율."""
     on = parse_step_bool(step.get("on"), True)
     raw_tgt = (step.get("target") or "").strip()
     lt = raw_tgt.lower()
     cam_aliases = ("", "camera", "cam", "screen", "global", "__global__")
     is_cam = lt in cam_aliases
+
+    default_d = float(CONFIG.get("WORLD_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
+    if not is_cam:
+        default_d = float(CONFIG.get("ENTITY_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
+    dur = parse_duration_sec(step, default_sec=default_d)
+
+    if not is_cam:
+        if not on:
+            zoom_val = 1.0
+        else:
+            val_raw = step.get("val")
+            str_raw = step.get("strength")
+            if val_raw is not None and str(val_raw).strip() != "":
+                picked = val_raw
+            elif str_raw is not None and str(str_raw).strip() != "":
+                picked = str_raw
+            else:
+                picked = 1.0
+            try:
+                zmin = float(CONFIG.get("ENTITY_ZOOM_MIN", 0.5))
+                zmax = float(CONFIG.get("ENTITY_ZOOM_MAX", 2.0))
+            except (TypeError, ValueError):
+                zmin, zmax = 0.5, 2.0
+            zmin = max(0.05, min(8.0, zmin))
+            zmax = max(zmin, min(8.0, zmax))
+            try:
+                zoom_val = float(picked)
+            except (TypeError, ValueError):
+                zoom_val = 1.0
+            zoom_val = max(zmin, min(zmax, zoom_val))
+        return {
+            "on": bool(on),
+            "strength": float(zoom_val),
+            "val": float(zoom_val),
+            "target": raw_tgt,
+            "is_camera": False,
+            "duration_sec": float(dur),
+            "instant": float(dur) <= 0.0,
+        }
 
     strength = step.get("strength")
     if strength is None or str(strength).strip() == "":
@@ -439,12 +506,8 @@ def parse_zoom_step(step):
         if val is not None and str(val).strip() != "":
             try:
                 v = float(val)
-                if is_cam:
-                    zmin = float(CONFIG.get("WORLD_ZOOM_MIN", 1.0))
-                    zmax = float(CONFIG.get("WORLD_ZOOM_MAX", 2.0))
-                else:
-                    zmin = float(CONFIG.get("ENTITY_ZOOM_MIN", 1.0))
-                    zmax = float(CONFIG.get("ENTITY_ZOOM_MAX", 2.0))
+                zmin = float(CONFIG.get("WORLD_ZOOM_MIN", 1.0))
+                zmax = float(CONFIG.get("WORLD_ZOOM_MAX", 2.0))
                 span = max(1e-6, zmax - zmin)
                 strength = max(0.0, min(1.0, (v - zmin) / span)) if on else 0.0
             except (TypeError, ValueError):
@@ -452,19 +515,14 @@ def parse_zoom_step(step):
         else:
             strength = 1.0 if on else 0.0
     strength = parse_strength_01(strength, 1.0 if on else 0.0)
-    zoom_val = zoom_val_from_strength(strength, on=on, is_camera=is_cam)
-
-    default_d = float(CONFIG.get("WORLD_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
-    if not is_cam:
-        default_d = float(CONFIG.get("ENTITY_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
-    dur = parse_duration_sec(step, default_sec=default_d)
+    zoom_val = zoom_val_from_strength(strength, on=on, is_camera=True)
 
     return {
         "on": bool(on),
         "strength": float(strength),
         "val": float(zoom_val),
         "target": raw_tgt,
-        "is_camera": bool(is_cam),
+        "is_camera": True,
         "duration_sec": float(dur),
         "instant": float(dur) <= 0.0,
     }
@@ -1208,45 +1266,37 @@ class CloudShadowSystem:
             {"img_i": int(img_i), "scale": float(sc), "wx": float(wx), "wy": float(wy), "vx": float(vx), "vy": float(vy)}
         )
 
-    def _iter_fill_cells(self, vx0, vy0, vx1, vy1, margin, cell):
-        ix0 = int(math.ceil((vx0 - margin) / cell - 0.5))
-        ix1 = int(math.floor((vx1 + margin) / cell - 0.5))
-        iy0 = int(math.ceil((vy0 - margin) / cell - 0.5))
-        iy1 = int(math.floor((vy1 + margin) / cell - 0.5))
-        if ix1 < ix0 or iy1 < iy0:
-            return
-        for ix in range(ix0, ix1 + 1):
-            for iy in range(iy0, iy1 + 1):
-                yield ix, iy
+    def _max_cloud_extent(self, scale_max, zoom, f_q=1.0):
+        """가장 큰 구름 스프라이트의 월드(뷰) 크기 — 화면 밖 여백 계산용."""
+        self._load_images()
+        if not self._base_imgs:
+            return 160.0
+        try:
+            zm = max(1e-6, float(zoom))
+            sc = max(0.2, float(scale_max))
+            fq = max(0.5, float(f_q))
+        except Exception:
+            zm, sc, fq = 1.0, 1.4, 1.0
+        ext = 64.0
+        for base in self._base_imgs:
+            w0, h0 = base.get_size()
+            ext = max(ext, float(w0) * sc * zm, float(h0) * sc * zm * fq)
+        return ext
 
-    def _fill_view_grid(self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin):
-        if not self._active_dir_vec or not view_rect or len(view_rect) < 4:
-            return
+    def _spawn_margin_px(self, settings, scale_max, zoom, f_q=1.0):
+        """구름이 화면 안에서 '뿅' 나타나지 않도록 하는 월드 여백."""
+        try:
+            base = float(CONFIG.get("CLOUD_SHADOW_SPAWN_MARGIN_PX", 96) or 96)
+        except Exception:
+            base = 96.0
         cell = self._cell_size(settings)
-        jh = self._jitter_half(settings, cell)
-        vx0, vy0, vw, vh = float(view_rect[0]), float(view_rect[1]), float(view_rect[2]), float(view_rect[3])
-        vx1, vy1 = vx0 + vw, vy0 + vh
-        cells = list(self._iter_fill_cells(vx0, vy0, vx1, vy1, margin, cell))
-        cap = self._grid_max_clouds(settings)
-        if len(cells) > cap:
-            cells = random.sample(cells, cap)
-        spd = max(1e-3, float(speed))
-        t_max = (cell * 2.0) / spd
-        for ix, iy in cells:
-            cx = (ix + 0.5) * cell
-            cy = (iy + 0.5) * cell
-            wx = cx + random.uniform(-jh, jh)
-            wy = cy + random.uniform(-jh, jh)
-            wx = max(-margin, min(float(map_w) + margin, wx))
-            wy = max(-margin, min(float(map_h) + margin, wy))
-            self._append_cloud(wx, wy, speed, scale_min, scale_max, age_sec=random.uniform(0.0, t_max))
+        return max(base, self._max_cloud_extent(scale_max, zoom, f_q) + cell * 0.35)
 
-    def _spawn_edge_grid(self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin):
+    def _collect_upwind_boundary_cells(self, view_rect, margin, cell, strips):
+        """바람 불어오는 쪽(뷰 밖) 격자 셀 목록."""
         if not self._active_dir_vec or not view_rect or len(view_rect) < 4:
-            return
+            return []
         dx, dy = self._active_dir_vec
-        cell = self._cell_size(settings)
-        jh = self._jitter_half(settings, cell)
         vx0, vy0, vw, vh = float(view_rect[0]), float(view_rect[1]), float(view_rect[2]), float(view_rect[3])
         vx1, vy1 = vx0 + vw, vy0 + vh
         ix_v0 = int(math.ceil(vx0 / cell - 0.5))
@@ -1257,7 +1307,6 @@ class CloudShadowSystem:
         iy_e1 = int(math.floor((vy1 + margin) / cell - 0.5))
         ix_e0 = int(math.ceil((vx0 - margin) / cell - 0.5))
         ix_e1 = int(math.floor((vx1 + margin) / cell - 0.5))
-        strips = 2
         boundary = []
         if dx > 0:
             for k in range(1, strips + 1):
@@ -1279,14 +1328,42 @@ class CloudShadowSystem:
                 iy = iy_v1 + k
                 for ix in range(ix_e0, ix_e1 + 1):
                     boundary.append((ix, iy))
-        if not boundary:
-            return
-        ix, iy = random.choice(boundary)
+        return boundary
+
+    def _spawn_at_cell(self, ix, iy, settings, map_w, map_h, speed, scale_min, scale_max, margin, age_sec=0.0):
+        cell = self._cell_size(settings)
+        jh = self._jitter_half(settings, cell)
         wx = (ix + 0.5) * cell + random.uniform(-jh, jh)
         wy = (iy + 0.5) * cell + random.uniform(-jh, jh)
         wx = max(-margin, min(float(map_w) + margin, wx))
         wy = max(-margin, min(float(map_h) + margin, wy))
-        self._append_cloud(wx, wy, speed, scale_min, scale_max, age_sec=0.0)
+        self._append_cloud(wx, wy, speed, scale_min, scale_max, age_sec=age_sec)
+
+    def _seed_initial_clouds(self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin, zoom, f_q=1.0):
+        """최초/방향 전환 시 — 화면 밖(바람 불어오는 쪽)에서만 시드."""
+        cell = self._cell_size(settings)
+        extent = self._max_cloud_extent(scale_max, zoom, f_q)
+        strips = max(2, int(math.ceil((margin + extent * 0.5) / cell)))
+        boundary = self._collect_upwind_boundary_cells(view_rect, margin, cell, strips)
+        if not boundary:
+            return
+        cap = self._grid_max_clouds(settings)
+        cells = random.sample(boundary, cap) if len(boundary) > cap else boundary
+        for ix, iy in cells:
+            self._spawn_at_cell(ix, iy, settings, map_w, map_h, speed, scale_min, scale_max, margin, age_sec=0.0)
+
+    def _spawn_edge_grid(self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin, zoom, f_q=1.0):
+        """주기 스폰 — 항상 뷰 밖 유입 경계에서 1개."""
+        if not self._active_dir_vec or not view_rect or len(view_rect) < 4:
+            return
+        cell = self._cell_size(settings)
+        extent = self._max_cloud_extent(scale_max, zoom, f_q)
+        strips = max(2, int(math.ceil((margin + extent * 0.5) / cell)))
+        boundary = self._collect_upwind_boundary_cells(view_rect, margin, cell, strips)
+        if not boundary:
+            return
+        ix, iy = random.choice(boundary)
+        self._spawn_at_cell(ix, iy, settings, map_w, map_h, speed, scale_min, scale_max, margin, age_sec=0.0)
 
     def update_and_draw_world(self, screen, dt_sec, settings, cam_x, cam_y, zoom, y_transform=None, x_offset_fn=None, f_q=1.0, map_size=None):
         enabled = bool(settings.get("enabled", False))
@@ -1346,23 +1423,28 @@ class CloudShadowSystem:
         view_w = float(CONFIG["WIDTH"]) / max(1e-6, float(zoom))
         view_h = float(CONFIG["HEIGHT"]) / max(1e-6, float(zoom))
         view_rect = (float(cam_x), float(cam_y), float(view_w), float(view_h))
+        spawn_margin = self._spawn_margin_px(settings, scale_max, zoom, f_q)
 
         if not self._clouds and freq > 0.0:
-            self._fill_view_grid(settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin=220)
+            self._seed_initial_clouds(
+                settings, map_w, map_h, speed, scale_min, scale_max, view_rect, spawn_margin, zoom, f_q
+            )
 
         self._spawn_acc += freq * max(0.0, float(dt_sec))
         while self._spawn_acc >= 1.0:
             self._spawn_acc -= 1.0
-            self._spawn_edge_grid(settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin=220)
+            self._spawn_edge_grid(
+                settings, map_w, map_h, speed, scale_min, scale_max, view_rect, spawn_margin, zoom, f_q
+            )
 
         dt = max(0.0, float(dt_sec))
         keep = []
-        margin = 220
+        cull_margin = spawn_margin
         for c in self._clouds:
             c["wx"] += c["vx"] * dt
             c["wy"] += c["vy"] * dt
             wx, wy = float(c["wx"]), float(c["wy"])
-            if wx < -margin or wx > map_w + margin or wy < -margin or wy > map_h + margin:
+            if wx < -cull_margin or wx > map_w + cull_margin or wy < -cull_margin or wy > map_h + cull_margin:
                 continue
             keep.append(c)
             # main.py 배경 blit과 동일: int(round((0-cam)*zoom)) 원점 + 월드*줌 (스프라이트/배경과 픽셀 정렬)

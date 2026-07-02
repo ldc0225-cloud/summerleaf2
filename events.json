@@ -55,13 +55,15 @@
                 { "type": "WAIT", "val": 3.0 },
                 { "type": "CAMERA", "mode": "fixed", "smooth": true, "duration_sec": 0.5, "x": 762.0, "y": 1942.0 },
                 { "type": "TILT", "on": true, "strength": 0.9778, "duration_sec": 1.0 },
+                { "type": "WAIT", "val": 1.5 },
                 { "type": "ZOOM", "on": false, "strength": 0.0, "duration_sec": 0.5 },
-                { "type": "WAIT", "val": 2.0 },
+                { "type": "WAIT", "val": 1.5 },
                 { "type": "SAY", "who": "player", "show_name": false, "text": "당근\n아 봄날 좋구나~" },
                 { "type": "EVT_STOP_BEGIN", "action": "break_loop" },
                 { "type": "LOOP_START" },
                 { "type": "LOOP_END" },
                 { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 0.9 },
+                { "type": "WAIT", "val": 1.5 },
                 { "type": "CAMERA", "mode": "follow_player", "smooth": false, "duration_sec": 0.5 },
                 { "type": "TILT", "on": false, "strength": 0.0, "duration_sec": 1.0 },
                 { "type": "MOVE", "target": "player", "pos": [570, 2132], "dir": "right", "force": true, "move_anim": "jump" }
@@ -258,7 +260,7 @@
         "ev_hotkey_cloud": {
             "title": "핫키 구름",
             "steps": [
-                { "type": "FX", "kind": "cloud_shadow", "on": true, "dir": "RANDOM" }
+                { "type": "SCREEN_FX", "kind": "cloud", "on": true, "dir": "RANDOM" }
             ],
             "result": {},
             "map_id": "__GLOBAL__",
@@ -295,9 +297,11 @@
             "title": "1. 데모플레이",
             "steps": [
                 { "type": "CURSOR_VISIBLE", "val": 0 },
-                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.0 },
+                { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 0.0 },
                 { "type": "MUSIC_PLAY", "music": "demo_bgm", "fade_in": 1.0, "queue": true, "loop": true, "volume": 0.8 },
                 { "type": "MAP", "target": "bg_jjangpu", "dir": "right" },
+                { "type": "SCREEN_FX", "kind": "cloud", "on": true, "dir": "SE" },
+                { "type": "SCREEN_FX", "kind": "rain", "on": true, "density": 0.35, "speed": 100.0, "angle": 15.0, "drop_len": 10, "alpha": 255, "color": "255,255,255" },
                 { "type": "CHANGE", "target": "player", "to": "c2" },
                 { "type": "MOVE", "target": "player", "pos": [1090, 1828], "dir": "right", "instant": true },
                 { "type": "CAMERA", "mode": "follow_player", "smooth": true, "duration_sec": 0.5 },
@@ -423,6 +427,7 @@
                 { "type": "PLACE", "target": "escape02", "dir": "left", "action": "remove" },
                 { "type": "ANIM_ONCE", "name": "escape03", "pos": [800, 2016] },
                 { "type": "PLACE", "target": "flower1_", "pos": [800, 1986], "dir": "left", "appear": "fade" },
+                { "type": "ENTITY_FX", "target": "flower1_", "mode": "pulse", "action": "start", "color": "255,220,100", "alpha": 160, "cycle_sec": 1.0 },
                 { "type": "WAIT", "val": 2.0 },
                 { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 560.0, "y": 1920.0, "smooth": true, "duration_sec": 0.5 },
                 { "type": "PLACE", "target": "player", "pos": [560, 1920], "dir": "left", "appear": "fade" },
@@ -450,7 +455,9 @@
             "title": "FLOWER1 4 요정 등장",
             "steps": [
                 { "type": "MOVE", "target": "player", "pos": [624, 2144], "dir": "right" },
-                { "type": "CHANGE", "target": "flower_fairy1", "to": "fairy1", "fade": 0.8 }
+                { "type": "CHANGE", "target": "flower_fairy1", "to": "fairy1", "fade": 0.8 },
+                { "type": "TUNE", "target": "fairy1", "height": 15.0 },
+                { "type": "ZOOM", "on": true, "strength": 0.8, "duration_sec": 0.0, "target": "fairy1" }
             ],
             "result": {},
             "map_id": "__GLOBAL__",

@@ -553,6 +553,27 @@ def _interact_offset_into_dict(fields: dict, out: dict) -> None:
     out["offset"] = [x, y]
 
 
+def _interact_prompt_to_fields(inter: dict) -> dict:
+    inter = inter or {}
+    oy = inter.get("prompt_offset_y")
+    return {
+        "interact_prompt_set": str(inter.get("prompt_set", "") or ""),
+        "interact_prompt_offset_y": "" if oy is None else str(oy),
+    }
+
+
+def _interact_prompt_into_dict(fields: dict, out: dict) -> None:
+    ps = str(fields.get("interact_prompt_set") or "").strip()
+    if ps:
+        out["prompt_set"] = ps
+    oy_s = str(fields.get("interact_prompt_offset_y") or "").strip()
+    if oy_s:
+        try:
+            out["prompt_offset_y"] = float(oy_s)
+        except ValueError:
+            pass
+
+
 def _interact_range_offset_rows() -> list:
     return [
         ("상호작용 거리 (픽셀)", "interact_range", "text"),
@@ -563,6 +584,13 @@ def _interact_range_offset_rows() -> list:
             "_hint_interact_anchor",
             "hint",
         ),
+        ("안내 아이콘 애니 세트", "interact_prompt_set", "text"),
+        (
+            "  ui/{이름}/{세트}0.png · 없으면 ui/pushbutton/{세트} · 비우면 pushbutton",
+            "_hint_interact_prompt",
+            "hint",
+        ),
+        ("아이콘 Y 오프셋 (anchor 기준, -는 위)", "interact_prompt_offset_y", "text"),
     ]
 
 
@@ -572,6 +600,7 @@ def _interact_dict_from_fields(fields: dict) -> dict:
         "range": float(fields.get("interact_range") or 48),
     }
     _interact_offset_into_dict(fields, out)
+    _interact_prompt_into_dict(fields, out)
     binds = _bindings_from_slot_fields(fields)
     if binds:
         out["bindings"] = binds
@@ -788,6 +817,7 @@ def char_def_to_fields(cdef: dict, char_name: str) -> dict:
         "fallback_text": str((fb_say or {}).get("text") or ""),
     }
     _bindings_to_slot_fields(inter.get("bindings"), fields)
+    fields.update(_interact_prompt_to_fields(inter))
     talk_count = max(DEFAULT_TALK_LINES, len(lines))
     for i in range(1, talk_count + 1):
         if i - 1 < len(lines):
@@ -920,6 +950,7 @@ def char_inst_fields_from_npc(npc) -> dict:
         "flee_safe": str(spec.get("safe_range", 140)),
     }
     _bindings_to_slot_fields(inter.get("bindings"), fields)
+    fields.update(_interact_prompt_to_fields(inter))
     we = getattr(npc, "_world_entry", None) or {}
     _state_patch_to_fields(we.get("spawn_state") or {}, fields, "inst_spawn_")
     _progress_apply_to_fields(we.get("progress_apply"), fields, slot_prefix="inst_prog")
@@ -1577,6 +1608,7 @@ def _fields_from_interact_dict(inter: dict) -> dict:
         "interact_offset_x": iox,
         "interact_offset_y": ioy,
     }
+    fields.update(_interact_prompt_to_fields(inter))
     _bindings_to_slot_fields(inter.get("bindings"), fields)
     return fields
 

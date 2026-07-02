@@ -102,6 +102,7 @@ CONFIG = {
     "NPC_INTERACT_RANGE": 48,
     # FieldItem interact.bindings 클릭 판정(비우면 interact.range / 기본 16)
     "OBJECT_INTERACT_RANGE": 16,
+    # interact.prompt_set / prompt_offset_y — 안내 아이콘 (assets/images/ui/{name}/{set}0.png)
     # 손에 든 물건 발(foot) 격자 — 플레이어 발 기준 월드 오프셋 (engine._held_item_foot_world_pos)
     # Y: 클수록 손 위치가 위로(플레이어 pos.y - Y). X: 바라보는 방향 옆 간격.
     "HELD_ITEM_FOOT_OFFSET_X": 12,
@@ -148,6 +149,8 @@ CONFIG = {
     "SAY_UI_FADE_OUT_SEC": 0.2,
     # PLACE/MOVE appear=fade 알파 보간 시간(초). 예전 5px/프레임@60fps ≈ 0.85초.
     "APPEAR_FADE_SEC": 0.85,
+    # 시각 보간(틸트/쉬어/카메라 lerp) 기준 프레임 길이(초). 실제 경과 dt와 함께 사용.
+    "VISUAL_DT_REF_SEC": 1.0 / 60.0,
     # 같은 이벤트 안에서 SAY가 연속일 때: 박스 페이드아웃/인 없이 다음 대사만 갱신
     "SAY_CHAIN_WITHIN_EVENT": True,
     # 색상
@@ -191,6 +194,14 @@ CONFIG = {
     "ZONE_CONFIRM_PROMPT_FRAME_MS": 110,
     # 존 중앙 기준 오프셋 (월드 px)
     "ZONE_CONFIRM_PROMPT_OFFSET_Y_PX": -6,
+
+    # --- 엔티티(캐릭터·오브젝트) 상호작용 안내 아이콘 ---
+    # assets/images/ui/{이름}/{prompt_set}0.png → 없으면 assets/images/ui/pushbutton/{prompt_set}0.png
+    "INTERACT_PROMPT_ENABLED": True,
+    "INTERACT_PROMPT_DEFAULT_SET": "pushbutton",
+    "INTERACT_PROMPT_FRAMES": 4,
+    "INTERACT_PROMPT_FRAME_MS": 110,
+    "INTERACT_PROMPT_OFFSET_Y_PX": -28,
     # 디버그: 기존 사각형 대화 UI를 함께 그릴지 여부(main.py)
     "SAY_DEBUG_LEGACY_BOX": False,
     "ANIM_DELAY": 150, "INTERACT_DIST": 35,
@@ -217,6 +228,10 @@ CONFIG = {
 
     # --- 개별 오브젝트 줌(별개 기능) ---
     # 이벤트 ZOOM에서 target이 player/NPC/오브젝트인 경우에만 사용. (camera/global 대상 줌은 WORLD_ZOOM으로 처리)
+    # val/strength = 직접 배율 (0.5=절반, 1.0=기본, 2.0=2배). on=false → 1.0
+    "ENTITY_ZOOM_MIN": 0.5,
+    "ENTITY_ZOOM_MAX": 2.0,
+    "ENTITY_ZOOM_DEFAULT_DURATION_SEC": 1.0,
     "ENTITY_ZOOM_LERP": 0.12,  # 0~1, 클수록 더 빠름
 
     # --- 틸트/쉬어/캐시(줌과 무관) ---
@@ -375,6 +390,71 @@ CONFIG = {
     "CLOUD_SHADOW_GRID_JITTER_RATIO": 0.42,
     # 초기 격자가 너무 많을 때 상한(성능)
     "CLOUD_SHADOW_GRID_MAX_CLOUDS": 200,
+    # 구름 스폰 시 화면 밖 최소 여백(px). 스프라이트 크기에 따라 자동 확장된다.
+    "CLOUD_SHADOW_SPAWN_MARGIN_PX": 96,
+
+    # --- 엔티티 FX ---
+    # 예: { "type":"ENTITY_FX","target":"player","mode":"pulse","color":"255,220,100","alpha":160,"cycle_sec":1.2 }
+    # action: stop 으로 해제. (구형: type=FX, kind=entity_fx)
+    "ENTITY_FX_DEFAULT_CYCLE_SEC": 1.0,
+    "ENTITY_FX_TINT_CACHE_MAX": 96,
+
+    # 이벤트 SCREEN_FX — kind: cloud | flash | shake | rain (구형 type:FX 도 런타임 호환)
+    # 예: { "type":"SCREEN_FX","kind":"cloud","on":true,"dir":"RANDOM","speed":15,"freq":0.5 }
+    # 예: { "type":"SCREEN_FX","kind":"flash","on":true,"mode":"pulse","color":"255,255,255","alpha":140,"cycle_sec":0.7 }
+    # 예: { "type":"SCREEN_FX","kind":"shake","on":true,"amp_px":8,"freq_hz":14 }
+    # 예: { "type":"SCREEN_FX","kind":"rain","on":true,"density":0.4,"speed":300,"angle":78,... }
+    # 예: { "type":"SCREEN_FX","kind":"vignette","on":true,"strength":0.55,"size":0.42,"softness":0.65,"color":"0,0,0" }
+    # 예: { "type":"SCREEN_FX","kind":"tone","on":true,"preset":"warm","strength":0.35 }
+    # (구형: SCREEN_FLASH, SCREEN_SHAKE, type=FX+kind=screen_*)
+    "SCREEN_FX_FLASH_DEFAULT_ALPHA": 140,
+    "SCREEN_FX_FLASH_DEFAULT_CYCLE_SEC": 0.7,
+    "SCREEN_FX_SHAKE_DEFAULT_AMP_PX": 7,
+    "SCREEN_FX_SHAKE_DEFAULT_FREQ_HZ": 14,
+    "SCREEN_FX_RAIN_DEFAULT_DENSITY": 0.35,
+    "SCREEN_FX_RAIN_DEFAULT_SPEED": 280.0,
+    # 예: angle=0 수직, 45 대각, 82 기본(약간 기울어짐). 90은 순수 수평이라 vy=0 → 제외(최대 88).
+    "SCREEN_FX_RAIN_DEFAULT_ANGLE": 82.0,
+    "SCREEN_FX_RAIN_ANGLE_MIN": 0.0,
+    "SCREEN_FX_RAIN_ANGLE_MAX": 88.0,
+    "SCREEN_FX_RAIN_DEFAULT_DROP_LEN": 7,
+    "SCREEN_FX_RAIN_DEFAULT_ALPHA": 170,
+    # density→드롭 수 환산(뷰포트 면적 나눗셈). 작을수록 화면 전체가 더 촘촘해짐.
+    "SCREEN_FX_RAIN_DENSITY_AREA_DIV": 280.0,
+    "SCREEN_FX_RAIN_MAX_DROPS": 320,
+    "SCREEN_FX_RAIN_MARGIN_X": 64.0,
+    "SCREEN_FX_RAIN_SPAWN_ABOVE_MUL": 1.25,
+    # 깊이감(원경/근경 2겹) — 근경(길고·진하고·빠름) 비율. 나머지는 원경(짧고·흐리고·느림).
+    "SCREEN_FX_RAIN_NEAR_RATIO": 0.45,
+    # vignette — strength 0~1, size=중앙 밝은 영역(0~1), softness=그라데이션 폭
+    "SCREEN_FX_VIGNETTE_DEFAULT_STRENGTH": 0.55,
+    "SCREEN_FX_VIGNETTE_DEFAULT_SIZE": 0.42,
+    "SCREEN_FX_VIGNETTE_DEFAULT_SOFTNESS": 0.65,
+    # tone — preset warm|cool|neutral|custom, strength 0~1
+    "SCREEN_FX_TONE_DEFAULT_STRENGTH": 0.32,
+    "SCREEN_FX_TONE_WARM_RGB": (255, 210, 170),
+    "SCREEN_FX_TONE_COOL_RGB": (170, 205, 255),
+    "SCREEN_FX_TONE_NEUTRAL_RGB": (255, 255, 255),
+
+    # 에디터 R,G,B 필드용 색상 팔레트 (OVERLAY_UI color, ENTITY_FX/SCREEN_FX 등)
+    "EDITOR_COLOR_PALETTE": [
+        {"name": "흰색", "rgb": "255,255,255"},
+        {"name": "검정", "rgb": "0,0,0"},
+        {"name": "회색", "rgb": "160,160,160"},
+        {"name": "금색", "rgb": "255,220,100"},
+        {"name": "노랑", "rgb": "255,255,80"},
+        {"name": "주황", "rgb": "255,160,60"},
+        {"name": "빨강", "rgb": "255,80,80"},
+        {"name": "분홍", "rgb": "255,120,180"},
+        {"name": "보라", "rgb": "180,100,255"},
+        {"name": "파랑", "rgb": "80,140,255"},
+        {"name": "하늘", "rgb": "140,210,255"},
+        {"name": "청록", "rgb": "80,220,200"},
+        {"name": "초록", "rgb": "100,220,120"},
+        {"name": "연두", "rgb": "180,255,120"},
+        {"name": "갈색", "rgb": "140,90,50"},
+        {"name": "크림", "rgb": "255,248,220"},
+    ],
 
     
     # 카메라: 플레이어를 화면 중앙보다 아래로 배치(픽셀). 예: 50이면 플레이어가 화면에서 50px 아래에 보임

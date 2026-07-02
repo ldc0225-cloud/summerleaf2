@@ -1561,6 +1561,98 @@ def entity_carry_click_allowed(entity) -> bool:
     return True
 
 
+def entity_interact_asset_key(entity) -> str:
+    """UI 아이콘 폴더명 — object_defs/char_defs 타입 키(name)."""
+    return str(getattr(entity, "name", "") or "").strip()
+
+
+def interact_prompt_set_from_spec(spec) -> str:
+    """interact.prompt_set (또는 prompt.set) → 애니 세트 이름."""
+    if not isinstance(spec, dict):
+        return "pushbutton"
+    raw = spec.get("prompt_set")
+    if raw is None:
+        raw = spec.get("prompt")
+    if isinstance(raw, dict):
+        raw = raw.get("set")
+    ps = str(raw or "pushbutton").strip()
+    return ps or "pushbutton"
+
+
+def entity_interact_prompt_world_xy(entity):
+    """안내 아이콘 월드 좌표 — anchor + prompt_offset_y − sprite height."""
+    anc = entity_interact_anchor_xy(entity)
+    if not anc:
+        return None
+    spec = entity_interact_spec(entity)
+    try:
+        offy = float(
+            spec.get("prompt_offset_y", CONFIG.get("INTERACT_PROMPT_OFFSET_Y_PX", -28) or -28)
+        )
+    except (TypeError, ValueError):
+        offy = -28.0
+    try:
+        h = float(getattr(entity, "height", 0) or 0)
+    except (TypeError, ValueError):
+        h = 0.0
+    return float(anc[0]), float(anc[1]) + offy - h
+
+
+def entity_in_interact_range(entity, player, *, is_npc: bool = False) -> bool:
+    """플레이어가 interact.range 안에 있는지 (anchor 기준)."""
+    anc = entity_interact_anchor_xy(entity)
+    if not anc or player is None:
+        return False
+    try:
+        default = float(
+            CONFIG.get("NPC_INTERACT_RANGE", 48)
+            if is_npc
+            else CONFIG.get("OBJECT_INTERACT_RANGE", 16)
+        )
+    except (TypeError, ValueError):
+        default = 48.0 if is_npc else 16.0
+    rng = entity_interact_range(entity, default=default)
+    try:
+        return math.dist(player.pos, anc) < rng
+    except (TypeError, ValueError):
+        return False
+
+
+def entity_interact_prompt_available(
+    entity,
+    flow,
+    events_catalog: dict,
+    map_id: str,
+    player_pos,
+    *,
+    session_vars=None,
+) -> bool:
+    """
+    거리 안내 아이콘을 띄울 상호작용이 있는지.
+    bindings 조건·NPC 대화·들기( bindings 없는 enabled ) 중 현재 만족하는 것이 있을 때 True.
+    """
+    spec = entity_interact_spec(entity)
+    if not interact_spec_enabled(spec):
+        return False
+    if spec.get("prompt_enabled") is False:
+        return False
+    ctx = build_eval_ctx(flow.save_data if flow else {}, session_vars)
+    ctx["map_id"] = str(map_id or "")
+    ctx["npc_name"] = str(getattr(entity, "name", "") or "")
+    if getattr(entity, "char_def", None):
+        from char_behavior import npc_interact_enabled, pick_talk_line
+
+        if npc_interact_enabled(entity):
+            if pick_talk_line(entity, flow, map_id, player_pos, session_vars=session_vars):
+                return True
+    if entity_interact_enabled(entity):
+        if pick_interact_binding(spec.get("bindings"), ctx, events_catalog):
+            return True
+    if entity_carry_click_allowed(entity):
+        return True
+    return False
+
+
 def entity_interact_range(entity, *, default=40.0) -> float:
     """플레이어가 서 있어야 상호작용이 실행되는 거리(interact.range). 클릭 판정과는 별도."""
     spec = entity_interact_spec(entity)
