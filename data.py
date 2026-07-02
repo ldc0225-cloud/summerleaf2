@@ -401,6 +401,8 @@ CONFIG = {
     "SHOW_OVERLAY_DEFAULT": False,
     # 오버레이(HUD)를 껐을 때도 RSS 메모리 표시를 남길지 여부.
     "SHOW_RSS_OVERLAY_WHEN_OFF": False,
+    # 필드 플레이 중 오른쪽 위 게임 종료 버튼(OVERLAY_UI, events.json fishing_exit와 동일 파이프).
+    "GAME_EXIT_OVERLAY_ENABLED": True,
     # 감쇠로 멈춘 뒤 시뮬을 다시 시작하는 키. GLOBAL_EVENT_HOTKEYS와 동일: 한 글자, F9, K_ESCAPE 등 pygame 상수명.
     "SWING_RESTART_HOTKEY": "b",
 

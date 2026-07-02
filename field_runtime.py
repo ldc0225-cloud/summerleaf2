@@ -703,6 +703,203 @@ def build_global_hotkey_event_map():
     return out
 
 
+# =============================================================================
+# 게임 종료 버튼 (OVERLAY_UI)
+# events.json의 fishing_exit·낚시 그만두기와 동일한 EventManager 파이프라인 사용.
+# - install_game_exit_button: 필드 진입 시 오른쪽 위 persist 버튼 등록
+# - show/hide_game_exit_confirm: 확인 문구 + 응/아니 버튼
+# - handle_overlay_ui_click_action: try_overlay_ui_click 반환값 일괄 처리
+# =============================================================================
+
+GAME_EXIT_BTN_ID = "game_exit_btn"
+GAME_EXIT_CONFIRM_IDS = (
+    "game_exit_confirm_msg",
+    "game_exit_confirm_yes",
+    "game_exit_confirm_no",
+)
+
+
+def _game_exit_overlay_enabled() -> bool:
+    try:
+        return bool(CONFIG.get("GAME_EXIT_OVERLAY_ENABLED", True))
+    except Exception:
+        return True
+
+
+def _apply_overlay_ui_step_dict(ev_mgr, step: dict) -> None:
+    """EventManager._apply_overlay_ui_step 래퍼 (OVERLAY_UI 스텝 dict 그대로 전달)."""
+    fn = getattr(ev_mgr, "_apply_overlay_ui_step", None)
+    if callable(fn):
+        fn(step)
+
+
+def _persist_overlay_ui_step(**fields) -> dict:
+    """hold_forever persist OVERLAY_UI 공통 필드 (events.json OVERLAY_UI 스텝과 동일 키)."""
+    step = {
+        "type": "OVERLAY_UI",
+        "action": "show",
+        "persist": True,
+        "hold_forever": True,
+        "mode": "fade",
+        "appear": 0.12,
+        "disappear": 0.15,
+    }
+    step.update(fields)
+    return step
+
+
+def game_exit_confirm_open(ev_mgr) -> bool:
+    """종료 확인창(문구 오버레이)이 떠 있는지."""
+    try:
+        for ov in list(getattr(ev_mgr, "_ui_overlays", None) or []):
+            if ov.get("id") == GAME_EXIT_CONFIRM_IDS[0] and ov.get("phase") != "done":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def install_game_exit_button(ev_mgr) -> None:
+    """오른쪽 위 작은 exit 버튼 — 필드 플레이 내내 표시 (임시 플레이스홀더, 추후 이미지 교체)."""
+    if not _game_exit_overlay_enabled():
+        return
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="exit",
+            font="default",
+            size=10,
+            pad_x=6,
+            pad_y=3,
+            color="235,220,210",
+            bg_color="48,42,42",
+            overlay_id=GAME_EXIT_BTN_ID,
+            anchor="top_right",
+            margin_x=6,
+            margin_y=6,
+            clickable=True,
+            click_action="game_exit_open",
+        ),
+    )
+
+
+def show_game_exit_confirm(ev_mgr) -> None:
+    """'게임을 끝낼까요?' + 응/아니 (기존 OVERLAY_UI 버튼·텍스트 빌더 재사용)."""
+    if not _game_exit_overlay_enabled():
+        return
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="text",
+            text="게임을 끝낼까요?",
+            font="default",
+            size=13,
+            color="245,245,250",
+            overlay_id=GAME_EXIT_CONFIRM_IDS[0],
+            anchor="center",
+            margin_y=-22,
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="응",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="52,110,72",
+            overlay_id=GAME_EXIT_CONFIRM_IDS[1],
+            anchor="center",
+            margin_x=-36,
+            margin_y=18,
+            clickable=True,
+            click_action="game_exit_yes",
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="아니",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="90,58,58",
+            overlay_id=GAME_EXIT_CONFIRM_IDS[2],
+            anchor="center",
+            margin_x=36,
+            margin_y=18,
+            clickable=True,
+            click_action="game_exit_no",
+        ),
+    )
+
+
+def hide_game_exit_confirm(ev_mgr) -> None:
+    """종료 확인 오버레이 제거 (exit 버튼은 유지)."""
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if not callable(rm):
+        return
+    for oid in GAME_EXIT_CONFIRM_IDS:
+        try:
+            rm(oid)
+        except Exception:
+            pass
+
+
+def handle_overlay_ui_click_action(
+    ov_act,
+    *,
+    ev_mgr,
+    field_activities=None,
+    cam=None,
+):
+    """try_overlay_ui_click 결과 처리 — 낚시 나가기·게임 종료 등 persist OVERLAY_UI.
+
+    Returns:
+        "quit"    — 메인 루프 종료
+        "consumed" — 클릭 소비(필드 이동·이벤트 입력으로 내리지 않음)
+        None      — 이 핸들러와 무관
+    """
+    act = (ov_act or "").strip()
+
+    # --- 종료 확인창 열림: 응/아니/바깥 클릭 ---
+    if game_exit_confirm_open(ev_mgr):
+        if act == "game_exit_yes":
+            hide_game_exit_confirm(ev_mgr)
+            return "quit"
+        hide_game_exit_confirm(ev_mgr)
+        return "consumed"
+
+    if act == "game_exit_open":
+        show_game_exit_confirm(ev_mgr)
+        return "consumed"
+
+    if act == "stop_fishing":
+        try:
+            if field_activities is not None:
+                field_activities.cancel()
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("fishing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+        return "consumed"
+
+    return None
+
+
 def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=None):
     """DEV_CMD / 핫키용: 필드에서 즉시 실행되는 디버그·시스템 동작.
 

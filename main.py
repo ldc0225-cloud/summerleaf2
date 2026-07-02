@@ -31,6 +31,9 @@ from field_runtime import (
     scale_ui_text_px,
     try_start_hotkey_global_event,
     apply_dev_runtime_command,
+    install_game_exit_button,
+    handle_overlay_ui_click_action,
+    game_exit_confirm_open,
     timed_effect_finished,
     timed_effect_init,
     timed_effect_value,
@@ -859,6 +862,7 @@ def main():
     music_mgr = MusicManager()
     ev_mgr = EventManager(flow, music_mgr=music_mgr)
     ev_mgr.set_fragment_catalog(fragment_catalog)
+    install_game_exit_button(ev_mgr)
 
     def _reload_event_bundles():
         nonlocal raw_events, events_catalog, fragment_catalog
@@ -1412,6 +1416,10 @@ def main():
             pass
         try:
             font = get_ui_font(max(6, int(round(10.0 * float(CONFIG["WIDTH"]) / 640.0))))
+        except Exception:
+            pass
+        try:
+            install_game_exit_button(ev_mgr)
         except Exception:
             pass
 
@@ -2411,6 +2419,29 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx_ex, my_ex = _embed_phys_to_logical_xy(
+                    event.pos[0], event.pos[1], scale_factor=scale_factor
+                )
+                # persist OVERLAY_UI (게임 종료·낚시 나가기 등) — 이벤트 중에도 최우선
+                try:
+                    _ov_click = getattr(ev_mgr, "try_overlay_ui_click", None)
+                    ov_act = (
+                        _ov_click(int(mx_ex), int(my_ex)) if callable(_ov_click) else None
+                    )
+                    _ov_res = handle_overlay_ui_click_action(
+                        ov_act,
+                        ev_mgr=ev_mgr,
+                        field_activities=field_activities,
+                        cam=cam,
+                    )
+                    if _ov_res == "quit":
+                        running = False
+                        continue
+                    if _ov_res == "consumed" or game_exit_confirm_open(ev_mgr):
+                        continue
+                except Exception:
+                    pass
             if not ev_mgr.active_event and bool(getattr(ev_mgr, "is_talking", False)):
                 if event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
                     try:
@@ -2478,25 +2509,6 @@ def main():
                 mx_a, my_a = _embed_phys_to_logical_xy(
                     event.pos[0], event.pos[1], scale_factor=scale_factor
                 )
-                # 낚시 나가기 등 — OVERLAY_UI clickable (persist 버튼)
-                _ov_click = getattr(ev_mgr, "try_overlay_ui_click", None)
-                if callable(_ov_click):
-                    ov_act = _ov_click(int(mx_a), int(my_a))
-                    if ov_act == "stop_fishing":
-                        field_activities.cancel()
-                        try:
-                            ev_mgr.remove_ui_overlay("fishing_exit")
-                        except Exception:
-                            pass
-                        try:
-                            ev_mgr.pending_camera_command = {
-                                "mode": "follow_player",
-                                "smooth": True,
-                                "duration_sec": 0.5,
-                            }
-                        except Exception:
-                            pass
-                        continue
                 # 필드 활동(낚시 등): 클릭을 활동에 넘김
                 if field_activities.is_active:
                     ww_a = None
