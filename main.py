@@ -1188,8 +1188,13 @@ def main():
         if surf is None:
             return
         try:
+            pin_max = int(CONFIG.get("SHEAR_PIN_CACHE_MAX_ITEMS", 12) or 12)
+        except Exception:
+            pin_max = 12
+        pin_max = max(4, min(128, pin_max))
+        try:
             _shear_pin_cache[key] = surf
-            while len(_shear_pin_cache) > 12:
+            while len(_shear_pin_cache) > pin_max:
                 try:
                     _shear_pin_cache.pop(next(iter(_shear_pin_cache)))
                 except Exception:

@@ -61,6 +61,22 @@ CONFIG = {
     # 전량 clear 경로에서만 gc.collect() — False면 끊김은 줄지만 RSS는 더 느리게 내려갈 수 있음.
     "MEM_WATCHDOG_GC_AFTER_FULL_CLEAR": True,
 
+    # --- 렌더/쉬어 캐시 (RG35xx·PC 기본. Android 3GB는 ANDROID_RAM_PROFILE_* 가 덮어씀) ---
+    "RENDER_CACHE_MB_LIMIT": 220.0,
+    "RENDER_CACHE_MAX_ITEMS": 96,
+    "TEMP_SURF_MB_LIMIT": 96.0,
+    "SHEAR_PIN_CACHE_MAX_ITEMS": 12,
+    "SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT": 48.0,
+    "SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS": 128,
+
+    # --- Android APK: 3GB RAM 프로필 ---
+    # True + 안드로이드 런타임이면 아래 기본값을 CONFIG에 merge (데스크톱·RG35xx 빌드는 영향 없음).
+    # 빌드만 바꿀 때: data.py 수정 후 buildozer android debug.
+    # 런타임만 바꿀 때: adb shell setprop 또는 앱 시작 전 환경변수 SUMMERLEAF_RAM_PROFILE_MB (선택).
+    "ANDROID_RAM_PROFILE_ENABLED": True,
+    "ANDROID_RAM_PROFILE_MB": 3072,
+    # 비어 있으면 ANDROID_RAM_PROFILE_MB(기본 3072) 프리셋만 적용. 키를 넣으면 프리셋보다 우선.
+    "ANDROID_RAM_PROFILE_OVERRIDES": {},
 
     # 디버그 오버레이(텍스트) 갱신 주기(초). 폰트 렌더/문자열 생성/OS RSS 조회 비용을 줄이기 위함.
     "OVERLAY_UPDATE_INTERVAL_SEC": 0.5,
@@ -586,3 +602,122 @@ from entity_defs import load_char_defs, load_object_defs, reload_entity_defs
 
 OBJ_ASSETS = load_object_defs()
 CHAR_ASSETS = load_char_defs()
+
+
+# ---------------------------------------------------------------------------
+# Android RAM 프로필 — 3GB 기기에서 캐시·워치독을 넉넉히 (CPU 재계산↓)
+# import data 시 CONFIG 로드 직후 1회 적용. main/engine 은 CONFIG.get 만 사용.
+# ---------------------------------------------------------------------------
+
+def _is_android_runtime():
+    import os
+
+    return bool(os.environ.get("ANDROID_ARGUMENT") or os.environ.get("ANDROID_PRIVATE"))
+
+
+def _android_ram_profile_preset_3gb():
+    """3072MB 기준. 앱+Python 여유를 두고 변환 캐시 위주로 ~0.5–0.7GB 사용."""
+    return {
+        "RENDER_CACHE_MB_LIMIT": 512.0,
+        "RENDER_CACHE_MAX_ITEMS": 160,
+        "TEMP_SURF_MB_LIMIT": 160.0,
+        "SPRITE_SCALE_CACHE_MB_LIMIT": 192.0,
+        "SPRITE_SCALE_CACHE_MAX_ITEMS": 768,
+        "SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT": 96.0,
+        "SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS": 256,
+        "SHEAR_PIN_CACHE_MAX_ITEMS": 32,
+        "MEM_WATCHDOG_HIGH_MB": 900.0,
+        "MEM_WATCHDOG_GROWTH_MB": 120.0,
+        "MEM_WATCHDOG_GROWTH_TRIM_FRACTION": 0.12,
+        "MEM_WATCHDOG_GC_AFTER_FULL_CLEAR": False,
+        "TILT_SHEAR_STRIP_BUCKET_PX": 96,
+    }
+
+
+def _scale_android_ram_preset(preset, target_mb):
+    """3072가 아닌 ANDROID_RAM_PROFILE_MB 일 때 캐시 상한만 비례 조정."""
+    try:
+        base = 3072.0
+        t = float(target_mb)
+    except (TypeError, ValueError):
+        return dict(preset)
+    if t <= 0.0:
+        return dict(preset)
+    scale = max(0.5, min(1.5, t / base))
+    if abs(scale - 1.0) < 0.05:
+        return dict(preset)
+    scaled = dict(preset)
+    for key in (
+        "RENDER_CACHE_MB_LIMIT",
+        "TEMP_SURF_MB_LIMIT",
+        "SPRITE_SCALE_CACHE_MB_LIMIT",
+        "SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT",
+        "MEM_WATCHDOG_HIGH_MB",
+        "MEM_WATCHDOG_GROWTH_MB",
+    ):
+        if key in scaled:
+            try:
+                scaled[key] = float(scaled[key]) * scale
+            except (TypeError, ValueError):
+                pass
+    for key in (
+        "RENDER_CACHE_MAX_ITEMS",
+        "SPRITE_SCALE_CACHE_MAX_ITEMS",
+        "SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS",
+        "SHEAR_PIN_CACHE_MAX_ITEMS",
+    ):
+        if key in scaled:
+            try:
+                scaled[key] = max(8, int(round(float(scaled[key]) * scale)))
+            except (TypeError, ValueError):
+                pass
+    return scaled
+
+
+def apply_android_ram_profile(config=None):
+    """
+    안드로이드에서만 CONFIG 에 RAM 프로필 merge.
+    반환: 적용했으면 True, 아니면 False.
+  """
+    cfg = CONFIG if config is None else config
+    if not _is_android_runtime():
+        return False
+    if not bool(cfg.get("ANDROID_RAM_PROFILE_ENABLED", True)):
+        return False
+    try:
+        target_mb = float(cfg.get("ANDROID_RAM_PROFILE_MB", 3072) or 3072)
+    except (TypeError, ValueError):
+        target_mb = 3072.0
+    env_mb = None
+    try:
+        import os
+
+        raw = os.environ.get("SUMMERLEAF_RAM_PROFILE_MB", "").strip()
+        if raw:
+            env_mb = float(raw)
+    except Exception:
+        env_mb = None
+    if env_mb is not None and env_mb > 0.0:
+        target_mb = env_mb
+    merged = _scale_android_ram_preset(_android_ram_profile_preset_3gb(), target_mb)
+    overrides = cfg.get("ANDROID_RAM_PROFILE_OVERRIDES")
+    if isinstance(overrides, dict):
+        for k, v in overrides.items():
+            if k:
+                merged[str(k)] = v
+    for k, v in merged.items():
+        cfg[k] = v
+    cfg["_ANDROID_RAM_PROFILE_APPLIED"] = True
+    cfg["_ANDROID_RAM_PROFILE_MB_EFFECTIVE"] = float(target_mb)
+    try:
+        print(
+            "[CONFIG] Android RAM profile: "
+            f"{int(target_mb)}MB ({len(merged)} keys, "
+            f"RENDER_CACHE_MB_LIMIT={cfg.get('RENDER_CACHE_MB_LIMIT')})"
+        )
+    except Exception:
+        pass
+    return True
+
+
+apply_android_ram_profile()
