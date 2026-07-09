@@ -303,6 +303,14 @@
     "layer": 0,
     "category": "건축물류"
   },
+  "signpost01": {
+    "path": "images/object/signpost01.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
   "swing1": {
     "path": "images/object/swing1.png",
     "is_holdable": false,
@@ -709,5 +717,154 @@
     "is_holdable": false,
     "collision": false,
     "category": "건축물류"
+  },
+  "merge-fence1-1": {
+    "path": "images/object/merge-fence1-1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류",
+    "type": "item"
+  },
+  "ball1": {
+    "path": "images/object/ball1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "들 수 있는 물건"
+  },
+  "baseballbat1": {
+    "path": "images/object/baseballbat1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "들 수 있는 물건"
+  },
+  "bbzone_x2": {
+    "path": "images/object/bbzone_x2.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "야구장(점수구역)",
+    "baseball_zone": {
+      "mode": "mul",
+      "value": 2.0,
+      "label": "×2",
+      "render": "ellipse",
+      "radius_x": 80,
+      "radius_y": 48,
+      "color": [
+        255,
+        220,
+        60,
+        100
+      ]
+    }
+  },
+  "bbzone_half": {
+    "path": "images/object/bbzone_half.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "야구장(점수구역)",
+    "baseball_zone": {
+      "mode": "mul",
+      "value": 0.5,
+      "label": "×0.5",
+      "render": "ellipse",
+      "radius_x": 72,
+      "radius_y": 44,
+      "color": [
+        120,
+        200,
+        255,
+        95
+      ]
+    }
+  },
+  "bbzone_bonus": {
+    "path": "images/object/bbzone_bonus.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "야구장(점수구역)",
+    "baseball_zone": {
+      "mode": "add_m",
+      "value": 15.0,
+      "label": "+15m",
+      "render": "ellipse",
+      "radius_x": 88,
+      "radius_y": 52,
+      "color": [
+        100,
+        255,
+        140,
+        100
+      ]
+    }
+  },
+  "bbzone_penalty": {
+    "path": "images/object/bbzone_penalty.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "야구장(점수구역)",
+    "baseball_zone": {
+      "mode": "add_m",
+      "value": -15.0,
+      "label": "-15m",
+      "render": "ellipse",
+      "radius_x": 88,
+      "radius_y": 52,
+      "color": [
+        255,
+        110,
+        110,
+        100
+      ]
+    }
+  },
+  "bbzone_safe": {
+    "path": "images/object/bbzone_safe.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "야구장(점수구역)",
+    "baseball_zone": {
+      "mode": "mul",
+      "value": 1.0,
+      "label": "안전",
+      "render": "ellipse",
+      "radius_x": 76,
+      "radius_y": 46,
+      "color": [
+        200,
+        200,
+        200,
+        85
+      ]
+    }
+  },
+  "bbscoreboard1": {
+    "path": "images/object/bbscoreboard1.png",
+    "is_holdable": false,
+    "collision": true,
+    "category": "야구장(전광판)",
+    "sprite_tilt": 1.0,
+    "ysort": "ground",
+    "scoreboard_zoom": 2.0,
+    "baseball_scoreboard": true
+  },
+  "merge-fence1-2": {
+    "path": "images/object/merge-fence1-2.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류",
+    "type": "item"
+  },
+  "merge-tree3-1": {
+    "path": "images/object/merge-tree3-1.png",
+    "is_holdable": false,
+    "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "나무류",
+    "type": "item"
   }
 }

@@ -11,53 +11,19 @@
         "bg_img": "bg_jjangpu2.png",
         "mask_img": "bg_jjangpu2_mask.png",
         "event_zones": [
-            { "name": "테스트이벤트2", "rect": [538, 1894, 41, 30], "trigger": "contact_player", "event_id": "ev_jjangpu_tutorial_010500" },
+            { "name": "테스트이벤트2", "rect": [432, 1952, 41, 30], "trigger": "contact_player", "event_id": "ev_jjangpu_tutorial_010500" },
             { "name": "bench", "rect": [519, 2097, 36, 38], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_bench" },
             { "name": "그네타기", "rect": [794, 1892, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_swing" },
-            { "name": "호숫가낚시", "rect": [544, 992, 64, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_fishing" }
+            { "name": "호숫가낚시", "rect": [544, 992, 64, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_fishing" },
+            { "name": "야구장 입장(테스트용)", "rect": [864, 2288, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_baseball_enter" }
         ],
         "objects": [
             { "name": "jjangpu2_house", "pos": [676, 1916], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_wall", "pos": [568, 1936], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_house2", "pos": [613, 1792], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [504, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [600, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [616, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [632, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [648, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [664, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [680, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [696, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [712, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [728, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [744, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [760, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [776, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [808, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [792, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [824, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [840, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [856, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [872, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [888, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [904, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [920, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [920, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [936, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence2", "pos": [952, 2192], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence2", "pos": [952, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [936, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [920, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [904, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [888, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [872, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [856, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [840, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [824, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [808, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [792, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [776, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence1", "pos": [760, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2208], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2224], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
@@ -298,13 +264,58 @@
             { "name": "jjangpu2_stair1", "pos": [551, 1933], "sprite_tilt": 1.0, "height": 51, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_stair2", "pos": [488, 1952], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_column", "pos": [812, 1878], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_column", "pos": [812, 1837], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+            { "name": "jjangpu2_column", "pos": [812, 1837], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "merge-fence1-1", "pos": [768, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "merge-fence1-1", "pos": [768, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "signpost01", "pos": [880, 2304], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "interact": { "enabled": true, "range": 36.0, "bindings": [ { "event_id": "ev_baseball_demo", "priority": 100 }
+                    ]
+                }
+            },
+            {
+                "name": "vehicle1",
+                "pos": [864, 2416],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0
+            },
+            {
+                "name": "vehicle1shadow",
+                "pos": [872, 2415],
+                "sprite_tilt": 0.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0
+            },
+            {
+                "name": "jjangpu2_wall",
+                "pos": [704, 2352],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0
+            }
         ],
         "npcs": [
-            { "name": "flower_fairy1", "pos": [662, 2141], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "flower_fairy1@662_2141" }
+            { "name": "flower_fairy1", "pos": [662, 2146], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "flower_fairy1@662_2141", "interact": { "range": 28.0 }
+            }
         ],
         "bg_zones": [
             { "name": "jjangpubgbox", "rect": [-48, -800, 1648, 2072], "layer": -50, "draw_only_when_tilt": true, "update_policy": "none", "sort_policy": "cached", "cull_margin_px": 160 }
+        ],
+        "presence_zones": [
+            { "name": "jjangpu_stair1", "rect": [444, 1876, 91, 74], "conditions": {}, "field": { "shear_on": false },
+                "player": {
+                    "layer": 2
+                }
+            },
+            { "name": "jjangpu_stair2", "rect": [464, 1826, 196, 50], "conditions": {}, "field": { "shear_on": false },
+                "targets": [
+                    { "layer": -1, "name": "jjangpu2_house" },
+                    { "layer": -1, "name": "jjangpu2_houseroof" },
+                    { "layer": -1, "name": "jjangpu2_house2" }
+                ]
+            }
         ]
     },
     "bg_town": {
@@ -362,5 +373,97 @@
             { "name": "jjangpu2_column", "pos": [670, 382], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
         ],
         "npcs": []
+    },
+    "bg_baseball1": {
+        "bg_img": "bg_baseball1.png",
+        "mask_img": "bg_baseball1_mask.png",
+        "start_pos": [152, 512],
+        "event_zones": [
+            { "name": "야구장_플레이", "rect": [240, 688, 64, 48], "trigger": "contact_player", "conditions": {}, "event_id": "ev_baseball_play" }
+        ],
+        "objects": [
+            { "name": "baseballbat1", "pos": [166, 421], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "ball1", "pos": [166, 422], "sprite_tilt": 1.0, "height": 16, "ysort": "ground", "layer": 0 },
+            { "name": "sky_clean", "pos": [736, 0], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain1", "pos": [736, 0], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bbscoreboard1", "pos": [240, 80], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 1 },
+            { "name": "bbzone_x2", "pos": [608, 336], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "mul", "value": 2.0, "label": "×2", "render": "ellipse", "radius_x": 52.0, "radius_y": 34.0, "color": [255, 220, 60, 100] }
+            },
+            { "name": "bbzone_bonus", "pos": [656, 592], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "add_m", "value": 50.0, "label": "+50미터", "radius_x": 80.0, "radius_y": 48.0, "render": "ellipse" }
+            },
+            { "name": "bbzone_penalty", "pos": [960, 480], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "add_m", "value": -50.0, "label": "-50미터", "radius_x": 108.0, "radius_y": 62.0, "render": "ellipse" }
+            },
+            { "name": "bbzone_penalty", "pos": [928, 192], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "add_m", "value": -30.0, "label": "-30미터", "radius_x": 64.0, "radius_y": 40.0, "render": "ellipse" }
+            },
+            { "name": "bbzone_penalty", "pos": [926, 734], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "add_m", "value": -30.0, "label": "-30미터", "radius_x": 64.0, "radius_y": 40.0, "render": "ellipse" }
+            },
+            { "name": "merge-fence1-2", "pos": [720, 16], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "merge-tree3-1", "pos": [512, 32], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bbzone_penalty", "pos": [1024, 288], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "add_m", "value": -30.0, "label": "-30미터", "radius_x": 64.0, "radius_y": 40.0, "render": "ellipse" }
+            },
+            { "name": "bbzone_penalty", "pos": [1024, 640], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "add_m", "value": -30.0, "label": "-30미터", "radius_x": 64.0, "radius_y": 40.0, "render": "ellipse" }
+            },
+            { "name": "merge-tree3-1", "pos": [432, 48], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+        ],
+        "npcs": [
+            { "name": "c7", "pos": [592, 432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c7@528_304" },
+            { "name": "c5", "pos": [800, 432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c5@576_528" },
+            { "name": "carrot", "pos": [752, 240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "carrot@848_224" },
+            { "name": "broccoli", "pos": [752, 624], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "broccoli@912_624" },
+            { "name": "c1", "pos": [928, 304], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c1@976_304" },
+            { "name": "c2", "pos": [928, 560], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "c2@1040_496" }
+        ],
+        "baseball": {
+            "swings": 10,
+            "fan_half_deg": 22.0,
+            "fan_half_deg_auto": 0.0,
+            "fan_half_margin_deg": 1.5,
+            "pwr_sweet_spot_half_width": 0.08,
+            "pwr_power_sweet_spot_half_width": 0.03,
+            "pwr_trap_half_width_new": 0.09,
+            "pwr_sweet_spot_bonus_mul": 1.2,
+            "pwr_power_sweet_spot_bonus_mul": 1.2,
+            "pwr_confirm_hold_sec": 1.0,
+            "swing_speed_mul": 3.0,
+            "max_carry_px": 1180.0,
+            "tee_height": 16.0,
+            "npc_skill": 0.58,
+            "px_per_meter": 11.8,
+            "dir_sweep_hz": 2.0,
+            "pwr_sweep_hz": 1.2,
+            "swing_dir_spread_ratio": 0.3,
+            "swing_dir_spread_pwr_ratio": 0.3,
+            "foul_carry_px": 20.0,
+            "carry_distance_mul": 0.9,
+            "flight_height_mul": 1.6,
+            "bounce_duration_mul": 1.3,
+            "bounce_travel_carry_ratio": 0.38,
+            "bounce_count": 3,
+            "bounce_height_carry_ratio": 0.028,
+            "roll_travel_carry_ratio": 0.062,
+            "roll_speed_max": 108.0,
+            "roll_speed_min": 52.0,
+            "roll_speed_exp": 0.55,
+            "plate": [154.0, 423.0],
+            "tee": [163.0, 384.0],
+            "cam_fixed": [200.0, 380.0],
+            "exit_pos": [843.0, 2304.0],
+            "wait_opponent_offset": [-30.0, 22.0],
+            "p2_wait_pos": [128.0, 448.0],
+            "intro_pan_1": [0.0, 0.0],
+            "intro_pan_2": [992.0, 688.0],
+            "intro_pan_3": [1280.0, 384.0],
+            "intro_pan_4": [960.0, 128.0],
+            "intro_pan_points": [
+                [0.0, 0.0],
+                [992.0, 688.0],
+                [1280.0, 384.0],
+                [960.0, 128.0]
+            ],
+            "npc_name": "야구친구",
+            "batter_face": "right",
+            "exit_map": "bg_jjangpu",
+            "mask_img": "bg_baseball1_mask.png"
+        }
     }
 }

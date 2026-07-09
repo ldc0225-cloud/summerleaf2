@@ -1,0 +1,273 @@
+{
+    "baseball": {
+        "best_score": 1603,
+        "history": [
+            {
+                "mode": "record_1p",
+                "player": 1081,
+                "opponent": 1130,
+                "won": false
+            },
+            {
+                "mode": "record_1p",
+                "char": "c10",
+                "score": 1027,
+                "player": 1027,
+                "distances": [
+                    227,
+                    261,
+                    178,
+                    376,
+                    389
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "c10",
+                "score": 1293,
+                "player": 1293,
+                "distances": [
+                    445,
+                    185,
+                    523,
+                    325,
+                    93
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "carrot",
+                "score": 1603,
+                "player": 1603,
+                "distances": [
+                    0,
+                    608,
+                    407,
+                    0,
+                    589
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 754,
+                "player": 754,
+                "distances": [
+                    87,
+                    87,
+                    53,
+                    72,
+                    58,
+                    96,
+                    92,
+                    106,
+                    95,
+                    8
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "c10",
+                "score": 569,
+                "player": 569,
+                "distances": [
+                    97,
+                    99,
+                    90,
+                    96,
+                    98,
+                    88
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc3",
+                "score": 300,
+                "player": 300,
+                "distances": [
+                    106,
+                    104,
+                    90
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc2",
+                "score": 596,
+                "player": 596,
+                "distances": [
+                    74,
+                    56,
+                    102,
+                    105,
+                    83,
+                    85,
+                    91
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 746,
+                "player": 746,
+                "distances": [
+                    99,
+                    99,
+                    109,
+                    72,
+                    88,
+                    89,
+                    92,
+                    98
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc2",
+                "score": 492,
+                "player": 492,
+                "distances": [
+                    54,
+                    86,
+                    86,
+                    80,
+                    47,
+                    86,
+                    54
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "c10",
+                "score": 733,
+                "player": 733,
+                "distances": [
+                    31,
+                    86,
+                    82,
+                    110,
+                    86,
+                    82,
+                    85,
+                    86,
+                    85
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "c10",
+                "score": 257,
+                "player": 257,
+                "distances": [
+                    83,
+                    7,
+                    85,
+                    22,
+                    1,
+                    3,
+                    55
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc2",
+                "score": 293,
+                "player": 293,
+                "distances": [
+                    86,
+                    1,
+                    94,
+                    1,
+                    110
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc2",
+                "score": 253,
+                "player": 253,
+                "distances": [
+                    78,
+                    83,
+                    84,
+                    78,
+                    86
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 165,
+                "player": 165,
+                "distances": [
+                    84,
+                    82
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 317,
+                "player": 317,
+                "distances": [
+                    111,
+                    97,
+                    84,
+                    110,
+                    86
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 339,
+                "player": 339,
+                "distances": [
+                    85,
+                    86,
+                    109,
+                    112,
+                    113,
+                    114
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc2",
+                "score": 278,
+                "player": 278,
+                "distances": [
+                    79,
+                    113,
+                    86
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc2",
+                "score": 206,
+                "player": 206,
+                "distances": [
+                    110,
+                    2,
+                    21,
+                    75
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "carrot",
+                "score": 281,
+                "player": 281,
+                "distances": [
+                    109,
+                    85,
+                    63,
+                    85,
+                    86,
+                    8
+                ]
+            }
+        ]
+    }
+}

@@ -3,13 +3,72 @@
     "laugh_point": 0,
     "subprogress": {},
     "player_pos": [
-        828,
-        1862
+        895,
+        2309
     ],
     "current_map": "bg_jjangpu",
     "jump_shadow_mode": "ground",
     "flags": {},
     "affinity": {},
     "progress_wateringcan": 1001,
-    "progress_flower1_1": 1001
+    "progress_frog_minigame_win": 0,
+    "progress_frog_seed": 0,
+    "progress_frog_minigame_tried": 0,
+    "progress_fishing_win": 1,
+    "progress_baseball_story": 0,
+    "progress_baseball_seed": 0,
+    "progress_flower1_1": 1001,
+    "baseball_best_npc": 1603,
+    "baseball_records": [
+        {
+            "mode": "record_1p",
+            "player": 1081,
+            "opponent": 1130,
+            "won": false
+        },
+        {
+            "mode": "record_1p",
+            "char": "c10",
+            "score": 1027,
+            "player": 1027,
+            "distances": [
+                227,
+                261,
+                178,
+                376,
+                389
+            ]
+        },
+        {
+            "mode": "record_1p",
+            "char": "c10",
+            "score": 1293,
+            "player": 1293,
+            "distances": [
+                445,
+                185,
+                523,
+                325,
+                93
+            ]
+        },
+        {
+            "mode": "record_1p",
+            "char": "carrot",
+            "score": 1603,
+            "player": 1603,
+            "distances": [
+                0,
+                608,
+                407,
+                0,
+                589
+            ]
+        }
+    ],
+    "baseball_entry_map": "bg_jjangpu",
+    "baseball_entry_pos": [
+        895.5689164944001,
+        2309.2844582472003
+    ]
 }

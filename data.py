@@ -61,6 +61,22 @@ CONFIG = {
     # 전량 clear 경로에서만 gc.collect() — False면 끊김은 줄지만 RSS는 더 느리게 내려갈 수 있음.
     "MEM_WATCHDOG_GC_AFTER_FULL_CLEAR": True,
 
+    # --- 렌더/쉬어 캐시 (RG35xx·PC 기본. Android 3GB는 ANDROID_RAM_PROFILE_* 가 덮어씀) ---
+    "RENDER_CACHE_MB_LIMIT": 220.0,
+    "RENDER_CACHE_MAX_ITEMS": 96,
+    "TEMP_SURF_MB_LIMIT": 96.0,
+    "SHEAR_PIN_CACHE_MAX_ITEMS": 12,
+    "SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT": 48.0,
+    "SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS": 128,
+
+    # --- Android APK: 3GB RAM 프로필 ---
+    # True + 안드로이드 런타임이면 아래 기본값을 CONFIG에 merge (데스크톱·RG35xx 빌드는 영향 없음).
+    # 빌드만 바꿀 때: data.py 수정 후 buildozer android debug.
+    # 런타임만 바꿀 때: adb shell setprop 또는 앱 시작 전 환경변수 SUMMERLEAF_RAM_PROFILE_MB (선택).
+    "ANDROID_RAM_PROFILE_ENABLED": True,
+    "ANDROID_RAM_PROFILE_MB": 3072,
+    # 비어 있으면 ANDROID_RAM_PROFILE_MB(기본 3072) 프리셋만 적용. 키를 넣으면 프리셋보다 우선.
+    "ANDROID_RAM_PROFILE_OVERRIDES": {},
 
     # 디버그 오버레이(텍스트) 갱신 주기(초). 폰트 렌더/문자열 생성/OS RSS 조회 비용을 줄이기 위함.
     "OVERLAY_UPDATE_INTERVAL_SEC": 0.5,
@@ -86,6 +102,7 @@ CONFIG = {
     "NPC_INTERACT_RANGE": 48,
     # FieldItem interact.bindings 클릭 판정(비우면 interact.range / 기본 16)
     "OBJECT_INTERACT_RANGE": 16,
+    # interact.prompt_set / prompt_offset_y — 안내 아이콘 (assets/images/ui/{name}/{set}0.png)
     # 손에 든 물건 발(foot) 격자 — 플레이어 발 기준 월드 오프셋 (engine._held_item_foot_world_pos)
     # Y: 클수록 손 위치가 위로(플레이어 pos.y - Y). X: 바라보는 방향 옆 간격.
     "HELD_ITEM_FOOT_OFFSET_X": 12,
@@ -132,6 +149,8 @@ CONFIG = {
     "SAY_UI_FADE_OUT_SEC": 0.2,
     # PLACE/MOVE appear=fade 알파 보간 시간(초). 예전 5px/프레임@60fps ≈ 0.85초.
     "APPEAR_FADE_SEC": 0.85,
+    # 시각 보간(틸트/쉬어/카메라 lerp) 기준 프레임 길이(초). 실제 경과 dt와 함께 사용.
+    "VISUAL_DT_REF_SEC": 1.0 / 60.0,
     # 같은 이벤트 안에서 SAY가 연속일 때: 박스 페이드아웃/인 없이 다음 대사만 갱신
     "SAY_CHAIN_WITHIN_EVENT": True,
     # 색상
@@ -175,6 +194,14 @@ CONFIG = {
     "ZONE_CONFIRM_PROMPT_FRAME_MS": 110,
     # 존 중앙 기준 오프셋 (월드 px)
     "ZONE_CONFIRM_PROMPT_OFFSET_Y_PX": -6,
+
+    # --- 엔티티(캐릭터·오브젝트) 상호작용 안내 아이콘 ---
+    # assets/images/ui/{이름}/{prompt_set}0.png → 없으면 assets/images/ui/pushbutton/{prompt_set}0.png
+    "INTERACT_PROMPT_ENABLED": True,
+    "INTERACT_PROMPT_DEFAULT_SET": "pushbutton",
+    "INTERACT_PROMPT_FRAMES": 4,
+    "INTERACT_PROMPT_FRAME_MS": 110,
+    "INTERACT_PROMPT_OFFSET_Y_PX": -28,
     # 디버그: 기존 사각형 대화 UI를 함께 그릴지 여부(main.py)
     "SAY_DEBUG_LEGACY_BOX": False,
     "ANIM_DELAY": 150, "INTERACT_DIST": 35,
@@ -194,13 +221,17 @@ CONFIG = {
     #       "오버레이를 제외한 월드 최종 결과물"을 1장으로 만든 뒤 그 1장만 스케일한다.
     # 장점: 저사양에서 훨씬 가볍고, 구현/튜닝 포인트가 단순하다.
     "WORLD_ZOOM_ENABLED": True,
-    "WORLD_ZOOM_DEFAULT": 1.0,   # 1.0=기본, 2.0=2배 확대, 0.5=절반 축소
+    "WORLD_ZOOM_DEFAULT": 2.0,   # 1.0=기본, 2.0=2배 확대, 0.5=절반 축소
     "WORLD_ZOOM_MIN": 1.0,
-    "WORLD_ZOOM_MAX": 2.0,
+    "WORLD_ZOOM_MAX": 4.0,
     "WORLD_ZOOM_SPEED": 3.0,     # zoom/sec (값이 클수록 더 빠르게 확대/축소)
 
     # --- 개별 오브젝트 줌(별개 기능) ---
     # 이벤트 ZOOM에서 target이 player/NPC/오브젝트인 경우에만 사용. (camera/global 대상 줌은 WORLD_ZOOM으로 처리)
+    # val/strength = 직접 배율 (0.5=절반, 1.0=기본, 2.0=2배). on=false → 1.0
+    "ENTITY_ZOOM_MIN": 0.5,
+    "ENTITY_ZOOM_MAX": 2.0,
+    "ENTITY_ZOOM_DEFAULT_DURATION_SEC": 1.0,
     "ENTITY_ZOOM_LERP": 0.12,  # 0~1, 클수록 더 빠름
 
     # --- 틸트/쉬어/캐시(줌과 무관) ---
@@ -290,6 +321,10 @@ CONFIG = {
     # 쉬어 샘플 Y를 픽셀 단위로 양자화해 캐시 재사용/떨림 완화
     "SPRITE_SHEAR_Y_QUANT_PX": 1,
     "SPRITE_SHEAR_Y_QUANT_PX_LOD": 2,
+    # 틸트/쉬어 중 카메라가 움직일 때 일부 캐릭터/오브젝트가 ±1px로 떨리는 현상 방지:
+    # 쉬어 가로 오프셋을 '정수 + y격자 양자화'로 적용해 본체/그림자/필드가 lockstep 이동.
+    # 끄면(=False) 예전처럼 연속 실수 오프셋(떨림 가능).
+    "SHEAR_SPRITE_STABILIZE": True,
     # 쉬어 목표값→화면 반영 보간 (0~1). 값이 클수록 더 빨리 수렴.
     # 감속(ease-out)은 사용하지 않음(항상 일정 speed로 수렴).
     "SHEAR_SMOOTH_SPEED": 0.3,
@@ -355,6 +390,71 @@ CONFIG = {
     "CLOUD_SHADOW_GRID_JITTER_RATIO": 0.42,
     # 초기 격자가 너무 많을 때 상한(성능)
     "CLOUD_SHADOW_GRID_MAX_CLOUDS": 200,
+    # 구름 스폰 시 화면 밖 최소 여백(px). 스프라이트 크기에 따라 자동 확장된다.
+    "CLOUD_SHADOW_SPAWN_MARGIN_PX": 96,
+
+    # --- 엔티티 FX ---
+    # 예: { "type":"ENTITY_FX","target":"player","mode":"pulse","color":"255,220,100","alpha":160,"cycle_sec":1.2 }
+    # action: stop 으로 해제. (구형: type=FX, kind=entity_fx)
+    "ENTITY_FX_DEFAULT_CYCLE_SEC": 1.0,
+    "ENTITY_FX_TINT_CACHE_MAX": 96,
+
+    # 이벤트 SCREEN_FX — kind: cloud | flash | shake | rain (구형 type:FX 도 런타임 호환)
+    # 예: { "type":"SCREEN_FX","kind":"cloud","on":true,"dir":"RANDOM","speed":15,"freq":0.5 }
+    # 예: { "type":"SCREEN_FX","kind":"flash","on":true,"mode":"pulse","color":"255,255,255","alpha":140,"cycle_sec":0.7 }
+    # 예: { "type":"SCREEN_FX","kind":"shake","on":true,"amp_px":8,"freq_hz":14 }
+    # 예: { "type":"SCREEN_FX","kind":"rain","on":true,"density":0.4,"speed":300,"angle":78,... }
+    # 예: { "type":"SCREEN_FX","kind":"vignette","on":true,"strength":0.55,"size":0.42,"softness":0.65,"color":"0,0,0" }
+    # 예: { "type":"SCREEN_FX","kind":"tone","on":true,"preset":"warm","strength":0.35 }
+    # (구형: SCREEN_FLASH, SCREEN_SHAKE, type=FX+kind=screen_*)
+    "SCREEN_FX_FLASH_DEFAULT_ALPHA": 140,
+    "SCREEN_FX_FLASH_DEFAULT_CYCLE_SEC": 0.7,
+    "SCREEN_FX_SHAKE_DEFAULT_AMP_PX": 7,
+    "SCREEN_FX_SHAKE_DEFAULT_FREQ_HZ": 14,
+    "SCREEN_FX_RAIN_DEFAULT_DENSITY": 0.35,
+    "SCREEN_FX_RAIN_DEFAULT_SPEED": 280.0,
+    # 예: angle=0 수직, 45 대각, 82 기본(약간 기울어짐). 90은 순수 수평이라 vy=0 → 제외(최대 88).
+    "SCREEN_FX_RAIN_DEFAULT_ANGLE": 82.0,
+    "SCREEN_FX_RAIN_ANGLE_MIN": 0.0,
+    "SCREEN_FX_RAIN_ANGLE_MAX": 88.0,
+    "SCREEN_FX_RAIN_DEFAULT_DROP_LEN": 7,
+    "SCREEN_FX_RAIN_DEFAULT_ALPHA": 170,
+    # density→드롭 수 환산(뷰포트 면적 나눗셈). 작을수록 화면 전체가 더 촘촘해짐.
+    "SCREEN_FX_RAIN_DENSITY_AREA_DIV": 280.0,
+    "SCREEN_FX_RAIN_MAX_DROPS": 320,
+    "SCREEN_FX_RAIN_MARGIN_X": 64.0,
+    "SCREEN_FX_RAIN_SPAWN_ABOVE_MUL": 1.25,
+    # 깊이감(원경/근경 2겹) — 근경(길고·진하고·빠름) 비율. 나머지는 원경(짧고·흐리고·느림).
+    "SCREEN_FX_RAIN_NEAR_RATIO": 0.45,
+    # vignette — strength 0~1, size=중앙 밝은 영역(0~1), softness=그라데이션 폭
+    "SCREEN_FX_VIGNETTE_DEFAULT_STRENGTH": 0.55,
+    "SCREEN_FX_VIGNETTE_DEFAULT_SIZE": 0.42,
+    "SCREEN_FX_VIGNETTE_DEFAULT_SOFTNESS": 0.65,
+    # tone — preset warm|cool|neutral|custom, strength 0~1
+    "SCREEN_FX_TONE_DEFAULT_STRENGTH": 0.32,
+    "SCREEN_FX_TONE_WARM_RGB": (255, 210, 170),
+    "SCREEN_FX_TONE_COOL_RGB": (170, 205, 255),
+    "SCREEN_FX_TONE_NEUTRAL_RGB": (255, 255, 255),
+
+    # 에디터 R,G,B 필드용 색상 팔레트 (OVERLAY_UI color, ENTITY_FX/SCREEN_FX 등)
+    "EDITOR_COLOR_PALETTE": [
+        {"name": "흰색", "rgb": "255,255,255"},
+        {"name": "검정", "rgb": "0,0,0"},
+        {"name": "회색", "rgb": "160,160,160"},
+        {"name": "금색", "rgb": "255,220,100"},
+        {"name": "노랑", "rgb": "255,255,80"},
+        {"name": "주황", "rgb": "255,160,60"},
+        {"name": "빨강", "rgb": "255,80,80"},
+        {"name": "분홍", "rgb": "255,120,180"},
+        {"name": "보라", "rgb": "180,100,255"},
+        {"name": "파랑", "rgb": "80,140,255"},
+        {"name": "하늘", "rgb": "140,210,255"},
+        {"name": "청록", "rgb": "80,220,200"},
+        {"name": "초록", "rgb": "100,220,120"},
+        {"name": "연두", "rgb": "180,255,120"},
+        {"name": "갈색", "rgb": "140,90,50"},
+        {"name": "크림", "rgb": "255,248,220"},
+    ],
 
     
     # 카메라: 플레이어를 화면 중앙보다 아래로 배치(픽셀). 예: 50이면 플레이어가 화면에서 50px 아래에 보임
@@ -381,6 +481,8 @@ CONFIG = {
     "SHOW_OVERLAY_DEFAULT": False,
     # 오버레이(HUD)를 껐을 때도 RSS 메모리 표시를 남길지 여부.
     "SHOW_RSS_OVERLAY_WHEN_OFF": False,
+    # 필드 플레이 중 오른쪽 위 게임 종료 버튼(OVERLAY_UI, events.json fishing_exit와 동일 파이프).
+    "GAME_EXIT_OVERLAY_ENABLED": True,
     # 감쇠로 멈춘 뒤 시뮬을 다시 시작하는 키. GLOBAL_EVENT_HOTKEYS와 동일: 한 글자, F9, K_ESCAPE 등 pygame 상수명.
     "SWING_RESTART_HOTKEY": "b",
 
@@ -421,7 +523,7 @@ CONFIG = {
     "SWING_JUMP_MIN_HOLD_MS": 220,            # 너무 짧게 누르면(펌프와 혼동) 점프 대신 펌프로 처리
 
     # cycle_zoom_debug(DEV_CMD) 시 순환할 줌 값
-    "DEBUG_ZOOM_STEPS": [2.0, 1.0],
+    "DEBUG_ZOOM_STEPS": [1.0, 2.0],
 
     # --- 점프(도랑) / 미니게임 확장 ---
     # 마스크에서 도랑: R,G 낮고 B 높은 픽셀(맵 제작 시 이 색으로 도랑 칠하기). 걷기 레이어 색과 겹치지 않게 조정.
@@ -467,6 +569,17 @@ CONFIG = {
     "PATHFIND_ESCAPE_MIN_BEFORE_REPLAN_PX": 4.0,
     "PATHFIND_ESCAPE_MIN_OPEN_NEIGHBORS": 0,
 
+    # 캐릭터/오브젝트 자연 회피: 이동 중 엔티티에 막히면 멈추지 않고 A* 재계획으로 우회.
+    # 성능 위해 재계획은 쿨다운/누적횟수/포기시간으로 제한한다(밀어내기 separation 없음).
+    "AVOID_ENABLED": True,
+    "AVOID_REPLAN_COOLDOWN_MS": 350,  # 재계획 사이 최소 간격
+    "AVOID_MAX_REPLANS": 4,           # 연속 막힘 동안 허용할 재계획 최대 횟수
+    "AVOID_NPC_WAIT_MS": 250,         # 움직이는 NPC가 막으면 이만큼만 양보 후 비껴 감
+    "AVOID_GIVEUP_MS": 1500,          # 이 시간 내내 못 뚫으면 정지
+    # 스티어링(벽 슬라이드): 막히면 즉시 목표 방향 기준 좌우로 틀어 비껴 간다.
+    "AVOID_STEER_STEP_DEG": 18,       # 각도 탐색 간격(작을수록 촘촘/부드럽지만 약간 더 연산)
+    "AVOID_STEER_MAX_DEG": 105,       # 최대 비껴가기 각도(이보다 더 틀어야 하면 A*에 맡김)
+
     # FOLLOW 재경로계산(성능): 목표점이 바뀌어도 매 프레임 A* 하지 않도록 제한
     "FOLLOW_REPLAN_MS": 220, #220
     "FOLLOW_REPLAN_DIST_PX": 24.0, #24
@@ -496,6 +609,151 @@ CONFIG = {
     "progress_fishing_win": 0,
     "score_frog_trial_best": 0,
     "score_frog_trial_last": 0,
+}
+
+# 맵별 필드 틸트·쉬어 기본값 (맵 진입 시 field_runtime.apply_map_field_defaults)
+MAP_FIELD_DEFAULTS = {
+    "default": {
+        "tilt_on": None,
+        "shear_on": None,
+    },
+    "bg_jjangpu": {
+        "tilt_on": False,
+        "shear_on": True,
+    },
+    "bg_baseball1": {
+        "tilt_on": False,
+        "shear_on": False,
+    },
+}
+
+
+def resolve_map_field_defaults(map_id: str) -> dict:
+    """맵 ID → {tilt_on: bool, shear_on: bool}."""
+    out: dict = {}
+    for src in (
+        MAP_FIELD_DEFAULTS.get("default"),
+        MAP_FIELD_DEFAULTS.get(str(map_id or "").strip()),
+    ):
+        if not isinstance(src, dict):
+            continue
+        for key in ("tilt_on", "shear_on"):
+            val = src.get(key)
+            if val is not None:
+                out[key] = bool(val)
+    if "tilt_on" not in out:
+        out["tilt_on"] = bool(CONFIG.get("FIELD_PERSPECTIVE_DEFAULT_ON", False))
+    if "shear_on" not in out:
+        out["shear_on"] = bool(CONFIG.get("TILT_SHEAR_ENABLED", False))
+    return out
+
+
+# 야구장 필드 미니게임 — 전역 기본값 (snake_case).
+# 맵별 좌표·밸런스는 world_data.json → [맵ID].baseball 에서 덮어씀.
+BASEBALL_DEFAULTS = {
+    "default_map_id": "bg_baseball1",
+    "default_player_char": "c10",
+    "story_win_flag": "progress_baseball_story",
+    "story_seed_flag": "progress_baseball_seed",
+    "p2_chars": [       
+        "cc1", "cc2", "cc3", "cc4", "c10", "carrot"
+    ],
+    "exit_map": "bg_jjangpu",
+    "exit_pos": [850.0, 2310.0],
+    "swings": 5,
+    "gauge_time_limit_sec": 5.0,
+    "npc_skill": 0.62,
+    "npc_flash_sec": 0.55,
+    "tilt_compressed": 0.3,
+    "result_hold_sec": 2.5,
+    "fan_half_deg": 37.0,
+    "fan_half_deg_auto": False,
+    "fan_half_margin_deg": 1.5,
+    "dir_sweep_hz": 2.0,
+    "pwr_sweep_hz": 2.0,
+    "pwr_sweet_spot_half_width": 0.05,
+    "pwr_power_sweet_spot_half_width": 0.025,
+    "pwr_trap_half_width_new": 0.02,
+    # 난이도 배율: 쉬움은 게이지를 느리게 하고 장타 구간을 넓히며,
+    # 어려움은 게이지를 빠르게 하고 함정 구간을 넓힙니다.
+    "difficulty_easy_dir_speed_mul": 0.9,
+    "difficulty_easy_pwr_speed_mul": 0.85,
+    "difficulty_easy_sweet_width_mul": 1.2,
+    "difficulty_easy_power_sweet_width_mul": 1.15,
+    "difficulty_easy_trap_width_mul": 0.8,
+    "difficulty_normal_dir_speed_mul": 1.0,
+    "difficulty_normal_pwr_speed_mul": 1.0,
+    "difficulty_normal_sweet_width_mul": 1.0,
+    "difficulty_normal_power_sweet_width_mul": 1.0,
+    "difficulty_normal_trap_width_mul": 1.0,
+    "difficulty_hard_dir_speed_mul": 1.1,
+    "difficulty_hard_pwr_speed_mul": 1.15,
+    "difficulty_hard_sweet_width_mul": 0.85,
+    "difficulty_hard_power_sweet_width_mul": 0.8,
+    "difficulty_hard_trap_width_mul": 1.2,
+    "pwr_sweet_spot_bonus_mul": 1.1,
+    "pwr_power_sweet_spot_bonus_mul": 1.2,
+    "pwr_confirm_hold_sec": 1.0,
+    "swing_speed_mul": 3.0,
+    "pwr_trap_half_width": 0.01,
+    "swing_dir_spread_ratio": 0.10,
+    "swing_dir_spread_pwr_ratio": 0.02,
+    "pop_foul_carry_px": 58.0,
+    "pop_foul_angle_deg": 180.0,
+    "pop_foul_angle_spread_deg": 12.0,
+    "pop_foul_height_px": 36.0,
+    "pop_foul_flight_dur_sec": 0.0,
+    "foul_carry_px": 20.0,
+    "max_carry_px": 960.0,
+    "carry_distance_mul": 1.3,
+    "flight_height_mul": 1.5,
+    "px_per_meter": 12.39,
+    "tee_height": 16.0,
+    "bounce_duration_mul": 1.3,
+    "bounce_travel_carry_ratio": 0.38,
+    "bounce_count": 3,
+    "bounce_height_carry_ratio": 0.028,
+    "roll_travel_carry_ratio": 0.062,
+    "roll_speed_max": 108.0,
+    "roll_speed_min": 52.0,
+    "roll_speed_exp": 0.55,
+    "mask_infield_white_min": 200,
+    "mask_foul_alpha_max": 128,
+    "mask_landing_sample_radius_px": 6,
+    "mask_fence_color": [255, 255, 0],
+    "mask_fence_color_tol": 48,
+    "fence_clear_height_px": 18.0,
+    "fence_bounce_carry_ratio": 0.14,
+    "fence_bounce_height_mul": 0.55,
+    "fence_bounce_count_max": 2,
+    "fence_trace_step_px": 4.0,
+    "home_run_mask_blue_min": 170,
+    "home_run_mask_chroma_max": 130,
+    "fielder_chase_speed_mul": 0.7,
+    "fielder_chase_repath_sec": 0.12,
+    "fielder_chase_radius_px": 220.0,
+    "fielder_catch_radius_px": 28.0,
+    "fielder_catch_max_height_px": 6.0,
+    "fielder_catch_hold_sec": 0.4,
+    "fielder_stop_decay_sec": 0.2,
+    "intro_field_tour_enabled": True,
+    "intro_tilt_flat": 1.0,
+    "intro_zoom_wide": 0.75,
+    "intro_zoom_play": 2.0,
+    "intro_zoom_dur_sec": 0.55,
+    "intro_zoom_end_dur_sec": 0.12,
+    "intro_pan_dur_sec": 0.0,
+    "intro_hold_sec": 1.0,
+    "bat_cam_return_sec": 0.3,
+    "announce_wait_before_start_sec": 1.0,
+    "announce_title_sec": 1.0,
+    "announce_swing_sec": 1.0,
+    "announce_result_sec": 2.0,
+    "announce_pause_sec": 1.0,
+    "announce_turn_sec": 1.0,
+    "announce_match_end_sec": 2.0,
+    "ball_touch_radius_px": 36.0,
+    "turn_pause_sec": 1.35,
 }
 
 # 낚시터 정의 — 물 영역·낚시대 위치(이벤트박스와 별도).
@@ -571,3 +829,122 @@ from entity_defs import load_char_defs, load_object_defs, reload_entity_defs
 
 OBJ_ASSETS = load_object_defs()
 CHAR_ASSETS = load_char_defs()
+
+
+# ---------------------------------------------------------------------------
+# Android RAM 프로필 — 3GB 기기에서 캐시·워치독을 넉넉히 (CPU 재계산↓)
+# import data 시 CONFIG 로드 직후 1회 적용. main/engine 은 CONFIG.get 만 사용.
+# ---------------------------------------------------------------------------
+
+def _is_android_runtime():
+    import os
+
+    return bool(os.environ.get("ANDROID_ARGUMENT") or os.environ.get("ANDROID_PRIVATE"))
+
+
+def _android_ram_profile_preset_3gb():
+    """3072MB 기준. 앱+Python 여유를 두고 변환 캐시 위주로 ~0.5–0.7GB 사용."""
+    return {
+        "RENDER_CACHE_MB_LIMIT": 512.0,
+        "RENDER_CACHE_MAX_ITEMS": 160,
+        "TEMP_SURF_MB_LIMIT": 160.0,
+        "SPRITE_SCALE_CACHE_MB_LIMIT": 192.0,
+        "SPRITE_SCALE_CACHE_MAX_ITEMS": 768,
+        "SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT": 96.0,
+        "SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS": 256,
+        "SHEAR_PIN_CACHE_MAX_ITEMS": 32,
+        "MEM_WATCHDOG_HIGH_MB": 900.0,
+        "MEM_WATCHDOG_GROWTH_MB": 120.0,
+        "MEM_WATCHDOG_GROWTH_TRIM_FRACTION": 0.12,
+        "MEM_WATCHDOG_GC_AFTER_FULL_CLEAR": False,
+        "TILT_SHEAR_STRIP_BUCKET_PX": 96,
+    }
+
+
+def _scale_android_ram_preset(preset, target_mb):
+    """3072가 아닌 ANDROID_RAM_PROFILE_MB 일 때 캐시 상한만 비례 조정."""
+    try:
+        base = 3072.0
+        t = float(target_mb)
+    except (TypeError, ValueError):
+        return dict(preset)
+    if t <= 0.0:
+        return dict(preset)
+    scale = max(0.5, min(1.5, t / base))
+    if abs(scale - 1.0) < 0.05:
+        return dict(preset)
+    scaled = dict(preset)
+    for key in (
+        "RENDER_CACHE_MB_LIMIT",
+        "TEMP_SURF_MB_LIMIT",
+        "SPRITE_SCALE_CACHE_MB_LIMIT",
+        "SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT",
+        "MEM_WATCHDOG_HIGH_MB",
+        "MEM_WATCHDOG_GROWTH_MB",
+    ):
+        if key in scaled:
+            try:
+                scaled[key] = float(scaled[key]) * scale
+            except (TypeError, ValueError):
+                pass
+    for key in (
+        "RENDER_CACHE_MAX_ITEMS",
+        "SPRITE_SCALE_CACHE_MAX_ITEMS",
+        "SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS",
+        "SHEAR_PIN_CACHE_MAX_ITEMS",
+    ):
+        if key in scaled:
+            try:
+                scaled[key] = max(8, int(round(float(scaled[key]) * scale)))
+            except (TypeError, ValueError):
+                pass
+    return scaled
+
+
+def apply_android_ram_profile(config=None):
+    """
+    안드로이드에서만 CONFIG 에 RAM 프로필 merge.
+    반환: 적용했으면 True, 아니면 False.
+  """
+    cfg = CONFIG if config is None else config
+    if not _is_android_runtime():
+        return False
+    if not bool(cfg.get("ANDROID_RAM_PROFILE_ENABLED", True)):
+        return False
+    try:
+        target_mb = float(cfg.get("ANDROID_RAM_PROFILE_MB", 3072) or 3072)
+    except (TypeError, ValueError):
+        target_mb = 3072.0
+    env_mb = None
+    try:
+        import os
+
+        raw = os.environ.get("SUMMERLEAF_RAM_PROFILE_MB", "").strip()
+        if raw:
+            env_mb = float(raw)
+    except Exception:
+        env_mb = None
+    if env_mb is not None and env_mb > 0.0:
+        target_mb = env_mb
+    merged = _scale_android_ram_preset(_android_ram_profile_preset_3gb(), target_mb)
+    overrides = cfg.get("ANDROID_RAM_PROFILE_OVERRIDES")
+    if isinstance(overrides, dict):
+        for k, v in overrides.items():
+            if k:
+                merged[str(k)] = v
+    for k, v in merged.items():
+        cfg[k] = v
+    cfg["_ANDROID_RAM_PROFILE_APPLIED"] = True
+    cfg["_ANDROID_RAM_PROFILE_MB_EFFECTIVE"] = float(target_mb)
+    try:
+        print(
+            "[CONFIG] Android RAM profile: "
+            f"{int(target_mb)}MB ({len(merged)} keys, "
+            f"RENDER_CACHE_MB_LIMIT={cfg.get('RENDER_CACHE_MB_LIMIT')})"
+        )
+    except Exception:
+        pass
+    return True
+
+
+apply_android_ram_profile()

@@ -28,8 +28,176 @@ BIND_SLOT_COUNT = DEFAULT_BIND_SLOTS
 TALK_LINE_COUNT = DEFAULT_TALK_LINES
 PROGRESS_RULE_COUNT = DEFAULT_PROGRESS_RULES
 VISIBLE_OPTS = [("—", ""), ("Yes", "true"), ("No", "false")]
+ENTITY_FX_MODE_OPTS = [("—", ""), ("off", "off"), ("pulse", "pulse"), ("tint", "tint")]
 ANIM_MODE_OPTS = [("—", ""), ("hold", "hold"), ("once", "once")]
 DIR_OPTS = [("—", ""), ("left", "left"), ("right", "right")]
+YSORT_OPTS = [("—", ""), ("ground", "ground"), ("visual", "visual")]
+SHEAR_ON_OPTS = [("—", ""), ("On", "true"), ("Off", "false")]
+DEFAULT_PRESENCE_TARGETS = 3
+
+
+def _tune_value_modal_rows(prefix: str) -> list:
+    """TUNE 스텝과 동일 필드 — prefix 예: player_, tgt1_."""
+    p = str(prefix or "")
+    return [
+        (f"sprite_tilt (0~1, 비우면 유지)", f"{p}sprite_tilt", "text"),
+        (f"height (px, 비우면 유지)", f"{p}height", "text"),
+        (f"ysort (비우면 유지)", f"{p}ysort", "dropdown", YSORT_OPTS),
+        (f"layer (비우면 유지)", f"{p}layer", "text"),
+        (f"visible (비우면 유지)", f"{p}visible", "dropdown", VISIBLE_OPTS),
+        (f"alpha (0~255, 비우면 유지)", f"{p}alpha", "text"),
+        (f"anim (비우면 유지)", f"{p}anim", "text"),
+        (f"dir (비우면 유지)", f"{p}dir", "dropdown", DIR_OPTS),
+    ]
+
+
+def _tune_fields_from_patch(patch: dict, fields: dict, prefix: str) -> None:
+    p = dict(patch or {})
+    fields[f"{prefix}sprite_tilt"] = "" if p.get("sprite_tilt") is None else str(p.get("sprite_tilt"))
+    fields[f"{prefix}height"] = "" if p.get("height") is None else str(p.get("height"))
+    fields[f"{prefix}ysort"] = str(p.get("ysort") or "")
+    fields[f"{prefix}layer"] = "" if p.get("layer") is None else str(p.get("layer"))
+    fields[f"{prefix}visible"] = _opt_bool_field(p.get("visible"), "")
+    fields[f"{prefix}alpha"] = "" if p.get("alpha") is None else str(p.get("alpha"))
+    fields[f"{prefix}anim"] = str(p.get("anim") or p.get("state") or "")
+    d = str(p.get("dir") or p.get("face") or "").strip().lower()
+    fields[f"{prefix}dir"] = d if d in ("left", "right") else ""
+
+
+def _tune_patch_from_fields(fields: dict, prefix: str) -> dict:
+    from flow import build_tune_patch_from_dict
+
+    raw = {
+        "sprite_tilt": fields.get(f"{prefix}sprite_tilt"),
+        "height": fields.get(f"{prefix}height"),
+        "ysort": fields.get(f"{prefix}ysort"),
+        "layer": fields.get(f"{prefix}layer"),
+        "visible": fields.get(f"{prefix}visible"),
+        "alpha": fields.get(f"{prefix}alpha"),
+        "anim": fields.get(f"{prefix}anim"),
+        "dir": fields.get(f"{prefix}dir"),
+    }
+    return build_tune_patch_from_dict(raw)
+
+
+def _field_screen_from_patch(patch: dict, fields: dict) -> None:
+    p = dict(patch or {})
+    fields["field_tilt_target"] = "" if p.get("tilt_target") is None else str(p.get("tilt_target"))
+    fields["field_shear_on"] = _opt_bool_field(p.get("shear_on"), "")
+    fields["field_shear_strength"] = "" if p.get("shear_strength") is None else str(p.get("shear_strength"))
+    fields["field_shear_max_px"] = "" if p.get("shear_max_px") is None else str(p.get("shear_max_px"))
+
+
+def _field_screen_to_patch(fields: dict) -> dict:
+    from flow import build_field_patch_from_dict
+
+    return build_field_patch_from_dict(
+        {
+            "tilt_target": fields.get("field_tilt_target"),
+            "shear_on": fields.get("field_shear_on"),
+            "shear_strength": fields.get("field_shear_strength"),
+            "shear_max_px": fields.get("field_shear_max_px"),
+        }
+    )
+
+
+def presence_zone_to_fields(zone: dict, *, target_count: int = DEFAULT_PRESENCE_TARGETS) -> dict:
+    z = dict(zone or {})
+    fields = {
+        "name": str(z.get("name") or ""),
+        "cond_mainprogress": str((z.get("conditions") or {}).get("mainprogress") or ""),
+        "cond_min_laugh_point": str((z.get("conditions") or {}).get("min_laugh_point") or ""),
+    }
+    _field_screen_from_patch(z.get("field") or {}, fields)
+    _tune_fields_from_patch(z.get("player") or {}, fields, "player_")
+    targets = z.get("targets") or []
+    if not isinstance(targets, list):
+        targets = []
+    n = max(target_count, len(targets), DEFAULT_PRESENCE_TARGETS)
+    for i in range(1, n + 1):
+        row = targets[i - 1] if i - 1 < len(targets) else {}
+        fields[f"tgt{i}_name"] = str((row or {}).get("name") or "")
+        _tune_fields_from_patch(row or {}, fields, f"tgt{i}_")
+    return fields, n
+
+
+def presence_zone_from_fields(fields: dict, rect, *, target_count: int) -> dict:
+    z = {
+        "name": str(fields.get("name") or "").strip() or "presence_zone",
+        "rect": [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])],
+        "conditions": {},
+    }
+    mp = str(fields.get("cond_mainprogress") or "").strip()
+    if mp:
+        z["conditions"]["mainprogress"] = mp
+    mlp = str(fields.get("cond_min_laugh_point") or "").strip()
+    if mlp:
+        try:
+            z["conditions"]["min_laugh_point"] = int(float(mlp))
+        except (TypeError, ValueError):
+            pass
+    fp = _field_screen_to_patch(fields)
+    if fp:
+        z["field"] = fp
+    pp = _tune_patch_from_fields(fields, "player_")
+    if pp:
+        z["player"] = pp
+    targets = []
+    for i in range(1, int(target_count) + 1):
+        name = str(fields.get(f"tgt{i}_name") or "").strip()
+        tp = _tune_patch_from_fields(fields, f"tgt{i}_")
+        if not name and not tp:
+            continue
+        row = dict(tp)
+        if name:
+            row["name"] = name
+        targets.append(row)
+    if targets:
+        z["targets"] = targets
+    return z
+
+
+def presence_zone_modal_section_rows(*, target_count: int = DEFAULT_PRESENCE_TARGETS) -> dict:
+    basic = [
+        (
+            "※ 체류 존 — 플레이어가 영역 안에 있을 때만 상태 적용, 나가면 복구",
+            "_hint_presence_intro",
+            "hint",
+        ),
+        ("Box Name", "name", "text"),
+        ("Cond mainprogress", "cond_mainprogress", "text"),
+        ("Cond min_laugh_point", "cond_min_laugh_point", "text"),
+        ("Area — Set Area 버튼으로 맵에 사각형 지정", "_hint_presence_area", "hint"),
+        ("맵에서 영역 지정", "_area:pick", "add_btn"),
+    ]
+    field_rows = [
+        ("── 화면(틸트/쉬어) — 비운 칸은 변경 없음 ──", "_hint_field", "hint"),
+        ("tilt_target (0~1, 비우면 유지)", "field_tilt_target", "text"),
+        ("shear on (비우면 유지)", "field_shear_on", "dropdown", SHEAR_ON_OPTS),
+        ("shear strength (0~1)", "field_shear_strength", "text"),
+        ("shear max_px", "field_shear_max_px", "text"),
+    ]
+    player_rows = [
+        ("── 플레이어 — TUNE 과 동일 필드 ──", "_hint_player", "hint"),
+    ]
+    player_rows.extend(_tune_value_modal_rows("player_"))
+    target_rows = [
+        (
+            "── 지정 오브젝트/NPC — 이름 + TUNE 필드 (플레이어 제외) ──",
+            "_hint_targets",
+            "hint",
+        ),
+    ]
+    for i in range(1, target_count + 1):
+        target_rows.append((f"#{i} 이름 (입력 또는 List)", f"tgt{i}_name", "events"))
+        target_rows.extend(_tune_value_modal_rows(f"tgt{i}_"))
+    target_rows.append(("+ 대상 추가", "_add:tgt", "add_btn"))
+    return {
+        "basic": basic,
+        "field": field_rows,
+        "player": player_rows,
+        "targets": target_rows,
+    }
 
 
 def _max_numbered_slot(fields: dict, prefix: str) -> int:
@@ -55,6 +223,11 @@ def _init_bind_slot_fields(fields: dict, n: int) -> None:
     fields[f"bind{n}_st_visible"] = ""
     fields[f"bind{n}_st_anim"] = ""
     fields[f"bind{n}_st_anim_mode"] = ""
+    fields[f"bind{n}_efx_mode"] = ""
+    fields[f"bind{n}_efx_color"] = ""
+    fields[f"bind{n}_efx_alpha"] = ""
+    fields[f"bind{n}_efx_cycle_sec"] = ""
+    fields[f"bind{n}_efx_zoom"] = ""
 
 
 def _init_talk_line_fields(fields: dict, n: int) -> None:
@@ -93,6 +266,99 @@ def _parse_opt_bool(s) -> Optional[bool]:
     return t in ("true", "1", "yes")
 
 
+def _entity_fx_editor_rows(*, prefix: str, label: str = "FX") -> list:
+    p = str(prefix or "")
+    return [
+        (f"{label} mode (off|pulse|tint)", f"{p}efx_mode", "dropdown", ENTITY_FX_MODE_OPTS),
+        (f"{label} color R,G,B", f"{p}efx_color", "text"),
+        (f"{label} alpha 0~255", f"{p}efx_alpha", "text"),
+        (f"{label} cycle_sec (pulse)", f"{p}efx_cycle_sec", "text"),
+        (f"{label} zoom (0.5~2, 1=기본 · 비우면 유지)", f"{p}efx_zoom", "text"),
+    ]
+
+
+def _entity_fx_fields_empty(fields: dict, prefix: str) -> bool:
+    p = str(prefix or "")
+    return not any(
+        str(fields.get(f"{p}efx_{k}") or "").strip()
+        for k in ("mode", "color", "alpha", "cycle_sec", "zoom")
+    )
+
+
+def _entity_fx_to_fields(fx, fields: dict, *, prefix: str = "") -> None:
+    p = str(prefix or "")
+    if fx is False:
+        fields[f"{p}efx_mode"] = "off"
+        fields[f"{p}efx_color"] = ""
+        fields[f"{p}efx_alpha"] = ""
+        fields[f"{p}efx_cycle_sec"] = ""
+        fields[f"{p}efx_zoom"] = ""
+        return
+    if not isinstance(fx, dict):
+        return
+    mode = str(fx.get("mode") or fx.get("efx_mode") or "pulse").strip().lower()
+    fields[f"{p}efx_mode"] = mode
+    col = fx.get("color") or fx.get("efx_color") or fx.get("rgb")
+    fields[f"{p}efx_color"] = "" if col is None else str(col)
+    alpha = fx.get("alpha", fx.get("efx_alpha"))
+    fields[f"{p}efx_alpha"] = "" if alpha is None else str(alpha)
+    cycle = fx.get("cycle_sec", fx.get("efx_cycle_sec", fx.get("speed")))
+    fields[f"{p}efx_cycle_sec"] = "" if cycle is None else str(cycle)
+    zoom = fx.get("zoom", fx.get("efx_zoom"))
+    fields[f"{p}efx_zoom"] = "" if zoom is None else str(zoom)
+
+
+def _entity_fx_from_fields_optional(fields: dict, *, prefix: str = ""):
+    """비어 있으면 None(미지정), off만이면 False, 값 있으면 dict."""
+    p = str(prefix or "")
+    if _entity_fx_fields_empty(fields, p):
+        return None
+    mode = str(fields.get(f"{p}efx_mode") or "").strip().lower()
+    zoom_s = str(fields.get(f"{p}efx_zoom") or "").strip()
+    has_tint_extra = any(str(fields.get(f"{p}efx_{k}") or "").strip() for k in ("color", "alpha", "cycle_sec"))
+    has_tint_mode = bool(mode) and mode not in ("—",)
+    has_zoom = bool(zoom_s)
+
+    if mode in ("off", "none", "clear", "stop"):
+        if not has_zoom and not has_tint_extra:
+            return False
+        out: dict = {"mode": "off"}
+    elif has_tint_mode or has_tint_extra:
+        out = {"mode": mode if has_tint_mode else "pulse"}
+        col = str(fields.get(f"{p}efx_color") or "").strip()
+        if col:
+            out["color"] = col
+        alpha_s = str(fields.get(f"{p}efx_alpha") or "").strip()
+        if alpha_s:
+            try:
+                out["alpha"] = int(float(alpha_s))
+            except (TypeError, ValueError):
+                pass
+        cycle_s = str(fields.get(f"{p}efx_cycle_sec") or "").strip()
+        if cycle_s:
+            try:
+                out["cycle_sec"] = float(cycle_s)
+            except (TypeError, ValueError):
+                pass
+    elif has_zoom:
+        out = {}
+    else:
+        return None
+
+    if has_zoom:
+        try:
+            out["zoom"] = float(zoom_s)
+        except (TypeError, ValueError):
+            pass
+    return out if out else None
+
+
+def _entity_fx_into_dict(fields: dict, out: dict, *, prefix: str = "") -> None:
+    fx = _entity_fx_from_fields_optional(fields, prefix=prefix)
+    if fx is not None:
+        out["entity_fx"] = fx
+
+
 def _state_patch_to_fields(patch: dict, fields: dict, prefix: str) -> None:
     """spawn_state / binding.state / progress 규칙 → 에디터 필드."""
     p = patch or {}
@@ -102,6 +368,8 @@ def _state_patch_to_fields(patch: dict, fields: dict, prefix: str) -> None:
     fields[f"{prefix}anim_mode"] = str(p.get("anim_mode") or p.get("mode") or "")
     fields[f"{prefix}change_to"] = str(p.get("change_to") or p.get("to") or "")
     fields[f"{prefix}dir"] = str(p.get("dir") or p.get("face") or "")
+    if "entity_fx" in p:
+        _entity_fx_to_fields(p.get("entity_fx"), fields, prefix=prefix)
 
 
 def _state_patch_from_fields(fields: dict, prefix: str) -> Optional[dict]:
@@ -125,6 +393,7 @@ def _state_patch_from_fields(fields: dict, prefix: str) -> Optional[dict]:
     d = str(fields.get(f"{prefix}dir") or "").strip().lower()
     if d in ("left", "right"):
         out["dir"] = d
+    _entity_fx_into_dict(fields, out, prefix=prefix)
     return out if out else None
 
 
@@ -151,6 +420,10 @@ def _progress_apply_to_fields(rules: list, fields: dict, *, slot_prefix: str = "
             _state_patch_to_fields(st, fields, p)
         else:
             _state_patch_to_fields({}, fields, p)
+        if isinstance(row, dict) and "entity_fx" in row and not (
+            isinstance(row.get("state"), dict) and "entity_fx" in row.get("state")
+        ):
+            _entity_fx_to_fields(row.get("entity_fx"), fields, prefix=p)
 
 
 def _progress_apply_from_fields(fields: dict, *, slot_prefix: str = "prog") -> Optional[list]:
@@ -165,12 +438,15 @@ def _progress_apply_from_fields(fields: dict, *, slot_prefix: str = "prog") -> O
         patch = _state_patch_from_fields(fields, p)
         if patch:
             row.update(patch)
+        fx = _entity_fx_from_fields_optional(fields, prefix=p)
+        if fx is not None and "entity_fx" not in row:
+            row["entity_fx"] = fx
         rules.append(row)
     return rules if rules else None
 
 
 def _spawn_editor_rows(*, spawn_prefix: str = "spawn_") -> list:
-    return [
+    rows = [
         (
             "── [C] spawn_state — 맵에 처음 나타날 때의 모습 (저장 후 맵 다시 열면 적용) ──",
             "_hint_spawn",
@@ -181,6 +457,8 @@ def _spawn_editor_rows(*, spawn_prefix: str = "spawn_") -> list:
         ("  anim — idle, walk 등 애니 이름", f"{spawn_prefix}anim", "text"),
         ("  anim_mode — hold=계속, once=한 번 재생", f"{spawn_prefix}anim_mode", "dropdown", ANIM_MODE_OPTS),
     ]
+    rows.extend(_entity_fx_editor_rows(prefix=spawn_prefix, label="  spawn FX"))
+    return rows
 
 
 def _progress_editor_rows(
@@ -209,6 +487,7 @@ def _progress_editor_rows(
         rows.append((f"  규칙{i} anim_mode", f"{p}anim_mode", "dropdown", ANIM_MODE_OPTS))
         rows.append((f"  규칙{i} change_to", f"{p}change_to", "text"))
         rows.append((f"  규칙{i} dir", f"{p}dir", "dropdown", DIR_OPTS))
+        rows.extend(_entity_fx_editor_rows(prefix=p, label=f"  규칙{i} FX"))
     if with_add:
         rows.append(_add_btn_row("+ 단계 추가", f"_add:prog:{prog_prefix}"))
     return rows
@@ -235,6 +514,7 @@ def _binding_inline_rows(*, bind_count: int = DEFAULT_BIND_SLOTS) -> list:
         rows.append((f"  #{i} state visible", f"bind{i}_st_visible", "dropdown", VISIBLE_OPTS))
         rows.append((f"  #{i} state anim", f"bind{i}_st_anim", "text"))
         rows.append((f"  #{i} state anim_mode", f"bind{i}_st_anim_mode", "dropdown", ANIM_MODE_OPTS))
+        rows.extend(_entity_fx_editor_rows(prefix=f"bind{i}_", label=f"  #{i} FX"))
     return rows
 
 def _format_talk_when(when: Any) -> str:
@@ -313,6 +593,8 @@ def _bindings_to_slot_fields(bindings, fields: dict) -> None:
             fields[f"bind{n}_st_visible"] = _opt_bool_field(st.get("visible"), "")
             fields[f"bind{n}_st_anim"] = str(st.get("anim") or st.get("state") or "")
             fields[f"bind{n}_st_anim_mode"] = str(st.get("anim_mode") or st.get("mode") or "")
+        if "entity_fx" in b:
+            _entity_fx_to_fields(b.get("entity_fx"), fields, prefix=f"bind{n}_")
 
 
 def _binding_inline_state_from_fields(fields: dict, slot: int) -> Optional[dict]:
@@ -333,7 +615,8 @@ def _bindings_from_slot_fields(fields: dict) -> list:
         eid = str(fields.get(f"bind{i}_event") or "").strip()
         after = _parse_talk_after(fields.get(f"bind{i}_after"))
         st = _binding_inline_state_from_fields(fields, i)
-        if not cond and not eid and not after and not st:
+        fx = _entity_fx_from_fields_optional(fields, prefix=f"bind{i}_")
+        if not cond and not eid and not after and not st and fx is None:
             continue
         if not cond:
             continue
@@ -344,7 +627,9 @@ def _bindings_from_slot_fields(fields: dict) -> list:
             row["state"] = st
         if after:
             row["after"] = after
-        if not eid and not st and not after:
+        if fx is not None:
+            row["entity_fx"] = fx
+        if not eid and not st and not after and fx is None:
             continue
         pr_s = str(fields.get(f"bind{i}_pri") or "").strip()
         if pr_s:
@@ -386,6 +671,35 @@ def _interact_offset_into_dict(fields: dict, out: dict) -> None:
     out["offset"] = [x, y]
 
 
+def _interact_prompt_to_fields(inter: dict) -> dict:
+    inter = inter or {}
+    ox = inter.get("prompt_offset_x")
+    oy = inter.get("prompt_offset_y")
+    return {
+        "interact_prompt_set": str(inter.get("prompt_set", "") or ""),
+        "interact_prompt_offset_x": "" if ox is None else str(ox),
+        "interact_prompt_offset_y": "" if oy is None else str(oy),
+    }
+
+
+def _interact_prompt_into_dict(fields: dict, out: dict) -> None:
+    ps = str(fields.get("interact_prompt_set") or "").strip()
+    if ps:
+        out["prompt_set"] = ps
+    ox_s = str(fields.get("interact_prompt_offset_x") or "").strip()
+    if ox_s:
+        try:
+            out["prompt_offset_x"] = float(ox_s)
+        except ValueError:
+            pass
+    oy_s = str(fields.get("interact_prompt_offset_y") or "").strip()
+    if oy_s:
+        try:
+            out["prompt_offset_y"] = float(oy_s)
+        except ValueError:
+            pass
+
+
 def _interact_range_offset_rows() -> list:
     return [
         ("상호작용 거리 (픽셀)", "interact_range", "text"),
@@ -396,6 +710,14 @@ def _interact_range_offset_rows() -> list:
             "_hint_interact_anchor",
             "hint",
         ),
+        ("안내 아이콘 애니 세트", "interact_prompt_set", "text"),
+        (
+            "  ui/{이름}/{세트}0.png · 없으면 ui/pushbutton/{세트} · 비우면 pushbutton",
+            "_hint_interact_prompt",
+            "hint",
+        ),
+        ("아이콘 X (발 기준)", "interact_prompt_offset_x", "text"),
+        ("아이콘 Y (발 기준, +는 아래)", "interact_prompt_offset_y", "text"),
     ]
 
 
@@ -405,6 +727,7 @@ def _interact_dict_from_fields(fields: dict) -> dict:
         "range": float(fields.get("interact_range") or 48),
     }
     _interact_offset_into_dict(fields, out)
+    _interact_prompt_into_dict(fields, out)
     binds = _bindings_from_slot_fields(fields)
     if binds:
         out["bindings"] = binds
@@ -475,6 +798,7 @@ def char_def_modal_section_rows(
             "_hint_char_def_intro",
             "hint",
         ),
+        ("이름 (야구·UI 표시)", "name", "text"),
         ("표시 이름 (대화창에 나오는 이름)", "display_name", "text"),
     ]
     basic_setup.extend(_spawn_editor_rows(spawn_prefix="spawn_"))
@@ -484,8 +808,10 @@ def char_def_modal_section_rows(
             ("behavior mode — idle=가만히, patrol=왕복 등", "behavior_mode", "dropdown", BEHAVIOR_OPTS),
             ("jump_max_gap — 점프로 넘을 수 있는 틈(픽셀)", "jump_max_gap", "text"),
             ("mask_nav — true면 마스크 위를 걸어다님", "mask_nav", "dropdown", BOOL_OPTS),
+            ("── 시각 효과 (반짝임·틴트·zoom) — 맵 로드·progress 자동 적용 ──", "_hint_entity_fx_def", "hint"),
         ]
     )
+    basic_setup.extend(_entity_fx_editor_rows(prefix="", label="기본 FX"))
     return {
         "basic_setup": basic_setup,
         "progress": _progress_editor_rows(prog_prefix="prog", rule_count=prog_count),
@@ -573,8 +899,13 @@ def obj_def_modal_section_rows(
     bind_count: int = DEFAULT_BIND_SLOTS,
     prog_count: int = DEFAULT_PROGRESS_RULES,
 ) -> dict:
+    basic_setup = [
+        ("── 시각 효과 (반짝임·틴트·zoom) — 맵 로드·progress 자동 적용 ──", "_hint_entity_fx_def", "hint"),
+    ]
+    basic_setup.extend(_entity_fx_editor_rows(prefix="", label="기본 FX"))
+    basic_setup.extend(_spawn_editor_rows(spawn_prefix="spawn_"))
     return {
-        "basic_setup": _spawn_editor_rows(spawn_prefix="spawn_"),
+        "basic_setup": basic_setup,
         "progress": _progress_editor_rows(prog_prefix="prog", rule_count=prog_count),
         "interact": _interact_binding_modal_rows(bind_count=bind_count),
     }
@@ -609,6 +940,7 @@ def char_def_to_fields(cdef: dict, char_name: str) -> dict:
     fb_say = fb.get("say") if isinstance(fb, dict) else {}
     iox, ioy = _interact_offset_to_fields(inter)
     fields = {
+        "name": str(cdef.get("name") or char_name),
         "display_name": str(cdef.get("display_name") or ""),
         "interact_range": str(inter.get("range", 48)),
         "interact_offset_x": iox,
@@ -621,6 +953,7 @@ def char_def_to_fields(cdef: dict, char_name: str) -> dict:
         "fallback_text": str((fb_say or {}).get("text") or ""),
     }
     _bindings_to_slot_fields(inter.get("bindings"), fields)
+    fields.update(_interact_prompt_to_fields(inter))
     talk_count = max(DEFAULT_TALK_LINES, len(lines))
     for i in range(1, talk_count + 1):
         if i - 1 < len(lines):
@@ -633,8 +966,11 @@ def char_def_to_fields(cdef: dict, char_name: str) -> dict:
             _init_talk_line_fields(fields, i)
     if not fields["display_name"]:
         fields["display_name"] = char_name
+    if not str(fields.get("name") or "").strip():
+        fields["name"] = char_name
     _state_patch_to_fields(cdef.get("spawn_state") or {}, fields, "spawn_")
     _progress_apply_to_fields(cdef.get("progress_apply"), fields, slot_prefix="prog")
+    _entity_fx_to_fields(cdef.get("entity_fx"), fields, prefix="")
     return fields
 
 
@@ -647,6 +983,8 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
     }
     if str(fields.get("mask_nav", "false")).lower() in ("true", "1", "yes"):
         out["mask_nav"] = True
+    nm = str(fields.get("name") or char_name).strip() or char_name
+    out["name"] = nm
     dn = str(fields.get("display_name") or "").strip()
     if dn:
         out["display_name"] = dn
@@ -664,6 +1002,9 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
     pa = _progress_apply_from_fields(fields, slot_prefix="prog")
     if pa:
         out["progress_apply"] = pa
+    fx = _entity_fx_from_fields_optional(fields, prefix="")
+    if fx is not None:
+        out["entity_fx"] = fx
     lines = []
     talk_count = max(DEFAULT_TALK_LINES, _max_numbered_slot(fields, "line"))
     for i in range(1, talk_count + 1):
@@ -694,10 +1035,14 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
         merged.pop("spawn_state", None)
     if not pa and "progress_apply" in merged:
         merged.pop("progress_apply", None)
+    if fx is None and "entity_fx" in merged:
+        merged.pop("entity_fx", None)
     if ss:
         merged["spawn_state"] = ss
     if pa:
         merged["progress_apply"] = pa
+    if fx is not None:
+        merged["entity_fx"] = fx
     return merged
 
 
@@ -753,6 +1098,7 @@ def char_inst_fields_from_npc(npc) -> dict:
         "flee_safe": str(spec.get("safe_range", 140)),
     }
     _bindings_to_slot_fields(inter.get("bindings"), fields)
+    fields.update(_interact_prompt_to_fields(inter))
     we = getattr(npc, "_world_entry", None) or {}
     _state_patch_to_fields(we.get("spawn_state") or {}, fields, "inst_spawn_")
     _progress_apply_to_fields(we.get("progress_apply"), fields, slot_prefix="inst_prog")
@@ -1378,6 +1724,7 @@ def _obj_def_to_fields(odef: dict) -> dict:
     fields = _fields_from_interact_dict((odef or {}).get("interact"))
     _state_patch_to_fields((odef or {}).get("spawn_state") or {}, fields, "spawn_")
     _progress_apply_to_fields((odef or {}).get("progress_apply"), fields, slot_prefix="prog")
+    _entity_fx_to_fields((odef or {}).get("entity_fx"), fields, prefix="")
     return fields
 
 
@@ -1396,6 +1743,11 @@ def _obj_def_from_fields(fields: dict, base: dict) -> dict:
         row["progress_apply"] = pa
     else:
         row.pop("progress_apply", None)
+    fx = _entity_fx_from_fields_optional(fields, prefix="")
+    if fx is not None:
+        row["entity_fx"] = fx
+    else:
+        row.pop("entity_fx", None)
     return row
 
 
@@ -1410,6 +1762,7 @@ def _fields_from_interact_dict(inter: dict) -> dict:
         "interact_offset_x": iox,
         "interact_offset_y": ioy,
     }
+    fields.update(_interact_prompt_to_fields(inter))
     _bindings_to_slot_fields(inter.get("bindings"), fields)
     return fields
 
@@ -1546,10 +1899,96 @@ class ObjInstModal(_ConfigModal):
             cb()
 
 
+class PresenceZoneModal(_ConfigModal):
+    """MAP presence_zones — 화면/플레이어/지정 오브젝트 상태 오버레이."""
+
+    tag = "presence_zone"
+    title = "PRESENCE BOX"
+
+    def __init__(self):
+        super().__init__()
+        self.edit_idx: Optional[int] = None
+        self.rect: Optional[list] = None
+        self.target_count: int = DEFAULT_PRESENCE_TARGETS
+
+    def get_sections(self):
+        return [
+            ("basic", "기본"),
+            ("field", "화면(틸트/쉬어)"),
+            ("player", "플레이어"),
+            ("targets", "지정 오브젝트"),
+        ]
+
+    def get_section_rows(self):
+        return presence_zone_modal_section_rows(target_count=self.target_count)
+
+    def _event_id_options(self, ctx) -> list:
+        if (self.dd_key or "").startswith("tgt") and (self.dd_key or "").endswith("_name"):
+            names = list(ctx.get("map_entity_names") or [])
+            return [""] + sorted({str(n) for n in names if str(n).strip() and str(n).lower() != "player"})
+        return super()._event_id_options(ctx)
+
+    def _on_add_slot_click(self, add_id: str, ctx) -> None:
+        if add_id == "_area:pick":
+            cb = ctx.get("on_presence_area_pick")
+            if callable(cb):
+                cb()
+            return
+        if add_id == "_add:tgt":
+            if self.target_count >= MAX_EXPAND_SLOTS:
+                return
+            self.target_count += 1
+            p = f"tgt{self.target_count}_"
+            self.fields[f"{p}name"] = ""
+            _tune_fields_from_patch({}, self.fields, p)
+            self.dd_open = False
+            self.active_field = None
+            self._scroll_to_bottom(ctx)
+            return
+        super()._on_add_slot_click(add_id, ctx)
+
+    def open_new(self):
+        self.edit_idx = None
+        self.rect = None
+        self.target_count = DEFAULT_PRESENCE_TARGETS
+        self.fields = presence_zone_to_fields({}, target_count=self.target_count)[0]
+        self.show = True
+        self.scroll = 0
+        self._reset_section()
+        self.active_field = None
+        self.dd_open = False
+
+    def open_edit(self, zone: dict, edit_idx: int):
+        self.edit_idx = int(edit_idx)
+        rect = zone.get("rect")
+        self.rect = list(rect) if isinstance(rect, (list, tuple)) and len(rect) >= 4 else None
+        self.fields, self.target_count = presence_zone_to_fields(zone, target_count=DEFAULT_PRESENCE_TARGETS)
+        self.show = True
+        self.scroll = 0
+        self._reset_section()
+        self.active_field = None
+        self.dd_open = False
+
+    def set_rect(self, rect):
+        if isinstance(rect, (list, tuple)) and len(rect) >= 4:
+            self.rect = [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])]
+
+    def on_save(self, ctx):
+        rect = self.rect
+        if not rect or rect[2] <= 0 or rect[3] <= 0:
+            print("[PresenceZone] rect 미지정 — 저장 취소")
+            return
+        z = presence_zone_from_fields(self.fields, rect, target_count=self.target_count)
+        cb = ctx.get("on_presence_zone_saved")
+        if callable(cb):
+            cb(z, self.edit_idx)
+
+
 char_def_modal = CharDefModal()
 char_inst_modal = CharInstModal()
 obj_def_modal = ObjDefModal()
 obj_inst_modal = ObjInstModal()
+presence_zone_modal = PresenceZoneModal()
 
 
 def any_char_modal_open() -> bool:
@@ -1558,6 +1997,7 @@ def any_char_modal_open() -> bool:
         or char_inst_modal.show
         or obj_def_modal.show
         or obj_inst_modal.show
+        or presence_zone_modal.show
     )
 
 
@@ -1566,3 +2006,4 @@ def close_all_char_modals():
     char_inst_modal.close()
     obj_def_modal.close()
     obj_inst_modal.close()
+    presence_zone_modal.close()

@@ -17,6 +17,7 @@ from char_editor_ui import (
     close_all_char_modals,
     obj_def_modal,
     obj_inst_modal,
+    presence_zone_modal,
 )
 from flow import (
     GameFlow,
@@ -37,6 +38,8 @@ from render_align import (
     snap_render_zoom,
     world_to_map_surface_xy,
 )
+import editor_baseball as bb_ed
+from entity_defs import reload_entity_defs
 
 # events.json 섹션 (에디터 목록·저장 공통)
 EDITOR_EVENT_SECTIONS = ("LOCAL", "GLOBAL", "SYNC", "FRAGMENTS")
@@ -69,9 +72,11 @@ def _editor_left_list_tops(top_bar_h):
         "map_tools": tb + 38,
         "map_zone_btn": tb + 74,
         "map_bgzone_btn": tb + 108,
+        "map_presence_btn": tb + 142,
         "map_objects": tb + 110,
         "map_zones": tb + 110,
         "map_bgzones": tb + 142,
+        "map_presences": tb + 176,
     }
 
 
@@ -695,6 +700,181 @@ def _draw_dropdown_with_scrollbar(screen, font, rect, options, selected_index, s
     }
 
 
+def _editor_parse_rgb_triplet(s):
+    """'R,G,B' 또는 [r,g,b] → (r,g,b) 튜플. 실패 시 None."""
+    if isinstance(s, (list, tuple)) and len(s) >= 3:
+        try:
+            return (int(s[0]), int(s[1]), int(s[2]))
+        except Exception:
+            return None
+    raw = str(s or "").strip()
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.replace(" ", "").split(",")]
+    if len(parts) < 3:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except Exception:
+        return None
+
+
+def _editor_color_palette_entries():
+    """CONFIG EDITOR_COLOR_PALETTE → [(이름, 'r,g,b'), ...]."""
+    from data import CONFIG
+
+    raw = CONFIG.get("EDITOR_COLOR_PALETTE") or []
+    out = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("label") or "").strip()
+            rgb = item.get("rgb") or item.get("color")
+            if isinstance(rgb, (list, tuple)) and len(rgb) >= 3:
+                rgb_s = f"{int(rgb[0])},{int(rgb[1])},{int(rgb[2])}"
+            else:
+                rgb_s = str(rgb or "").strip()
+            if rgb_s:
+                out.append((name or rgb_s, rgb_s))
+        elif isinstance(item, (list, tuple)) and len(item) >= 3:
+            rgb_s = f"{int(item[0])},{int(item[1])},{int(item[2])}"
+            out.append((rgb_s, rgb_s))
+    if not out:
+        out = [
+            ("흰색", "255,255,255"),
+            ("금색", "255,220,100"),
+            ("빨강", "255,80,80"),
+            ("파랑", "80,140,255"),
+            ("초록", "100,220,120"),
+        ]
+    return out
+
+
+def _editor_color_palette_option_to_rgb(option):
+    s = str(option or "").strip()
+    if "|" in s:
+        return s.split("|", 1)[1].strip()
+    if "·" in s:
+        return s.split("·", 1)[1].strip()
+    return s
+
+
+def _step_row_color_palette(step_type, field_key):
+    t = (step_type or "").upper()
+    fk = (field_key or "").strip()
+    return fk in ("color", "efx_color", "sfx_color", "sfx_rain_color", "sfx_vignette_color", "sfx_tone_color") and t in (
+        "OVERLAY_UI",
+        "ENTITY_FX",
+        "SCREEN_FX",
+    )
+
+
+def _editor_normalize_step_type(step_type, step=None):
+    """에디터 표시용 스텝 타입. 구형 FX+kind / SCREEN_FLASH 등 → 전용 타입."""
+    t = (step_type or "MOVE").upper()
+    if t in ("SCREEN_FLASH", "SCREEN_SHAKE"):
+        return "SCREEN_FX"
+    if t != "FX" or not isinstance(step, dict):
+        return t
+    kind = str(step.get("kind") or step.get("name") or "").strip().lower()
+    if kind in (
+        "entity_fx",
+        "entity_glow",
+        "entity_tint",
+        "entity_pulse",
+        "entity_shimmer",
+        "entity",
+    ):
+        return "ENTITY_FX"
+    return "SCREEN_FX"
+
+
+def _editor_screen_fx_kind_from_step(step, step_type_raw=""):
+    """SCREEN_FX 편집용 kind (cloud|flash|shake|rain)."""
+    tr = (step_type_raw or "").upper()
+    if tr == "SCREEN_FLASH":
+        return "flash"
+    if tr == "SCREEN_SHAKE":
+        return "shake"
+    if tr == "FX":
+        return "cloud"
+    if not isinstance(step, dict):
+        return "cloud"
+    return _screen_fx_tab_kind({"sfx_kind": step.get("kind") or step.get("sfx_kind")})
+
+
+def _draw_color_palette_dropdown(screen, font, rect, entries, selected_index, scroll_px, item_h, colors):
+    """색상 팔레트 드롭다운 — 각 행에 스와치 + 이름."""
+    bg = colors.get("bg", (28, 28, 36))
+    border = colors.get("border", (150, 155, 175))
+    hover = colors.get("hover", (52, 56, 70))
+    cur_bg = colors.get("cur_bg", (60, 60, 90))
+    text = colors.get("text", (235, 235, 240))
+    text_dim = colors.get("text_dim", (200, 200, 200))
+    sb_track = colors.get("sb_track", (18, 18, 24))
+    sb_thumb = colors.get("sb_thumb", (110, 120, 150))
+    sb_thumb2 = colors.get("sb_thumb2", (140, 150, 180))
+
+    pygame.draw.rect(screen, bg, rect)
+    pygame.draw.rect(screen, border, rect, 1)
+
+    n_opt = len(entries or [])
+    total_h = n_opt * item_h
+    vis_h = max(1, rect.height)
+    max_scroll = max(0, total_h - vis_h)
+    sp = int(max(0, min(max_scroll, scroll_px or 0)))
+
+    prev_clip = screen.get_clip()
+    screen.set_clip(rect)
+    mx, my = pygame.mouse.get_pos()
+    for i, row_entry in enumerate(entries or []):
+        if isinstance(row_entry, (list, tuple)) and len(row_entry) >= 2:
+            name, rgb_s = str(row_entry[0]), str(row_entry[1])
+        else:
+            name, rgb_s = str(row_entry), str(row_entry)
+        iy = rect.y + i * item_h - sp
+        if iy + item_h <= rect.y or iy >= rect.bottom:
+            continue
+        row = pygame.Rect(rect.x, iy, rect.width, item_h)
+        is_cur = i == selected_index
+        is_hover = row.collidepoint(mx, my)
+        if is_cur:
+            pygame.draw.rect(screen, cur_bg, row)
+        elif is_hover:
+            pygame.draw.rect(screen, hover, row)
+        triplet = _editor_parse_rgb_triplet(rgb_s) or (128, 128, 128)
+        sw = pygame.Rect(row.x + 6, row.y + max(2, (item_h - 14) // 2), 14, min(14, item_h - 4))
+        pygame.draw.rect(screen, triplet, sw)
+        pygame.draw.rect(screen, (90, 90, 90), sw, 1)
+        label = f"{name} · {rgb_s}" if name != rgb_s else rgb_s
+        if len(label) > 34:
+            label = label[:31] + "..."
+        screen.blit(
+            font.render(label, True, text if (is_cur or is_hover) else text_dim),
+            (row.x + 26, row.y + 4),
+        )
+    screen.set_clip(prev_clip)
+
+    track = None
+    thumb = None
+    thumb_h = None
+    if max_scroll > 0:
+        sb_w = 10
+        track = pygame.Rect(rect.right - sb_w, rect.y + 1, sb_w - 1, rect.height - 2)
+        pygame.draw.rect(screen, sb_track, track)
+        thumb_h = max(18, int(track.height * (vis_h / total_h)))
+        thumb_y = track.y + int((track.height - thumb_h) * (sp / max_scroll))
+        thumb = pygame.Rect(track.x + 1, thumb_y, track.width - 2, thumb_h)
+        pygame.draw.rect(screen, sb_thumb, thumb, border_radius=3)
+        pygame.draw.rect(screen, sb_thumb2, thumb, 1, border_radius=3)
+    return {
+        "max_scroll": max_scroll,
+        "scroll_px": sp,
+        "track": track,
+        "thumb": thumb,
+        "thumb_h": thumb_h,
+    }
+
+
 def _ui_font_options():
     try:
         return sorted((UI_FONT_FILES or {}).keys())
@@ -739,13 +919,79 @@ def _overlay_ui_dropdown_options(field_key):
 STEP_BODY_ROW_H = 50
 STEP_MODAL_LABEL_W = 158
 STEP_OVERLAY_SB_W = 12
+SCREEN_FX_TAB_H = 34
+SCREEN_FX_TABS = (
+    ("cloud", "구름"),
+    ("flash", "번쩍"),
+    ("shake", "흔들"),
+    ("rain", "비"),
+    ("vignette", "비네팅"),
+    ("tone", "톤"),
+)
+
+
+def _screen_fx_tab_kind(step_fields):
+    """SCREEN_FX 편집 탭 kind (cloud|flash|shake|rain)."""
+    k = str((step_fields or {}).get("sfx_kind") or "cloud").strip().lower()
+    if k in ("cloud_shadow", "cloud", "cloudshadow", "cloud-shadow"):
+        return "cloud"
+    if k in ("screen_flash", "flash", "fullscreen_flash", "screen_glow"):
+        return "flash"
+    if k in ("screen_shake", "shake", "screen_quake", "quake"):
+        return "shake"
+    if k in ("rain", "screen_rain"):
+        return "rain"
+    if k in ("vignette", "screen_vignette"):
+        return "vignette"
+    if k in ("tone", "screen_tone", "white_balance", "whitebalance", "wb"):
+        return "tone"
+    if k in ("cloud", "flash", "shake", "rain", "vignette", "tone"):
+        return k
+    return "cloud"
+
+
+def _step_config_body_top(panel_rect, step_fields):
+    top = panel_rect.y + 120
+    if (step_fields.get("type") or "").upper() == "SCREEN_FX":
+        top += SCREEN_FX_TAB_H
+    return top
+
+
+def _screen_fx_tab_rects(panel_rect):
+    x0 = panel_rect.x + 12
+    y0 = panel_rect.y + 118
+    n = max(1, len(SCREEN_FX_TABS))
+    w = max(40, (panel_rect.width - 24) // n)
+    out = []
+    for i, (kind, label) in enumerate(SCREEN_FX_TABS):
+        out.append((kind, label, pygame.Rect(x0 + i * w, y0, w - 2, SCREEN_FX_TAB_H - 4)))
+    return out
+
+
+def _screen_fx_tab_at_pos(panel_rect, pos):
+    for kind, _lb, rect in _screen_fx_tab_rects(panel_rect):
+        if rect.collidepoint(pos):
+            return kind
+    return None
+
+
+def _draw_screen_fx_tabs(screen, font, panel_rect, active_kind):
+    for kind, label, rect in _screen_fx_tab_rects(panel_rect):
+        on = kind == active_kind
+        bg = (55, 75, 95) if on else (32, 34, 42)
+        border = (140, 180, 220) if on else (70, 75, 90)
+        pygame.draw.rect(screen, bg, rect, border_radius=3)
+        pygame.draw.rect(screen, border, rect, 1, border_radius=3)
+        tx = rect.x + max(4, (rect.width - font.size(label)[0]) // 2)
+        screen.blit(font.render(label, True, (240, 248, 255) if on else (170, 175, 185)), (tx, rect.y + 7))
 
 
 def _step_settings_panel_rect(sw, sh, step_fields):
     ft = (step_fields.get("type") or "MOVE").upper()
-    rows = _step_field_rows(ft)
+    rows = _step_field_rows(ft, step_fields)
     body_rows = max(1, len(rows))
-    ph = min(max(420, 120 + body_rows * STEP_BODY_ROW_H + 80), int(sh * 0.92))
+    tab_extra = SCREEN_FX_TAB_H if ft == "SCREEN_FX" else 0
+    ph = min(max(420, 120 + tab_extra + body_rows * STEP_BODY_ROW_H + 80), int(sh * 0.92))
     if ft == "OVERLAY_UI":
         ph = max(ph, 620)
     elif ft == "ACTION_ANIM":
@@ -756,9 +1002,10 @@ def _step_settings_panel_rect(sw, sh, step_fields):
     return pygame.Rect(sw // 2 - 280, y0, 560, ph)
 
 
-def _step_overlay_body_geometry(panel_rect, rows_layout):
-    """OVERLAY_UI 필드 목록: 클립 영역 + 패널 오른쪽 스크롤바 영역."""
-    body_top = panel_rect.y + 120
+def _step_overlay_body_geometry(panel_rect, rows_layout, *, body_top=None):
+    """스텝 필드 목록: 클립 영역 + 패널 오른쪽 스크롤바 영역."""
+    if body_top is None:
+        body_top = panel_rect.y + 120
     body_bottom = panel_rect.bottom - 55
     body_h = max(1, int(body_bottom - body_top))
     pad = 4
@@ -891,6 +1138,24 @@ def _editor_sorted_events_in_section(all_events, map_id, cat):
         )
     )
     return items
+
+
+def _editor_resolve_event_ref(all_events, event_type, event_id):
+    """
+    events.json 섹션에서 이벤트 조회.
+    current_event_type 과 실제 저장 섹션이 어긋난 경우(설정 저장 후) 전 섹션 탐색.
+    반환: (section, event_id, edata) — 없으면 (None, None, None)
+    """
+    eid = str(event_id or "").strip()
+    if not eid:
+        return None, None, None
+    cat = str(event_type or "").strip().upper()
+    if cat and eid in (all_events.get(cat) or {}):
+        return cat, eid, all_events[cat][eid]
+    for sec in EDITOR_EVENT_SECTIONS:
+        if eid in (all_events.get(sec) or {}):
+            return sec, eid, all_events[sec][eid]
+    return None, None, None
 
 
 def _editor_collect_event_id_options(all_events, map_id):
@@ -1270,6 +1535,7 @@ def _editor_left_list_metrics(
     placed_collapsed=None,
     flow_entity_entries=None,
     flow_placed_collapsed=None,
+    baseball_tool="ZONES",
 ):
     tops = _editor_left_list_tops(top_bar_h)
     if edit_mode == "FLOW":
@@ -1279,6 +1545,8 @@ def _editor_left_list_metrics(
             flow_placed_collapsed or set(),
         )
         content_h = len(rows) * line_h
+    elif edit_mode == "BASEBALL":
+        list_top, content_h = bb_ed.sidebar_list_metrics(top_bar_h, baseball_tool, objs)
     elif edit_mode == "MAP":
         if map_tool == "OBJECTS":
             list_top = tops["map_objects"]
@@ -1291,9 +1559,13 @@ def _editor_left_list_metrics(
             list_top = tops["map_zones"]
             zones = flow.world_data.get(map_id, {}).get("event_zones", [])
             content_h = len(zones) * line_h
-        else:
+        elif map_tool == "BGZONES":
             list_top = tops["map_bgzones"]
             zones = flow.world_data.get(map_id, {}).get("bg_zones", [])
+            content_h = len(zones) * line_h
+        else:
+            list_top = tops["map_presences"]
+            zones = flow.world_data.get(map_id, {}).get("presence_zones", [])
             content_h = len(zones) * line_h
     else:
         list_top = event_list_start_y
@@ -1514,7 +1786,7 @@ def _parse_waypoints_semicolon(text):
     return out
 
 
-def _step_field_rows(step_type):
+def _step_field_rows(step_type, step_fields=None):
     """스텝 타입별 (라벨, 필드키) — 입력/그리기/히트테스트 공통."""
     t = (step_type or "MOVE").upper()
     if t == "MOVE":
@@ -1617,10 +1889,11 @@ def _step_field_rows(step_type):
         return [
             ("ZOOM: target 비우면 카메라(월드), 이름이면 스프라이트", "_hint_zoom"),
             ("on (true/false)", "zoom_on"),
-            ("strength (0~1, 0=1x 1=최대줌)", "zoom_strength"),
+            ("strength (카메라: 0~1 슬라이더 / 엔티티: 직접 배율)", "zoom_strength"),
             ("duration_sec (0=즉시)", "zoom_duration_sec"),
             ("val (배율 직접지정, 비우면 strength 사용)", "val"),
             ("Target (비우면 카메라)", "target"),
+            ("persist — 엔티티 줌만: true면 이벤트 종료 후 유지", "zoom_persist"),
         ]
     if t == "FOLLOW_START":
         return [
@@ -1670,6 +1943,7 @@ def _step_field_rows(step_type):
             ("CHANGE: FieldItem/캐릭터 외형 교체 (들고 있는 중 OK)", "_hint_change"),
             ("Target (held=손, 맵 오브젝트/캐릭터 이름)", "target"),
             ("To (FieldItem=object_defs / 캐릭터=char_defs 키)", "to"),
+            ("Fade (초, 디졸브 — 사라졌다 나타남. 0/빈칸=즉시)", "fade"),
         ]
     if t == "SCREEN":
         return [
@@ -1685,7 +1959,8 @@ def _step_field_rows(step_type):
         return [
             ("OVERLAY_UI: 화면 고정 텍스트/오브젝트 이미지 (논리 해상도)", "_hint_overlay_ui"),
             ("action (show/remove)", "action"),
-            ("overlay_id (비우면 자동)", "overlay_id"),
+            ("overlay_id (트랙 — 같은 id는 순서대로, 다른 id는 병렬)", "overlay_id"),
+            ("delay (초, 같은 id 이전 연출 끝난 뒤 대기)", "delay"),
             ("content (text/image)", "content"),
             ("text (줄바꿈 \\n)", "text"),
             ("font (레지스트리 키)", "font"),
@@ -1763,17 +2038,67 @@ def _step_field_rows(step_type):
             ("duration_sec (0=즉시)", "shear_duration_sec"),
             ("px (선택, data 기본 대신)", "shear_px"),
         ]
-    if t == "FX":
-        return [
-            ("FX: 화면 효과(현재 cloud_shadow)", "_hint_fx"),
-            ("kind (cloud_shadow)", "fx_kind"),
+    if t == "SCREEN_FX":
+        kind = _screen_fx_tab_kind(step_fields or {})
+        rows = [
+            ("SCREEN_FX: 탭으로 구름·번쩍·흔들·비·비네팅·톤 선택", "_hint_screen_fx"),
             ("on (true/false)", "fx_on"),
-            ("dir (SE/SW/NE/NW/RANDOM)", "fx_dir"),
-            ("speed (px/sec)", "fx_speed"),
-            ("freq (spawns/sec)", "fx_freq"),
-            ("grid_cell (비우면 data)", "fx_grid_cell"),
-            ("grid_jitter (0~0.49, 비우면 data)", "fx_grid_jitter"),
-            ("grid_max (비우면 data)", "fx_grid_max"),
+        ]
+        if kind == "cloud":
+            rows += [
+                ("dir (SE/SW/NE/NW/RANDOM)", "fx_dir"),
+                ("speed (px/sec)", "fx_speed"),
+                ("freq (spawns/sec)", "fx_freq"),
+                ("grid_cell (비우면 data)", "fx_grid_cell"),
+                ("grid_jitter (0~0.49)", "fx_grid_jitter"),
+                ("grid_max (비우면 data)", "fx_grid_max"),
+            ]
+        elif kind == "flash":
+            rows += [
+                ("mode pulse|tint", "sfx_mode"),
+                ("color R,G,B", "sfx_color"),
+                ("alpha 0~255", "sfx_alpha"),
+                ("cycle_sec", "sfx_cycle_sec"),
+            ]
+        elif kind == "shake":
+            rows += [
+                ("amp_px", "sfx_amp"),
+                ("freq_hz", "sfx_freq"),
+            ]
+        elif kind == "rain":
+            rows += [
+                ("density 0~1", "sfx_rain_density"),
+                ("speed px/sec", "sfx_rain_speed"),
+                ("angle deg (0=수직↓, 45=대각)", "sfx_rain_angle"),
+                ("drop_len px", "sfx_rain_len"),
+                ("alpha", "sfx_rain_alpha"),
+                ("color R,G,B", "sfx_rain_color"),
+            ]
+        elif kind == "vignette":
+            rows += [
+                ("strength 0~1", "sfx_vignette_strength"),
+                ("size 0~1 (중앙 밝은 영역)", "sfx_vignette_size"),
+                ("softness 0~1", "sfx_vignette_softness"),
+                ("color R,G,B", "sfx_vignette_color"),
+            ]
+        elif kind == "tone":
+            rows += [
+                ("preset warm|cool|neutral|custom", "sfx_tone_preset"),
+                ("strength 0~1", "sfx_tone_strength"),
+                ("color R,G,B (custom)", "sfx_tone_color"),
+            ]
+        return rows
+    if t == "ENTITY_FX":
+        return [
+            ("ENTITY_FX: 캐릭터·오브젝트 반짝임/틴트/zoom", "_hint_entity_fx"),
+            ("target (캐릭터/오브젝트 이름)", "target"),
+            ("mode pulse|tint", "efx_mode"),
+            ("action start|stop", "efx_action"),
+            ("color R,G,B", "efx_color"),
+            ("alpha 0~255", "efx_alpha"),
+            ("cycle_sec (pulse 주기)", "efx_cycle_sec"),
+            ("zoom (0.5~2, 1=기본)", "efx_zoom"),
+            ("persist — true면 이벤트 종료 후에도 유지", "efx_persist"),
         ]
     if t == "CALL_EVENT":
         return [
@@ -1851,6 +2176,9 @@ def _dev_cmd_dropdown_options():
         "stop_fishing",
         "start_fishing",
         "start_activity_fishing",
+        "stop_baseball",
+        "start_baseball",
+        "start_activity_baseball",
         "restart_delete_save",
     ]
 
@@ -1871,7 +2199,18 @@ def _step_row_entity_pick(step_type, field_key):
     t = (step_type or "").upper()
     fk = (field_key or "").strip()
     if fk == "target":
-        return t in ("MOVE", "PLACE", "TUNE", "ZOOM", "ACTION_ANIM", "EFFECT", "EMOTE", "CARRY", "CHANGE")
+        return t in (
+            "MOVE",
+            "PLACE",
+            "TUNE",
+            "ZOOM",
+            "ACTION_ANIM",
+            "EFFECT",
+            "EMOTE",
+            "CARRY",
+            "CHANGE",
+            "ENTITY_FX",
+        )
     if fk == "holder" and t == "CARRY":
         return True
     if fk == "cam_target" and t == "CAMERA":
@@ -1894,7 +2233,7 @@ def _step_entity_options_for_pick(step_type, field_key, steps_ref, before_ix, pl
         return _place_target_options()
     if fk == "target" and t == "ZOOM":
         return _zoom_target_options(steps_ref, before_ix, player, objs, npcs)
-    if fk == "target" and t in ("TUNE", "EFFECT", "EMOTE"):
+    if fk == "target" and t in ("TUNE", "EFFECT", "EMOTE", "ENTITY_FX"):
         return _move_target_options(steps_ref, before_ix, player, objs, npcs)
     if fk == "target" and t == "CHANGE":
         opts = ["held", "@held"]
@@ -1979,11 +2318,19 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["true", "false"]
     if fk in ("shear_on",) and t == "SHEAR":
         return ["true", "false"]
-    if fk == "fx_on" and t == "FX":
+    if fk == "fx_on" and t in ("SCREEN_FX",):
         return ["true", "false"]
-    if fk == "fx_kind" and t == "FX":
-        return ["cloud_shadow"]
-    if fk == "fx_dir" and t == "FX":
+    if fk == "sfx_mode" and t == "SCREEN_FX":
+        return ["pulse", "tint"]
+    if fk == "sfx_tone_preset" and t == "SCREEN_FX":
+        return ["warm", "cool", "neutral", "custom"]
+    if fk == "efx_mode" and t == "ENTITY_FX":
+        return ["pulse", "tint"]
+    if fk == "efx_action" and t == "ENTITY_FX":
+        return ["start", "stop"]
+    if fk in ("efx_persist", "zoom_persist") and t in ("ENTITY_FX", "ZOOM"):
+        return ["false", "true"]
+    if fk == "fx_dir" and t == "SCREEN_FX":
         return ["SE", "SW", "NE", "NW", "RANDOM"]
     if fk == "val" and t in ("PLAYER_VISIBLE", "CURSOR_VISIBLE"):
         return ["true", "false"]
@@ -2026,6 +2373,8 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["zoom_strength"] = "0"
         if empt("zoom_duration_sec"):
             step_fields["zoom_duration_sec"] = "1.0"
+        if empt("zoom_persist"):
+            step_fields["zoom_persist"] = "false"
     elif t == "TILT":
         if empt("tilt_on"):
             step_fields["tilt_on"] = "true"
@@ -2114,6 +2463,74 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["disappear"] = "0.5"
         if empt("overlay_id"):
             step_fields["overlay_id"] = ""
+        if empt("delay"):
+            step_fields["delay"] = ""
+    elif t == "ENTITY_FX":
+        if empt("efx_mode"):
+            step_fields["efx_mode"] = "pulse"
+        if empt("efx_action"):
+            step_fields["efx_action"] = "start"
+        if empt("efx_color"):
+            step_fields["efx_color"] = "255,220,100"
+        if empt("efx_alpha"):
+            step_fields["efx_alpha"] = "160"
+        if empt("efx_cycle_sec"):
+            try:
+                step_fields["efx_cycle_sec"] = str(float(CONFIG.get("ENTITY_FX_DEFAULT_CYCLE_SEC", 1.0) or 1.0))
+            except Exception:
+                step_fields["efx_cycle_sec"] = "1.0"
+        if empt("efx_zoom"):
+            step_fields["efx_zoom"] = ""
+        if empt("efx_persist"):
+            step_fields["efx_persist"] = "false"
+    elif t == "SCREEN_FX":
+        if empt("fx_on"):
+            step_fields["fx_on"] = "true"
+        if empt("sfx_kind"):
+            step_fields["sfx_kind"] = "cloud"
+        if empt("fx_dir"):
+            step_fields["fx_dir"] = "RANDOM"
+        if empt("sfx_mode"):
+            step_fields["sfx_mode"] = "pulse"
+        if empt("sfx_color"):
+            step_fields["sfx_color"] = "255,255,255"
+        if empt("sfx_alpha"):
+            step_fields["sfx_alpha"] = "140"
+        if empt("sfx_cycle_sec"):
+            try:
+                step_fields["sfx_cycle_sec"] = str(float(CONFIG.get("SCREEN_FX_FLASH_DEFAULT_CYCLE_SEC", 0.7) or 0.7))
+            except Exception:
+                step_fields["sfx_cycle_sec"] = "0.7"
+        if empt("sfx_amp"):
+            step_fields["sfx_amp"] = str(int(CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_AMP_PX", 7) or 7))
+        if empt("sfx_freq"):
+            step_fields["sfx_freq"] = str(int(CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_FREQ_HZ", 14) or 14))
+        if empt("sfx_rain_density"):
+            step_fields["sfx_rain_density"] = str(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DENSITY", 0.35))
+        if empt("sfx_rain_speed"):
+            step_fields["sfx_rain_speed"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_SPEED", 280) or 280))
+        if empt("sfx_rain_angle"):
+            step_fields["sfx_rain_angle"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ANGLE", 82) or 82))
+        if empt("sfx_rain_len"):
+            step_fields["sfx_rain_len"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DROP_LEN", 7) or 7))
+        if empt("sfx_rain_alpha"):
+            step_fields["sfx_rain_alpha"] = str(int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ALPHA", 170) or 170))
+        if empt("sfx_rain_color"):
+            step_fields["sfx_rain_color"] = "180,200,255"
+        if empt("sfx_vignette_strength"):
+            step_fields["sfx_vignette_strength"] = str(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_STRENGTH", 0.55))
+        if empt("sfx_vignette_size"):
+            step_fields["sfx_vignette_size"] = str(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SIZE", 0.42))
+        if empt("sfx_vignette_softness"):
+            step_fields["sfx_vignette_softness"] = str(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SOFTNESS", 0.65))
+        if empt("sfx_vignette_color"):
+            step_fields["sfx_vignette_color"] = "0,0,0"
+        if empt("sfx_tone_preset"):
+            step_fields["sfx_tone_preset"] = "warm"
+        if empt("sfx_tone_strength"):
+            step_fields["sfx_tone_strength"] = str(CONFIG.get("SCREEN_FX_TONE_DEFAULT_STRENGTH", 0.32))
+        if empt("sfx_tone_color"):
+            step_fields["sfx_tone_color"] = "255,210,170"
     elif t == "SAY" and empt("val"):
         step_fields["val"] = "0"
     elif t == "EMOTE":
@@ -2236,6 +2653,132 @@ def _export_map_png(map_id: str, bg, objs, npcs, export_dir: str = "exports"):
     return out_path
 
 
+def _safe_object_asset_name(raw: str) -> str:
+    """object_defs 키와 PNG 파일명에 쓸 ASCII-ish 안전 이름."""
+    s = str(raw or "").strip().replace("\\", "_").replace("/", "_")
+    out = []
+    for ch in s:
+        if ch.isalnum() or ch in ("_", "-"):
+            out.append(ch)
+        elif ch in (" ", "."):
+            out.append("_")
+    return "".join(out).strip("._-")
+
+
+def _editor_merge_obj_image_rect(o):
+    img = getattr(o, "image", None)
+    frames = getattr(o, "frames", None)
+    if frames:
+        try:
+            if len(frames) > 1 and callable(getattr(o, "_anim_frame_idx", None)):
+                img = frames[int(o._anim_frame_idx()) % len(frames)]
+            else:
+                img = frames[int(getattr(o, "frame_idx", 0) or 0) % len(frames)]
+        except Exception:
+            img = frames[0]
+    if img is None:
+        return None, None
+    try:
+        img = img.convert_alpha()
+    except Exception:
+        try:
+            img = img.copy()
+        except Exception:
+            return None, None
+    try:
+        z = float(getattr(o, "entity_def_zoom", 1.0) or 1.0)
+    except Exception:
+        z = 1.0
+    if abs(z - 1.0) > 1e-4:
+        try:
+            iw0, ih0 = img.get_size()
+            nw = max(1, int(round(iw0 * z)))
+            nh = max(1, int(round(ih0 * z)))
+            img = pygame.transform.scale(img, (nw, nh))
+        except Exception:
+            pass
+    iw, ih = img.get_size()
+    try:
+        px = int(round(float(o.pos[0])))
+        py = int(round(float(o.pos[1]) - float(getattr(o, "height", 0) or 0)))
+    except Exception:
+        px, py = 0, 0
+    left = int(left_edge_bottom_center_x(px, iw))
+    top = int(py - ih)
+    return img, pygame.Rect(left, top, iw, ih)
+
+
+def _merge_selected_objects_to_png(selected_nodes, *, name, category, obj_type, layer, replace, objs):
+    """선택 오브젝트들을 월드 배치 그대로 합성해 assets/images/object/{name}.png 로 저장."""
+    safe = _safe_object_asset_name(name)
+    if not safe:
+        return None, "이름을 입력하세요."
+    picked = [o for o in (selected_nodes or []) if o in (objs or [])]
+    if len(picked) < 1:
+        return None, "오브젝트를 1개 이상 선택하세요. NPC는 합성할 수 없습니다."
+    if len(picked) != len(selected_nodes or []):
+        return None, "선택에 NPC가 섞여 있습니다. 오브젝트만 선택하세요."
+
+    entries = []
+    bounds = None
+    for o in picked:
+        img, rect = _editor_merge_obj_image_rect(o)
+        if img is None or rect is None or rect.w <= 0 or rect.h <= 0:
+            continue
+        entries.append((o, img, rect))
+        bounds = rect.copy() if bounds is None else bounds.union(rect)
+    if not entries or bounds is None:
+        return None, "합성할 이미지가 없습니다."
+
+    out = pygame.Surface((max(1, bounds.w), max(1, bounds.h)), pygame.SRCALPHA)
+    out.fill((0, 0, 0, 0))
+    entries.sort(key=lambda it: (int(getattr(it[0], "layer", 0) or 0), float(it[0].pos[1])))
+    for _o, img, rect in entries:
+        out.blit(img, (rect.x - bounds.x, rect.y - bounds.y))
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    rel_path = f"images/object/{safe}.png"
+    out_path = os.path.join(base_dir, "assets", "images", "object", f"{safe}.png")
+    try:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        pygame.image.save(out, out_path)
+    except Exception as ex:
+        return None, f"PNG 저장 실패: {ex}"
+
+    try:
+        from entity_defs import load_object_defs, reload_entity_defs, save_object_defs
+
+        defs = load_object_defs()
+        row = {
+            "path": rel_path,
+            "is_holdable": False,
+            "collision": False,
+            "can_hide_player": False,
+            "layer": int(float(layer or 0)),
+            "category": str(category or "건축물류").strip() or "건축물류",
+        }
+        typ = str(obj_type or "").strip()
+        if typ:
+            row["type"] = typ
+        defs[safe] = row
+        save_object_defs(defs)
+        reload_entity_defs()
+    except Exception as ex:
+        return None, f"object_defs 저장 실패: {ex}"
+
+    new_node = None
+    if replace:
+        for o in list(picked):
+            if o in objs:
+                objs.remove(o)
+        try:
+            new_node = FieldItem(safe, bounds.x + bounds.w * 0.5, bounds.y + bounds.h)
+            objs.append(new_node)
+        except Exception:
+            new_node = None
+    return {"name": safe, "path": out_path, "node": new_node}, None
+
+
 def _append_export_log(line: str, export_dir: str = "exports"):
     """터미널 출력이 안 보이는 환경에서도 원인 추적용 로그 파일."""
     try:
@@ -2326,6 +2869,8 @@ def _editor_wants_text_input(
     obj_height_active,
     obj_sprite_tilt_active,
     obj_layer_active,
+    baseball_settings_active=False,
+    baseball_zone_field_active=False,
 ):
     return bool(
         (show_event_config and active_field)
@@ -2336,9 +2881,12 @@ def _editor_wants_text_input(
         or (char_inst_modal.show and char_inst_modal.active_field)
         or (obj_def_modal.show and obj_def_modal.active_field)
         or (obj_inst_modal.show and obj_inst_modal.active_field)
+        or (presence_zone_modal.show and presence_zone_modal.active_field)
         or obj_height_active
         or obj_sprite_tilt_active
         or obj_layer_active
+        or baseball_settings_active
+        or baseball_zone_field_active
     )
 
 
@@ -2990,6 +3538,30 @@ def _editor_step_list_summary(index, step):
         if v is not None and str(v).strip() != "":
             parts.append(f"{v}s")
             _tip("val", f"{v}s")
+    elif st == "OVERLAY_UI":
+        act = (step.get("action") or "show").strip().lower()
+        parts.append(act)
+        oid = (step.get("overlay_id") or "").strip()
+        if oid:
+            parts.append(f"#{oid}")
+        dl = step.get("delay", step.get("delay_sec"))
+        if dl is not None and str(dl).strip() != "":
+            try:
+                if float(dl) > 0.0:
+                    parts.append(f"after {dl}s")
+            except (TypeError, ValueError):
+                pass
+        if act == "show":
+            ho = step.get("hold", step.get("hold_sec"))
+            if ho is not None and str(ho).strip() != "" and not step.get("hold_forever"):
+                parts.append(f"hold {ho}s")
+            tx = (step.get("text") or "").strip()
+            if tx:
+                parts.append(tx[:12] + ("…" if len(tx) > 12 else ""))
+        _tip("action", act)
+        _tip("overlay_id", oid)
+        _tip("delay", dl)
+        _tip("hold", step.get("hold"))
     elif st == "CAMERA":
         mode = (step.get("mode") or "follow_player").strip()
         parts.append(mode)
@@ -3026,9 +3598,54 @@ def _editor_step_list_summary(index, step):
         if v is not None and str(v).strip() != "":
             parts.append(f"{v}s")
         _tip("val", v)
-    elif st == "FX":
-        parts.append((step.get("kind") or step.get("name") or "fx").strip())
+    elif st in ("FX", "SCREEN_FX"):
+        k = _editor_screen_fx_kind_from_step(step, st)
+        parts.append(k)
+        if k == "cloud":
+            d = (step.get("dir") or "").strip()
+            if d:
+                parts.append(d)
+            _tip("dir", step.get("dir"))
+        elif k == "flash":
+            md = (step.get("mode") or "").strip()
+            if md:
+                parts.append(md)
+            _tip("mode", md)
+            _tip("color", step.get("color"))
+            _tip("alpha", step.get("alpha"))
+            _tip("cycle_sec", step.get("cycle_sec"))
+        elif k == "shake":
+            _tip("amp_px", step.get("amp_px"))
+            _tip("freq_hz", step.get("freq_hz"))
+        elif k == "rain":
+            _tip("density", step.get("density"))
+            _tip("speed", step.get("speed"))
+        elif k == "vignette":
+            _tip("strength", step.get("strength"))
+            _tip("size", step.get("size"))
+        elif k == "tone":
+            pr = (step.get("preset") or "").strip()
+            if pr:
+                parts.append(pr)
+            _tip("preset", step.get("preset"))
+            _tip("strength", step.get("strength"))
         _tip("on", step.get("on"))
+        _tip("kind", k)
+    elif st == "ENTITY_FX":
+        tg = (step.get("target") or "").strip()
+        if tg:
+            parts.append(tg)
+        md = (step.get("mode") or "").strip()
+        if md:
+            parts.append(md)
+        _tip("target", tg)
+        _tip("mode", md)
+        _tip("color", step.get("color"))
+        _tip("alpha", step.get("alpha"))
+        _tip("cycle_sec", step.get("cycle_sec"))
+        _tip("zoom", step.get("zoom"))
+        _tip("persist", step.get("persist"))
+        _tip("action", step.get("action"))
     elif st == "CONDITION":
         c = (step.get("condition") or step.get("expr") or "").strip()
         if not c and step.get("var"):
@@ -3275,7 +3892,11 @@ def editor_main():
     sidebar_right_sb_drag = False
     LINE_H = EDITOR_LINE_H
     
-    edit_mode = "MAP"  # "MAP" | "EVENT" | "FLOW"
+    edit_mode = "MAP"  # "MAP" | "EVENT" | "FLOW" | "BASEBALL"
+    baseball_ed = bb_ed.new_state()
+    bb_placed_pick_node = None
+    bb_placed_pick_ms = 0
+    reload_entity_defs()
 
     # --- FLOW 모드 (맵 캐릭터/오브젝트 ↔ 이벤트 연결) ---
     flow_entity_entries = []
@@ -3401,9 +4022,14 @@ def editor_main():
     bgzone_drag_end = None
     reopen_bgzone_config_after_area = False
 
-    def _on_char_def_saved(char_name):
+    # --- MAP: 체류 박스(presence_zones) — 플레이어 체류 시 상태 오버레이 ---
+    is_selecting_presence_rect = False
+    presence_drag_start = None
+    presence_drag_end = None
+    reopen_presence_config_after_area = False
+
+    def _rebuild_asset_categories():
         nonlocal categories, cat_list
-        _flow_refresh_entity_list()
         categories = {}
         for name, info in OBJ_ASSETS.items():
             cat_name = info.get("category", "ETC (기타)")
@@ -3412,6 +4038,10 @@ def editor_main():
             categories[cat_name].append(name)
         categories["CHAR (NPC)"] = list(CHAR_ASSETS.keys())
         cat_list = sorted(list(categories.keys()))
+
+    def _on_char_def_saved(char_name):
+        _flow_refresh_entity_list()
+        _rebuild_asset_categories()
         for n in npcs:
             if getattr(n, "name", None) == char_name:
                 from char_behavior import attach_npc_from_entry, npc_entry_from_instance
@@ -3435,6 +4065,11 @@ def editor_main():
         _flow_refresh_entity_list()
 
     def _editor_char_modal_ctx():
+        ent_names = set()
+        for n in npcs:
+            ent_names.add(n.name)
+        for o in objs:
+            ent_names.add(o.name)
         return {
             "screen_w": SCREEN_W,
             "screen_h": SCREEN_H,
@@ -3446,7 +4081,27 @@ def editor_main():
             "on_inst_saved": _on_inst_saved_flow,
             "event_ids": _editor_collect_event_id_options(all_events, map_id),
             "map_id": map_id,
+            "map_entity_names": sorted(ent_names),
+            "on_presence_area_pick": _on_presence_area_pick,
+            "on_presence_zone_saved": _on_presence_zone_saved,
         }
+
+    def _on_presence_area_pick():
+        nonlocal is_selecting_presence_rect, presence_drag_start, presence_drag_end, reopen_presence_config_after_area
+        is_selecting_presence_rect = True
+        presence_drag_start = None
+        presence_drag_end = None
+        reopen_presence_config_after_area = True
+        presence_zone_modal.show = False
+
+    def _on_presence_zone_saved(zone_dict, edit_idx):
+        zones = flow.world_data.setdefault(map_id, {}).setdefault("presence_zones", [])
+        if edit_idx is not None and 0 <= int(edit_idx) < len(zones):
+            zones[int(edit_idx)] = zone_dict
+        else:
+            zones.append(zone_dict)
+        flow.save_editor_data(map_id, objs, npcs)
+        _flow_refresh_entity_list()
 
     # --- STEP 설정(추가/삽입/수정) 모달 ---
     show_step_config = False
@@ -3487,7 +4142,8 @@ def editor_main():
         "LOOP_END",
         "TILT",
         "SHEAR",
-        "FX",
+        "ENTITY_FX",
+        "SCREEN_FX",
         "OVERLAY_UI",
         # 이벤트 중도 스탑 입력(탈출) 구간 제어
         "EVT_STOP_BEGIN",
@@ -3657,6 +4313,7 @@ def editor_main():
     cur_idx = 0
     # 초기 맵 로드
     map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": map_list[cur_idx]})
+    bb_ed.on_map_switch(baseball_ed, flow, map_id, objs)
     _flow_refresh_entity_list()
 
     sidebar_w = EDITOR_SIDEBAR_W
@@ -3713,6 +4370,16 @@ def editor_main():
     selected_asset, selected_node, is_panning = None, None, False
     selected_nodes = []  # 다중 선택(동일 인스턴스는 objs/npcs 안에서만)
     show_multi_delete_confirm = False
+    show_obj_merge_modal = False
+    obj_merge_fields = {
+        "name": "",
+        "category": "건축물류",
+        "type": "item",
+        "layer": "0",
+        "replace": "false",
+    }
+    obj_merge_active_field = "name"
+    obj_merge_msg = ""
     box_select_start = None  # (wx, wy) 월드
     box_select_current = None
     multi_drag_leader = None
@@ -3735,7 +4402,7 @@ def editor_main():
     sidebar_list_tooltip = None
 
     # --- MAP 서브툴: OBJECTS / ZONES ---
-    map_tool = "OBJECTS"  # "OBJECTS" | "ZONES" | "BGZONES"
+    map_tool = "OBJECTS"  # "OBJECTS" | "ZONES" | "BGZONES" | "PRESENCE"
     selected_zone_idx = None
     is_zone_dragging = False
     zone_drag_offset = (0, 0)  # (mouse_x - rect_x, mouse_y - rect_y) in world coords
@@ -3743,6 +4410,10 @@ def editor_main():
     selected_bgzone_idx = None
     is_bgzone_dragging = False
     bgzone_drag_offset = (0, 0)
+
+    selected_presence_idx = None
+    is_presence_dragging = False
+    presence_drag_offset = (0, 0)
 
 
 
@@ -3793,12 +4464,14 @@ def editor_main():
         last_export_msg_t = ts0
 
     running = True
+    baseball_bb_ui = {}
     while running:
         mx, my = pygame.mouse.get_pos()
         right_panel_w = 0 if edit_mode == "FLOW" else right_sidebar_w
         map_area_w = SCREEN_W - sidebar_w - right_panel_w
         sidebar_list_tooltip = None
         export_map_btn = pygame.Rect(int(sidebar_w + map_area_w - 80), 10, 72, 38)
+        merge_obj_btn = pygame.Rect(export_map_btn.x - 84, 10, 76, 38)
         pygame.event.pump()
         _editor_sync_text_input(
             _editor_wants_text_input(
@@ -3813,6 +4486,16 @@ def editor_main():
                 obj_height_active=obj_height_active,
                 obj_sprite_tilt_active=obj_sprite_tilt_active,
                 obj_layer_active=obj_layer_active,
+                baseball_settings_active=bool(
+                    edit_mode == "BASEBALL"
+                    and baseball_ed.get("show_settings")
+                    and baseball_ed.get("_edit_field")
+                ),
+                baseball_zone_field_active=bool(
+                    edit_mode == "BASEBALL"
+                    and baseball_ed.get("show_zone_modal")
+                    and baseball_ed.get("_edit_zone_field")
+                ),
             )
         )
         # 정수 배율(2x 등)에 가까우면 스냅: 배경·오브젝트 int(w*z)가 동일 배율이 되도록 (런타임 Camera와 동일)
@@ -3874,6 +4557,7 @@ def editor_main():
         # [수정] 쉬프트 키를 누르고 있으면 자석(Grid Snap) 해제
         keys = pygame.key.get_pressed()
         is_shift_pressed = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+        is_alt_pressed = keys[pygame.K_LALT] or keys[pygame.K_RALT]
 
         # [F7] 맵 PNG 내보내기(복원): KEYDOWN이 안 들어오는 환경 대비 폴링(에지 감지). SDL2는 KSCAN_F7 권장.
         export_hot_down = _editor_export_hotkey_down(keys)
@@ -3924,6 +4608,43 @@ def editor_main():
                 except Exception:
                     debug_last_key = str(getattr(event, "key", ""))
                 debug_last_key_t = pygame.time.get_ticks()
+
+            if bb_ed.handle_keydown(baseball_ed, event, flow, map_id):
+                continue
+
+            if event.type == pygame.TEXTINPUT:
+                if edit_mode == "BASEBALL" and bb_ed.handle_textinput(
+                    baseball_ed, event.text, flow, map_id
+                ):
+                    continue
+
+            if baseball_ed.get("show_settings"):
+                if bb_ed.handle_settings_modal_event(
+                    baseball_ed, event, SCREEN_W, SCREEN_H, mx, my
+                ):
+                    continue
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if baseball_ed.get("show_settings"):
+                    ui = baseball_bb_ui.get("settings") or bb_ed.layout_settings_modal_ui(
+                        baseball_ed, SCREEN_W, SCREEN_H
+                    )
+                    if ui:
+                        baseball_bb_ui["settings"] = ui
+                        bb_ed.handle_settings_modal_click(
+                            baseball_ed, mx, my, ui, flow, map_id
+                        )
+                    continue
+                if baseball_ed.get("show_zone_modal"):
+                    ui = baseball_bb_ui.get("zone") or bb_ed.layout_zone_modal_ui(
+                        baseball_ed, SCREEN_W, SCREEN_H
+                    )
+                    if ui:
+                        baseball_bb_ui["zone"] = ui
+                        bb_ed.handle_zone_modal_click(
+                            baseball_ed, mx, my, ui, objs
+                        )
+                    continue
 
             # --- MAP: event zone 영역 드래그 지정 ---
             if is_selecting_zone_rect:
@@ -3982,6 +4703,35 @@ def editor_main():
                     if reopen_bgzone_config_after_area:
                         show_bgzone_config = True
                         reopen_bgzone_config_after_area = False
+                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+                    continue
+
+            # --- MAP: presence zone 영역 드래그 지정 ---
+            if is_selecting_presence_rect:
+                in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
+                    _pwx, _pwy = get_real_pos(mx, my)
+                    _psx, _psy = editor_snap_pick_world_xy(_pwx, _pwy, GRID_SIZE, is_shift_pressed)
+                    presence_drag_start = (_psx, _psy)
+                    presence_drag_end = presence_drag_start
+                elif event.type == pygame.MOUSEMOTION and presence_drag_start:
+                    _pwx, _pwy = get_real_pos(mx, my)
+                    _psx, _psy = editor_snap_pick_world_xy(_pwx, _pwy, GRID_SIZE, is_shift_pressed)
+                    presence_drag_end = (_psx, _psy)
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and presence_drag_start and presence_drag_end:
+                    x1, y1 = presence_drag_start
+                    x2, y2 = presence_drag_end
+                    zx = int(min(x1, x2))
+                    zy = int(min(y1, y2))
+                    zw = int(abs(x2 - x1))
+                    zh = int(abs(y2 - y1))
+                    presence_zone_modal.set_rect([zx, zy, zw, zh])
+                    is_selecting_presence_rect = False
+                    presence_drag_start = None
+                    presence_drag_end = None
+                    if reopen_presence_config_after_area:
+                        presence_zone_modal.show = True
+                        reopen_presence_config_after_area = False
                 if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
                     continue
 
@@ -4081,6 +4831,102 @@ def editor_main():
                 if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION) and in_map_area:
                     continue
 
+            if show_obj_merge_modal:
+                mw, mh = 520, 282
+                mr = pygame.Rect(SCREEN_W // 2 - mw // 2, SCREEN_H // 2 - mh // 2, mw, mh)
+                save_btn = pygame.Rect(mr.centerx - 112, mr.bottom - 50, 104, 34)
+                cancel_btn = pygame.Rect(mr.centerx + 8, mr.bottom - 50, 104, 34)
+                field_rects = {
+                    "name": pygame.Rect(mr.x + 166, mr.y + 62, 300, 28),
+                    "category": pygame.Rect(mr.x + 166, mr.y + 98, 300, 28),
+                    "type": pygame.Rect(mr.x + 166, mr.y + 134, 300, 28),
+                    "layer": pygame.Rect(mr.x + 166, mr.y + 170, 120, 28),
+                    "replace": pygame.Rect(mr.x + 166, mr.y + 206, 22, 22),
+                }
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        show_obj_merge_modal = False
+                        continue
+                    if event.key == pygame.K_RETURN:
+                        res, err = _merge_selected_objects_to_png(
+                            selected_nodes,
+                            name=obj_merge_fields.get("name"),
+                            category=obj_merge_fields.get("category"),
+                            obj_type=obj_merge_fields.get("type"),
+                            layer=obj_merge_fields.get("layer"),
+                            replace=str(obj_merge_fields.get("replace") or "").lower() in ("1", "true", "yes", "on"),
+                            objs=objs,
+                        )
+                        if err:
+                            obj_merge_msg = err
+                        else:
+                            _rebuild_asset_categories()
+                            _flow_refresh_entity_list()
+                            selected_asset = (res or {}).get("name")
+                            if (res or {}).get("node") is not None:
+                                selected_nodes = [res["node"]]
+                                selected_node = res["node"]
+                                flow.save_editor_data(map_id, objs, npcs)
+                            last_export_msg = f"MERGE OK: {selected_asset}"
+                            last_export_msg_t = pygame.time.get_ticks()
+                            show_obj_merge_modal = False
+                        continue
+                    if obj_merge_active_field in ("name", "category", "type", "layer"):
+                        cur = str(obj_merge_fields.get(obj_merge_active_field) or "")
+                        if event.key == pygame.K_BACKSPACE:
+                            obj_merge_fields[obj_merge_active_field] = cur[:-1]
+                        elif event.key == pygame.K_DELETE:
+                            obj_merge_fields[obj_merge_active_field] = ""
+                        else:
+                            ch = getattr(event, "unicode", "")
+                            if ch and ch.isprintable():
+                                obj_merge_fields[obj_merge_active_field] = cur + ch
+                        continue
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if save_btn.collidepoint(event.pos):
+                        res, err = _merge_selected_objects_to_png(
+                            selected_nodes,
+                            name=obj_merge_fields.get("name"),
+                            category=obj_merge_fields.get("category"),
+                            obj_type=obj_merge_fields.get("type"),
+                            layer=obj_merge_fields.get("layer"),
+                            replace=str(obj_merge_fields.get("replace") or "").lower() in ("1", "true", "yes", "on"),
+                            objs=objs,
+                        )
+                        if err:
+                            obj_merge_msg = err
+                        else:
+                            _rebuild_asset_categories()
+                            _flow_refresh_entity_list()
+                            selected_asset = (res or {}).get("name")
+                            if (res or {}).get("node") is not None:
+                                selected_nodes = [res["node"]]
+                                selected_node = res["node"]
+                                flow.save_editor_data(map_id, objs, npcs)
+                            last_export_msg = f"MERGE OK: {selected_asset}"
+                            last_export_msg_t = pygame.time.get_ticks()
+                            show_obj_merge_modal = False
+                        continue
+                    if cancel_btn.collidepoint(event.pos) or not mr.collidepoint(event.pos):
+                        show_obj_merge_modal = False
+                        continue
+                    hit_field = None
+                    for k, r in field_rects.items():
+                        if r.collidepoint(event.pos):
+                            hit_field = k
+                            break
+                    if hit_field == "replace":
+                        obj_merge_fields["replace"] = (
+                            "false"
+                            if str(obj_merge_fields.get("replace") or "").lower() in ("1", "true", "yes", "on")
+                            else "true"
+                        )
+                    elif hit_field:
+                        obj_merge_active_field = hit_field
+                    continue
+                if event.type in (pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.MOUSEWHEEL):
+                    continue
+
             if show_multi_delete_confirm:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     show_multi_delete_confirm = False
@@ -4092,11 +4938,16 @@ def editor_main():
                     yes_btn = pygame.Rect(confirm_rect.x + 28, confirm_rect.bottom - 48, 160, 36)
                     no_btn = pygame.Rect(confirm_rect.right - 188, confirm_rect.bottom - 48, 160, 36)
                     if yes_btn.collidepoint(ex, ey):
-                        for n in list(selected_nodes):
+                        removed = list(selected_nodes)
+                        for n in removed:
                             if n in objs:
                                 objs.remove(n)
                             elif n in npcs:
                                 npcs.remove(n)
+                        if edit_mode == "BASEBALL":
+                            zn = baseball_ed.get("zone_edit_node")
+                            if zn in removed:
+                                baseball_ed["zone_edit_node"] = None
                         obj_sprite_tilt_active = False
                         obj_height_active = False
                         obj_layer_active = False
@@ -4214,6 +5065,11 @@ def editor_main():
                     bgzone_fields[active_bgzone_field] = (bgzone_fields.get(active_bgzone_field, "") or "") + (
                         event.text or ""
                     )
+                    continue
+                if presence_zone_modal.show and presence_zone_modal.active_field:
+                    presence_zone_modal.fields[presence_zone_modal.active_field] = (
+                        presence_zone_modal.fields.get(presence_zone_modal.active_field, "") or ""
+                    ) + (event.text or "")
                     continue
                 if show_event_config and active_field:
                     input_fields[active_field] = (input_fields.get(active_field, "") or "") + (
@@ -4462,6 +5318,9 @@ def editor_main():
                         entry.pop("escape", None)
 
                         all_events[cat][eid] = entry
+                        current_event_id = eid
+                        current_event_type = cat
+                        config_target_id = eid
                         show_event_config = False
                         flow.save_events(all_events) # 즉시 파일 저장
                         _flow_refresh_entity_list()
@@ -4494,6 +5353,9 @@ def editor_main():
                     continue
             if obj_inst_modal.show:
                 if obj_inst_modal.handle_event(event, _editor_char_modal_ctx()):
+                    continue
+            if presence_zone_modal.show:
+                if presence_zone_modal.handle_event(event, _editor_char_modal_ctx()):
                     continue
 
             if show_zone_config:
@@ -4958,7 +5820,7 @@ def editor_main():
                 canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
                 delete_btn = pygame.Rect(panel_rect.x + 20, panel_rect.bottom - 50, 100, 35)
                 t_cur = (step_fields.get("type") or "MOVE").upper()
-                rows_layout = _step_field_rows(step_fields.get("type", "MOVE"))
+                rows_layout = _step_field_rows(step_fields.get("type", "MOVE"), step_fields)
                 tgt_item_h = 22
 
                 if event.type == pygame.MOUSEWHEEL:
@@ -4989,7 +5851,9 @@ def editor_main():
                             step_type_scroll = max(0, min(max_sc, step_type_scroll + delta))
 
                     if (not step_target_dropdown_open) and (not step_type_dropdown_open):
-                        body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(panel_rect, rows_layout)
+                        body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(
+                            panel_rect, rows_layout, body_top=_step_config_body_top(panel_rect, step_fields)
+                        )
                         if max_bsc > 0 and _editor_rects_contain_point(px, py, body_r, sb_r, panel_rect):
                             step_body_scroll = max(0, min(max_bsc, step_body_scroll + delta))
 
@@ -5033,7 +5897,10 @@ def editor_main():
                             pick_i = int(rel // tgt_item_h)
                             if 0 <= pick_i < len(step_target_options):
                                 ky = step_target_field_key or "target"
-                                step_fields[ky] = step_target_options[pick_i]
+                                val = step_target_options[pick_i]
+                                if ky in ("color", "efx_color", "sfx_color", "sfx_rain_color", "sfx_vignette_color", "sfx_tone_color"):
+                                    val = _editor_color_palette_option_to_rgb(val)
+                                step_fields[ky] = val
                             step_target_dropdown_open = False
                             continue
                         step_target_dropdown_open = False
@@ -5083,6 +5950,14 @@ def editor_main():
                         step_target_dropdown_open = False
                         continue
 
+                    if t_cur == "SCREEN_FX":
+                        hit_tab = _screen_fx_tab_at_pos(panel_rect, event.pos)
+                        if hit_tab:
+                            step_fields["sfx_kind"] = hit_tab
+                            step_body_scroll = 0
+                            step_target_dropdown_open = False
+                            continue
+
                     # Delete 버튼 (수정 모드에서만)
                     if step_edit_index is not None and delete_btn.collidepoint(event.pos):
                         show_step_delete_confirm = True
@@ -5091,7 +5966,10 @@ def editor_main():
                         continue
 
                     scroll_off = step_body_scroll
-                    body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(panel_rect, rows_layout)
+                    body_top_px = _step_config_body_top(panel_rect, step_fields)
+                    body_r, sb_r, max_bsc, ch_ov = _step_overlay_body_geometry(
+                        panel_rect, rows_layout, body_top=body_top_px
+                    )
                     step_body_scroll = min(step_body_scroll, max_bsc)
                     if max_bsc > 0:
                         ui_sb = _step_overlay_scrollbar_layout(sb_r, body_r.height, ch_ov, step_body_scroll)
@@ -5120,7 +5998,7 @@ def editor_main():
                         else:
                             before_ix = len(steps_ref)
                     for _label, key in rows_layout:
-                        row_top = panel_rect.y + 120 + cy - scroll_off
+                        row_top = body_top_px + cy - scroll_off
                         if key.startswith("_hint"):
                             cy += STEP_BODY_ROW_H
                             continue
@@ -5207,6 +6085,28 @@ def editor_main():
                                 break
                             if r.collidepoint(event.pos):
                                 active_step_field = "anim"
+                        elif _step_row_color_palette(t_cur, key):
+                            r = pygame.Rect(panel_rect.x + 180, row_top - 5, 168, 30)
+                            pal_btn = pygame.Rect(panel_rect.x + 180 + 172, row_top - 5, 58, 30)
+                            if pal_btn.collidepoint(event.pos):
+                                step_target_options = [
+                                    f"{name}|{rgb}" for name, rgb in _editor_color_palette_entries()
+                                ]
+                                step_target_scroll = 0
+                                step_target_dropdown_open = True
+                                step_target_field_key = key
+                                n_opt = len(step_target_options)
+                                dd_h = min(220, max(tgt_item_h, n_opt * tgt_item_h))
+                                step_target_dropdown_rect = pygame.Rect(
+                                    panel_rect.x + 180,
+                                    row_top + 28,
+                                    280,
+                                    dd_h,
+                                )
+                                step_field_click_done = True
+                                break
+                            if r.collidepoint(event.pos):
+                                active_step_field = key
                         elif _step_row_entity_pick(t_cur, key) and current_event_id and current_event_type:
                             r = pygame.Rect(panel_rect.x + 180, row_top - 5, 220, 30)
                             list_btn = pygame.Rect(panel_rect.x + 180 + 225, row_top - 5, 52, 30)
@@ -5535,6 +6435,14 @@ def editor_main():
                                 to_k = (step_fields.get("to") or "").strip()
                                 if to_k:
                                     new_step["to"] = to_k
+                                fd = (step_fields.get("fade") or "").strip()
+                                if fd:
+                                    try:
+                                        fv = float(fd)
+                                        if fv > 0:
+                                            new_step["fade"] = fv
+                                    except ValueError:
+                                        pass
                             elif t == "CONDITION":
                                 cond = (step_fields.get("condition") or "").strip()
                                 var = (step_fields.get("var") or "").strip()
@@ -5592,35 +6500,128 @@ def editor_main():
                                 built = build_step_from_editor_fields(step_fields, t)
                                 if built:
                                     new_step = built
-                            elif t == "FX":
-                                if step_fields.get("fx_kind"):
-                                    new_step["kind"] = str(step_fields.get("fx_kind"))
+                            elif t == "SCREEN_FX":
+                                sk = _screen_fx_tab_kind(step_fields)
+                                new_step["kind"] = sk
                                 bo = parse_bool(step_fields.get("fx_on"))
                                 new_step["on"] = True if bo is None else bo
-                                if step_fields.get("fx_dir"):
-                                    new_step["dir"] = str(step_fields.get("fx_dir"))
-                                sp = parse_float(step_fields.get("fx_speed"), None)
-                                if sp is not None:
-                                    new_step["speed"] = float(sp)
-                                fr = parse_float(step_fields.get("fx_freq"), None)
-                                if fr is not None:
-                                    new_step["freq"] = float(fr)
-                                gc = parse_float(step_fields.get("fx_grid_cell"), None)
-                                if gc is not None:
-                                    new_step["grid_cell"] = float(gc)
-                                gj = parse_float(step_fields.get("fx_grid_jitter"), None)
-                                if gj is not None:
-                                    new_step["grid_jitter"] = float(gj)
-                                gm = parse_float(step_fields.get("fx_grid_max"), None)
-                                if gm is not None:
-                                    new_step["grid_max"] = int(gm)
+                                if sk == "cloud":
+                                    if step_fields.get("fx_dir"):
+                                        new_step["dir"] = str(step_fields.get("fx_dir"))
+                                    sp = parse_float(step_fields.get("fx_speed"), None)
+                                    if sp is not None:
+                                        new_step["speed"] = float(sp)
+                                    fr = parse_float(step_fields.get("fx_freq"), None)
+                                    if fr is not None:
+                                        new_step["freq"] = float(fr)
+                                    gc = parse_float(step_fields.get("fx_grid_cell"), None)
+                                    if gc is not None:
+                                        new_step["grid_cell"] = float(gc)
+                                    gj = parse_float(step_fields.get("fx_grid_jitter"), None)
+                                    if gj is not None:
+                                        new_step["grid_jitter"] = float(gj)
+                                    gm = parse_float(step_fields.get("fx_grid_max"), None)
+                                    if gm is not None:
+                                        new_step["grid_max"] = int(gm)
+                                elif sk == "flash":
+                                    sm = (step_fields.get("sfx_mode") or "pulse").strip().lower()
+                                    if sm:
+                                        new_step["mode"] = sm
+                                    sc = (step_fields.get("sfx_color") or "").strip()
+                                    if sc:
+                                        new_step["color"] = sc
+                                    al = parse_float(step_fields.get("sfx_alpha"), None)
+                                    if al is not None:
+                                        new_step["alpha"] = int(al)
+                                    cy = parse_float(step_fields.get("sfx_cycle_sec"), None)
+                                    if cy is not None:
+                                        new_step["cycle_sec"] = float(cy)
+                                elif sk == "shake":
+                                    ap = parse_float(step_fields.get("sfx_amp"), None)
+                                    if ap is not None:
+                                        new_step["amp_px"] = float(ap)
+                                    fq = parse_float(step_fields.get("sfx_freq"), None)
+                                    if fq is not None:
+                                        new_step["freq_hz"] = float(fq)
+                                elif sk == "rain":
+                                    dn = parse_float(step_fields.get("sfx_rain_density"), None)
+                                    if dn is not None:
+                                        new_step["density"] = float(dn)
+                                    sp = parse_float(step_fields.get("sfx_rain_speed"), None)
+                                    if sp is not None:
+                                        new_step["speed"] = float(sp)
+                                    ag = parse_float(step_fields.get("sfx_rain_angle"), None)
+                                    if ag is not None:
+                                        new_step["angle"] = float(ag)
+                                    dl = parse_float(step_fields.get("sfx_rain_len"), None)
+                                    if dl is not None:
+                                        new_step["drop_len"] = int(dl)
+                                    al = parse_float(step_fields.get("sfx_rain_alpha"), None)
+                                    if al is not None:
+                                        new_step["alpha"] = int(al)
+                                    rc = (step_fields.get("sfx_rain_color") or "").strip()
+                                    if rc:
+                                        new_step["color"] = rc
+                                elif sk == "vignette":
+                                    st = parse_float(step_fields.get("sfx_vignette_strength"), None)
+                                    if st is not None:
+                                        new_step["strength"] = float(st)
+                                    sz = parse_float(step_fields.get("sfx_vignette_size"), None)
+                                    if sz is not None:
+                                        new_step["size"] = float(sz)
+                                    sf = parse_float(step_fields.get("sfx_vignette_softness"), None)
+                                    if sf is not None:
+                                        new_step["softness"] = float(sf)
+                                    vc = (step_fields.get("sfx_vignette_color") or "").strip()
+                                    if vc:
+                                        new_step["color"] = vc
+                                elif sk == "tone":
+                                    tp = (step_fields.get("sfx_tone_preset") or "warm").strip().lower()
+                                    if tp:
+                                        new_step["preset"] = tp
+                                    ts = parse_float(step_fields.get("sfx_tone_strength"), None)
+                                    if ts is not None:
+                                        new_step["strength"] = float(ts)
+                                    tc = (step_fields.get("sfx_tone_color") or "").strip()
+                                    if tc:
+                                        new_step["color"] = tc
+                            elif t == "ENTITY_FX":
+                                tg = (step_fields.get("target") or "").strip()
+                                if tg:
+                                    new_step["target"] = tg
+                                em = (step_fields.get("efx_mode") or "pulse").strip().lower()
+                                if em:
+                                    new_step["mode"] = em
+                                ea = (step_fields.get("efx_action") or "start").strip().lower()
+                                if ea:
+                                    new_step["action"] = ea
+                                ec = (step_fields.get("efx_color") or "").strip()
+                                if ec:
+                                    new_step["color"] = ec
+                                al = parse_float(step_fields.get("efx_alpha"), None)
+                                if al is not None:
+                                    new_step["alpha"] = int(al)
+                                cy = parse_float(step_fields.get("efx_cycle_sec"), None)
+                                if cy is not None:
+                                    new_step["cycle_sec"] = float(cy)
+                                zm = parse_float(step_fields.get("efx_zoom"), None)
+                                if zm is not None:
+                                    new_step["zoom"] = float(zm)
+                                if parse_bool(step_fields.get("efx_persist")):
+                                    new_step["persist"] = True
                             elif t == "OVERLAY_UI":
                                 act = (step_fields.get("action") or "show").strip().lower()
                                 new_step["action"] = act
+                                dl = parse_float(step_fields.get("delay"), None)
+                                if dl is not None and float(dl) > 0.0:
+                                    new_step["delay"] = float(dl)
                                 if act == "remove":
                                     oid = (step_fields.get("overlay_id") or "").strip()
                                     if oid:
                                         new_step["overlay_id"] = oid
+                                    di = parse_float(step_fields.get("disappear"), None)
+                                    if di is not None:
+                                        new_step["disappear"] = float(di)
                                 else:
                                     new_step["content"] = (step_fields.get("content") or "text").strip().lower()
                                     if new_step["content"] == "image":
@@ -5736,8 +6737,9 @@ def editor_main():
                             step_target_scroll = sp
                     elif dd_drag_kind == "step_body":
                         panel_r = _step_settings_panel_rect(SCREEN_W, SCREEN_H, step_fields)
-                        rows_ov = _step_field_rows(step_fields.get("type", "MOVE"))
-                        b_r, s_r, _mx, ch0 = _step_overlay_body_geometry(panel_r, rows_ov)
+                        rows_ov = _step_field_rows(step_fields.get("type", "MOVE"), step_fields)
+                        b_top = _step_config_body_top(panel_r, step_fields)
+                        b_r, s_r, _mx, ch0 = _step_overlay_body_geometry(panel_r, rows_ov, body_top=b_top)
                         ui_b = _step_overlay_scrollbar_layout(s_r, b_r.height, ch0, step_body_scroll)
                         sp = _editor_scroll_px_from_sb_my(event.pos[1], ui_b)
                         if sp is not None:
@@ -5825,6 +6827,7 @@ def editor_main():
                             left_placed_collapsed,
                             flow_entity_entries=flow_entity_entries,
                             flow_placed_collapsed=flow_placed_collapsed,
+                            baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
                         )
                         scroll_y_left = _sidebar_scroll_clamp(
                             scroll_y_left + _wheel_dy, _lch, _lt, sidebar_list_bottom
@@ -5886,6 +6889,7 @@ def editor_main():
                             left_placed_collapsed,
                             flow_entity_entries=flow_entity_entries,
                             flow_placed_collapsed=flow_placed_collapsed,
+                            baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
                         )
                         scroll_y_left = _sidebar_scroll_clamp(scroll_y_left, _lch, _lt, sidebar_list_bottom)
                         _sb = _sidebar_sb_rect(0, sidebar_w, _lt, sidebar_list_bottom)
@@ -5949,19 +6953,18 @@ def editor_main():
                                         scroll_y_steps = _ns
                                 continue
 
-                # [1-1. 상단 모드 전환 바 클릭 — MAP / EVENT / FLOW]
+                # [1-1. 상단 모드 전환 바 클릭 — MAP / EVENT / FLOW / BASEBALL]
                 if event.button == 1 and 0 < my < TOP_BAR_H and 0 < mx < sidebar_w:
-                    band = max(1, TOP_BAR_H // 3)
-                    if my < band:
-                        edit_mode = "MAP"
-                    elif my < band * 2:
-                        edit_mode = "EVENT"
-                    else:
-                        edit_mode = "FLOW"
-                        flow_scroll_x = 0
-                        flow_scroll_y = 0
-                        scroll_y_left = 0
-                        _flow_refresh_entity_list()
+                    new_mode = bb_ed.mode_from_click(my, TOP_BAR_H)
+                    if new_mode:
+                        edit_mode = new_mode
+                        if edit_mode == "FLOW":
+                            flow_scroll_x = 0
+                            flow_scroll_y = 0
+                            scroll_y_left = 0
+                            _flow_refresh_entity_list()
+                        if edit_mode == "BASEBALL":
+                            baseball_ed["settings_fields"] = bb_ed.load_settings_fields(flow, map_id)
 
                 # [FLOW] 뒤로 가기·차트 노드 클릭 (좌측 변수 리스트는 아래 [2]에서 처리)
                 elif (
@@ -6043,11 +7046,38 @@ def editor_main():
                     if export_map_btn.collidepoint(mx, my):
                         trigger_map_png_export()
                         continue
+                    if merge_obj_btn.collidepoint(mx, my):
+                        only_objs = [o for o in selected_nodes if o in objs]
+                        if edit_mode == "MAP" and map_tool == "OBJECTS" and only_objs and len(only_objs) == len(selected_nodes):
+                            base_name = only_objs[0].name if len(only_objs) == 1 else f"merged_{len(only_objs)}"
+                            try:
+                                cat0 = str(OBJ_ASSETS.get(only_objs[0].name, {}).get("category") or "건축물류")
+                            except Exception:
+                                cat0 = "건축물류"
+                            try:
+                                layer0 = str(int(getattr(only_objs[0], "layer", 0) or 0))
+                            except Exception:
+                                layer0 = "0"
+                            obj_merge_fields = {
+                                "name": base_name,
+                                "category": cat0,
+                                "type": "item",
+                                "layer": layer0,
+                                "replace": "false",
+                            }
+                            obj_merge_active_field = "name"
+                            obj_merge_msg = ""
+                            show_obj_merge_modal = True
+                        else:
+                            last_export_msg = "MERGE: 오브젝트만 선택하세요"
+                            last_export_msg_t = pygame.time.get_ticks()
+                        continue
                     map_idx = (mx - sidebar_w - 10) // 112
                     if 0 <= map_idx < len(map_list):
                         cur_idx = map_idx
                         map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": map_list[cur_idx]})
                         scaled_cache.clear()
+                        bb_ed.on_map_switch(baseball_ed, flow, map_id, objs)
                         # 맵 변경 시에도 작업창에 꽉 차도록 줌 재계산 + 카메라 중앙
                         bg_w, bg_h = bg.get_width(), bg.get_height()
                         map_area_w = SCREEN_W - sidebar_w - right_sidebar_w
@@ -6061,18 +7091,45 @@ def editor_main():
                         _flow_refresh_entity_list()
                 # [2. 좌측 리스트 클릭] (왼쪽 버튼만 — 휠은 위에서 스크롤 전용 처리)
                 elif event.button == 1 and mx < sidebar_w:
+                    if edit_mode == "BASEBALL" and my > TOP_BAR_H:
+                        bb_tops = bb_ed.left_list_tops(
+                            TOP_BAR_H, str(baseball_ed.get("tool") or "ZONES")
+                        )
+                        preset = bb_ed.handle_left_click(
+                            baseball_ed,
+                            mx,
+                            my,
+                            bb_tops,
+                            sidebar_w,
+                            objs,
+                            flow,
+                            map_id,
+                            list_scroll=scroll_y_left,
+                        )
+                        if preset and preset != "settings":
+                            selected_asset = preset
+                            selected_nodes.clear()
+                            selected_node = None
+                        list_sel = baseball_ed.pop("list_select_node", None)
+                        if list_sel is not None:
+                            selected_nodes = [list_sel]
+                            selected_node = list_sel
+                        continue
                     if edit_mode == "MAP":
-                        # MAP 모드: OBJECTS / ZONES / BGZONES 토글
-                        tool_w = (sidebar_w - 32) // 3
+                        # MAP 모드: OBJECTS / ZONES / BGZONES / PRESENCE 토글
+                        tool_w = max(40, (sidebar_w - 40) // 4)
                         tool_btn_obj = pygame.Rect(8, left_list_tops["map_tools"], tool_w, 28)
-                        tool_btn_zone = pygame.Rect(tool_btn_obj.right + 8, left_list_tops["map_tools"], tool_w, 28)
-                        tool_btn_bgz = pygame.Rect(tool_btn_zone.right + 8, left_list_tops["map_tools"], tool_w, 28)
+                        tool_btn_zone = pygame.Rect(tool_btn_obj.right + 4, left_list_tops["map_tools"], tool_w, 28)
+                        tool_btn_bgz = pygame.Rect(tool_btn_zone.right + 4, left_list_tops["map_tools"], tool_w, 28)
+                        tool_btn_pres = pygame.Rect(tool_btn_bgz.right + 4, left_list_tops["map_tools"], tool_w, 28)
                         if tool_btn_obj.collidepoint(mx, my):
                             map_tool = "OBJECTS"
                             selected_zone_idx = None
                             is_zone_dragging = False
                             selected_bgzone_idx = None
                             is_bgzone_dragging = False
+                            selected_presence_idx = None
+                            is_presence_dragging = False
                             box_select_start = None
                             box_select_current = None
                             continue
@@ -6081,6 +7138,8 @@ def editor_main():
                             selected_node = None
                             selected_asset = None
                             selected_nodes.clear()
+                            selected_presence_idx = None
+                            is_presence_dragging = False
                             box_select_start = None
                             box_select_current = None
                             continue
@@ -6091,6 +7150,20 @@ def editor_main():
                             selected_nodes.clear()
                             selected_zone_idx = None
                             is_zone_dragging = False
+                            selected_presence_idx = None
+                            is_presence_dragging = False
+                            box_select_start = None
+                            box_select_current = None
+                            continue
+                        if tool_btn_pres.collidepoint(mx, my):
+                            map_tool = "PRESENCE"
+                            selected_node = None
+                            selected_asset = None
+                            selected_nodes.clear()
+                            selected_zone_idx = None
+                            is_zone_dragging = False
+                            selected_bgzone_idx = None
+                            is_bgzone_dragging = False
                             box_select_start = None
                             box_select_current = None
                             continue
@@ -6132,6 +7205,12 @@ def editor_main():
                                 "sort_policy": "none",
                                 "cull_margin_px": "160",
                             }
+                            continue
+
+                        # MAP 모드: Add Presence Box 버튼 클릭
+                        add_presence_btn = pygame.Rect(8, left_list_tops["map_presence_btn"], sidebar_w - 16, 28)
+                        if map_tool == "PRESENCE" and add_presence_btn.collidepoint(mx, my):
+                            presence_zone_modal.open_new()
                             continue
 
                         # MAP / ZONES: 현재 맵의 이벤트 박스 목록 클릭/뷰
@@ -6190,6 +7269,25 @@ def editor_main():
                                 elif row_rect.collidepoint(mx, my):
                                     selected_bgzone_idx = idx
                                     is_bgzone_dragging = False
+                                continue
+
+                        # MAP / PRESENCE: 체류 박스 목록 클릭/뷰
+                        if map_tool == "PRESENCE":
+                            zones = flow.world_data.get(map_id, {}).get("presence_zones", [])
+                            list_start_y = left_list_tops["map_presences"]
+                            idx = (my - list_start_y - scroll_y_left) // LINE_H
+                            if 0 <= idx < len(zones):
+                                row_y = list_start_y + (idx * LINE_H) + scroll_y_left
+                                view_btn_rect = pygame.Rect(sidebar_w - 50, row_y + 2, 44, LINE_H - 6)
+                                row_rect = pygame.Rect(8, row_y, sidebar_w - 58, LINE_H)
+                                if view_btn_rect.collidepoint(mx, my):
+                                    z = zones[idx]
+                                    presence_zone_modal.open_edit(z, idx)
+                                    selected_presence_idx = idx
+                                    is_presence_dragging = False
+                                elif row_rect.collidepoint(mx, my):
+                                    selected_presence_idx = idx
+                                    is_presence_dragging = False
                                 continue
 
                         # --- 맵 배치 오브젝트/캐릭터 리스트 선택 ---
@@ -6330,7 +7428,7 @@ def editor_main():
 
                 # [3. 우측 사이드바 클릭]
                 elif event.button == 1 and mx > SCREEN_W - right_panel_w:
-                    if edit_mode == "MAP":
+                    if edit_mode in ("MAP", "BASEBALL"):
                         _tx = SCREEN_W - right_panel_w
                         _thumb_toggle_rect = pygame.Rect(_tx + 4, 6, right_sidebar_w - 8, 34)
                         if _thumb_toggle_rect.collidepoint(mx, my):
@@ -6349,8 +7447,11 @@ def editor_main():
                             _panel_x = SCREEN_W - right_panel_w
                             found_asset = None
                             curr_y = 0
+                            _clk_cats = categories
+                            if edit_mode == "BASEBALL" and str(baseball_ed.get("tool") or "ZONES") == "ZONES":
+                                _clk_cats = bb_ed.filter_right_categories(categories)
                             for line in _editor_right_map_lines(
-                                categories, right_asset_collapsed
+                                _clk_cats, right_asset_collapsed
                             ):
                                 row_y_abs = _rt_clk + scroll_y_right + curr_y
                                 row_rect = pygame.Rect(
@@ -6405,196 +7506,289 @@ def editor_main():
                                 step_edit_index = None
                                 step_insert_index = None
                                 active_step_field = None
-                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                             else:
-                                # 각 스텝 행 + View 버튼 + 삽입(+) 버튼
-                                for i, step in enumerate(steps):
-                                    row_y = EDITOR_RIGHT_STEPS_TOP + scroll_y_steps + i * LINE_H
-                                    view_rect = pygame.Rect(base_x + right_sidebar_w - 60, row_y + 2, 50, LINE_H - 6)
-                                    row_rect = pygame.Rect(base_x + 10, row_y, right_sidebar_w - 72, LINE_H)
-                                    insert_rect = pygame.Rect(base_x + 10, row_y - 12, 18, 18) if i > 0 else None
+                                head_ins_rect = pygame.Rect(
+                                    base_x + 10,
+                                    EDITOR_RIGHT_STEPS_TOP + scroll_y_steps,
+                                    18,
+                                    18,
+                                )
+                                if not steps and head_ins_rect.collidepoint(mx, my):
+                                    show_step_config = True
+                                    step_body_scroll = 0
+                                    step_edit_index = None
+                                    step_insert_index = 0
+                                    active_step_field = None
+                                    step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                else:
+                                    # 각 스텝 행 + View 버튼 + 삽입(+) 버튼
+                                    for i, step in enumerate(steps):
+                                        row_y = EDITOR_RIGHT_STEPS_TOP + scroll_y_steps + i * LINE_H
+                                        view_rect = pygame.Rect(base_x + right_sidebar_w - 60, row_y + 2, 50, LINE_H - 6)
+                                        row_rect = pygame.Rect(base_x + 10, row_y, right_sidebar_w - 72, LINE_H)
+                                        insert_rect = pygame.Rect(base_x + 10, row_y - 12, 18, 18)
 
-                                    if insert_rect and insert_rect.collidepoint(mx, my):
-                                        show_step_config = True
-                                        step_body_scroll = 0
-                                        step_edit_index = None
-                                        step_insert_index = i
-                                        active_step_field = None
-                                        step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
-                                        break
+                                        if insert_rect.collidepoint(mx, my):
+                                            show_step_config = True
+                                            step_body_scroll = 0
+                                            step_edit_index = None
+                                            step_insert_index = i
+                                            active_step_field = None
+                                            step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                            break
 
-                                    if view_rect.collidepoint(mx, my):
-                                        # 수정 모달 열기 (현재 step → fields로 풀기)
-                                        show_step_config = True
-                                        step_body_scroll = 0
-                                        step_edit_index = i
-                                        step_insert_index = None
-                                        active_step_field = None
+                                        if view_rect.collidepoint(mx, my):
+                                            # 수정 모달 열기 (현재 step → fields로 풀기)
+                                            show_step_config = True
+                                            step_body_scroll = 0
+                                            step_edit_index = i
+                                            step_insert_index = None
+                                            active_step_field = None
 
-                                        t_raw = (step.get("type") or "MOVE").upper()
-                                        t = "DEV_CMD" if t_raw == "GLOBAL" else t_raw
-                                        step_fields = {"type": t}
-                                        step_fields["target"] = str(step.get("target", "") or "")
-                                        step_fields["dir"] = str(step.get("dir", "") or "")
-                                        step_fields["appear"] = str(step.get("appear", "") or "")
-                                        step_fields["action"] = str(step.get("action", "") or "")
-                                        step_fields["ysort"] = str(step.get("ysort", "") or "")
-                                        step_fields["layer"] = str(step.get("layer", "") or "")
-                                        step_fields["sprite_tilt"] = str(step.get("sprite_tilt", "") or "")
-                                        step_fields["height"] = str(step.get("height", "") or "")
-                                        step_fields["visible"] = str(step.get("visible", "") or "")
-                                        step_fields["alpha"] = str(step.get("alpha", "") or "")
-                                        p = step.get("pos")
-                                        step_fields["waypoints"] = ""
-                                        if isinstance(p, (list, tuple)) and len(p) >= 2:
-                                            p0 = p[0]
-                                            if isinstance(p0, (list, tuple)) and len(p0) >= 2:
-                                                step_fields["pos_x"] = str(p0[0])
-                                                step_fields["pos_y"] = str(p0[1])
-                                                extra = []
-                                                for sub in p[1:]:
-                                                    if isinstance(sub, (list, tuple)) and len(sub) >= 2:
-                                                        extra.append(f"{sub[0]},{sub[1]}")
-                                                step_fields["waypoints"] = ";".join(extra)
-                                            else:
-                                                step_fields["pos_x"] = str(p[0])
-                                                step_fields["pos_y"] = str(p[1])
-                                        else:
-                                            step_fields["pos_x"] = ""
-                                            step_fields["pos_y"] = ""
-                                        step_fields["who"] = str(step.get("who", "") or "")
-                                        step_fields["text"] = str(step.get("text", "") or "")
-                                        step_fields["voice"] = str(step.get("voice", "") or "")
-                                        step_fields["auto"] = str(step.get("auto", "") or "")
-                                        step_fields["bubble"] = str(step.get("bubble", "") or "")
-                                        step_fields["bubble_target"] = str(step.get("bubble_target", "") or "")
-                                        step_fields["emotion"] = str(step.get("emotion", "") or "")
-                                        step_fields["frame_ms"] = str(step.get("frame_ms", "") or "")
-                                        step_fields["hold_last_sec"] = str(step.get("hold_last_sec", "") or "")
-                                        step_fields["advance"] = str(step.get("advance", "") or "")
-                                        step_fields["val"] = str(step.get("val", "") or "")
-                                        step_fields["name"] = str(step.get("name", "") or "")
-                                        step_fields["anchor"] = str(step.get("anchor", "") or "")
-                                        step_fields["loop"] = str(step.get("loop", "") or "")
-                                        step_fields["picture"] = str(step.get("picture", "") or "")
-                                        step_fields["music"] = str(step.get("music", "") or "")
-                                        step_fields["transition"] = str(step.get("transition", "") or "")
-                                        step_fields["fade_in"] = str(step.get("fade_in", "") or "")
-                                        step_fields["fade_out"] = str(step.get("fade_out", "") or "")
-                                        step_fields["queue"] = str(step.get("queue", "") or "")
-                                        step_fields["volume"] = str(step.get("volume", "") or "")
-                                        step_fields["speed"] = str(step.get("speed", "") or "")
-                                        step_fields["wait"] = str(step.get("wait", "") or "")
-                                        step_fields["move_sync"] = str(step.get("move_sync") or step.get("sync") or "")
-                                        ins = step.get("instant")
-                                        if isinstance(ins, bool):
-                                            step_fields["instant"] = "true" if ins else ""
-                                        else:
-                                            step_fields["instant"] = str(ins or "")
-                                        if t in ("TILT", "SHEAR", "ZOOM"):
-                                            fill_editor_fields_from_step(step_fields, step, t)
-                                        elif t == "FX":
-                                            step_fields["fx_kind"] = str(step.get("kind", "") or "")
-                                            step_fields["fx_on"] = str(step.get("on", True))
-                                            step_fields["fx_dir"] = str(step.get("dir", "") or "")
-                                            sp = step.get("speed")
-                                            step_fields["fx_speed"] = "" if sp is None else str(sp)
-                                            fr = step.get("freq", step.get("frequency"))
-                                            step_fields["fx_freq"] = "" if fr is None else str(fr)
-                                            gc = step.get("grid_cell")
-                                            step_fields["fx_grid_cell"] = "" if gc is None else str(gc)
-                                            gj = step.get("grid_jitter")
-                                            step_fields["fx_grid_jitter"] = "" if gj is None else str(gj)
-                                            gm = step.get("grid_max")
-                                            step_fields["fx_grid_max"] = "" if gm is None else str(gm)
-                                        elif t == "OVERLAY_UI":
-                                            step_fields["action"] = str(step.get("action") or "show")
-                                            step_fields["overlay_id"] = str(step.get("overlay_id") or "")
-                                            step_fields["content"] = str(step.get("content") or "text")
-                                            step_fields["text"] = str(step.get("text") or "")
-                                            step_fields["font"] = str(step.get("font") or "default")
-                                            step_fields["size"] = "" if step.get("size") is None else str(step.get("size"))
-                                            c = step.get("color")
-                                            if isinstance(c, (list, tuple)) and len(c) >= 3:
-                                                step_fields["color"] = f"{c[0]},{c[1]},{c[2]}"
-                                            else:
-                                                step_fields["color"] = str(step.get("color") or "255,255,255")
-                                            step_fields["object"] = str(step.get("object") or "")
-                                            step_fields["anchor"] = str(step.get("anchor") or "center")
-                                            step_fields["margin_x"] = (
-                                                "" if step.get("margin_x") is None else str(step.get("margin_x"))
-                                            )
-                                            step_fields["margin_y"] = (
-                                                "" if step.get("margin_y") is None else str(step.get("margin_y"))
-                                            )
-                                            step_fields["mode"] = str(step.get("mode") or "fade")
-                                            step_fields["scroll_enter"] = str(step.get("scroll_enter") or "left")
-                                            step_fields["appear"] = (
-                                                "" if step.get("appear") is None else str(step.get("appear"))
-                                            )
-                                            step_fields["hold"] = "" if step.get("hold") is None else str(step.get("hold"))
-                                            step_fields["disappear"] = (
-                                                "" if step.get("disappear") is None else str(step.get("disappear"))
-                                            )
-                                            step_fields["hold_forever"] = (
-                                                "true" if step.get("hold_forever") else ""
-                                            )
-                                            step_fields["persist"] = "true" if step.get("persist") else ""
-                                        elif t == "DEV_CMD":
-                                            step_fields["dev_cmd"] = str(
-                                                step.get("cmd") or step.get("command") or step.get("action", "") or ""
-                                            )
-                                        elif t == "CAMERA":
-                                            fill_editor_fields_from_step(step_fields, step, t)
-                                        elif t == "ACTION_ANIM":
-                                            step_fields["anim"] = str(
-                                                step.get("anim") or step.get("name") or step.get("state") or ""
-                                            )
-                                            step_fields["mode"] = str(step.get("mode") or "once")
-                                            step_fields["release"] = str(step.get("release") or "idle")
-                                        elif t == "CARRY":
-                                            step_fields["action"] = str(step.get("action") or "pick")
-                                            step_fields["holder"] = str(step.get("holder") or "player")
-                                            step_fields["target"] = str(step.get("target") or "")
-                                            pos = step.get("pos")
-                                            if isinstance(pos, (list, tuple)) and len(pos) >= 2:
-                                                step_fields["pos_x"] = str(pos[0])
-                                                step_fields["pos_y"] = str(pos[1])
+                                            t_raw = (step.get("type") or "MOVE").upper()
+                                            t_raw = "DEV_CMD" if t_raw == "GLOBAL" else t_raw
+                                            t = _editor_normalize_step_type(t_raw, step)
+                                            step_fields = {"type": t}
+                                            step_fields["target"] = str(step.get("target", "") or "")
+                                            step_fields["dir"] = str(step.get("dir", "") or "")
+                                            step_fields["appear"] = str(step.get("appear", "") or "")
+                                            step_fields["action"] = str(step.get("action", "") or "")
+                                            step_fields["ysort"] = str(step.get("ysort", "") or "")
+                                            step_fields["layer"] = str(step.get("layer", "") or "")
+                                            step_fields["sprite_tilt"] = str(step.get("sprite_tilt", "") or "")
+                                            step_fields["height"] = str(step.get("height", "") or "")
+                                            step_fields["visible"] = str(step.get("visible", "") or "")
+                                            step_fields["alpha"] = str(step.get("alpha", "") or "")
+                                            p = step.get("pos")
+                                            step_fields["waypoints"] = ""
+                                            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                                                p0 = p[0]
+                                                if isinstance(p0, (list, tuple)) and len(p0) >= 2:
+                                                    step_fields["pos_x"] = str(p0[0])
+                                                    step_fields["pos_y"] = str(p0[1])
+                                                    extra = []
+                                                    for sub in p[1:]:
+                                                        if isinstance(sub, (list, tuple)) and len(sub) >= 2:
+                                                            extra.append(f"{sub[0]},{sub[1]}")
+                                                    step_fields["waypoints"] = ";".join(extra)
+                                                else:
+                                                    step_fields["pos_x"] = str(p[0])
+                                                    step_fields["pos_y"] = str(p[1])
                                             else:
                                                 step_fields["pos_x"] = ""
                                                 step_fields["pos_y"] = ""
-                                            w = step.get("wait")
-                                            step_fields["wait"] = (
-                                                "false"
-                                                if w is False
-                                                or (
-                                                    isinstance(w, str)
-                                                    and w.strip().lower() in ("0", "false", "f", "no", "n", "off")
+                                            step_fields["who"] = str(step.get("who", "") or "")
+                                            step_fields["text"] = str(step.get("text", "") or "")
+                                            step_fields["voice"] = str(step.get("voice", "") or "")
+                                            step_fields["auto"] = str(step.get("auto", "") or "")
+                                            step_fields["bubble"] = str(step.get("bubble", "") or "")
+                                            step_fields["bubble_target"] = str(step.get("bubble_target", "") or "")
+                                            step_fields["emotion"] = str(step.get("emotion", "") or "")
+                                            step_fields["frame_ms"] = str(step.get("frame_ms", "") or "")
+                                            step_fields["hold_last_sec"] = str(step.get("hold_last_sec", "") or "")
+                                            step_fields["advance"] = str(step.get("advance", "") or "")
+                                            step_fields["val"] = str(step.get("val", "") or "")
+                                            step_fields["name"] = str(step.get("name", "") or "")
+                                            step_fields["anchor"] = str(step.get("anchor", "") or "")
+                                            step_fields["loop"] = str(step.get("loop", "") or "")
+                                            step_fields["picture"] = str(step.get("picture", "") or "")
+                                            step_fields["music"] = str(step.get("music", "") or "")
+                                            step_fields["transition"] = str(step.get("transition", "") or "")
+                                            step_fields["fade_in"] = str(step.get("fade_in", "") or "")
+                                            step_fields["fade_out"] = str(step.get("fade_out", "") or "")
+                                            step_fields["queue"] = str(step.get("queue", "") or "")
+                                            step_fields["volume"] = str(step.get("volume", "") or "")
+                                            step_fields["speed"] = str(step.get("speed", "") or "")
+                                            step_fields["wait"] = str(step.get("wait", "") or "")
+                                            step_fields["move_sync"] = str(step.get("move_sync") or step.get("sync") or "")
+                                            ins = step.get("instant")
+                                            if isinstance(ins, bool):
+                                                step_fields["instant"] = "true" if ins else ""
+                                            else:
+                                                step_fields["instant"] = str(ins or "")
+                                            if t in ("TILT", "SHEAR", "ZOOM"):
+                                                fill_editor_fields_from_step(step_fields, step, t)
+                                            elif t == "SCREEN_FX":
+                                                step_fields["fx_on"] = str(step.get("on", True))
+                                                step_fields["sfx_kind"] = _editor_screen_fx_kind_from_step(step, t_raw)
+                                                sk = step_fields["sfx_kind"]
+                                                if sk == "cloud":
+                                                    step_fields["fx_dir"] = str(step.get("dir", "") or "")
+                                                    sp = step.get("speed")
+                                                    step_fields["fx_speed"] = "" if sp is None else str(sp)
+                                                    fr = step.get("freq", step.get("frequency"))
+                                                    step_fields["fx_freq"] = "" if fr is None else str(fr)
+                                                    gc = step.get("grid_cell")
+                                                    step_fields["fx_grid_cell"] = "" if gc is None else str(gc)
+                                                    gj = step.get("grid_jitter")
+                                                    step_fields["fx_grid_jitter"] = "" if gj is None else str(gj)
+                                                    gm = step.get("grid_max")
+                                                    step_fields["fx_grid_max"] = "" if gm is None else str(gm)
+                                                elif sk == "flash":
+                                                    step_fields["sfx_mode"] = str(step.get("mode", "") or "pulse")
+                                                    sc = step.get("color")
+                                                    if isinstance(sc, (list, tuple)) and len(sc) >= 3:
+                                                        step_fields["sfx_color"] = f"{sc[0]},{sc[1]},{sc[2]}"
+                                                    else:
+                                                        step_fields["sfx_color"] = str(sc or "")
+                                                    al = step.get("alpha")
+                                                    step_fields["sfx_alpha"] = "" if al is None else str(al)
+                                                    cy = step.get("cycle_sec")
+                                                    step_fields["sfx_cycle_sec"] = "" if cy is None else str(cy)
+                                                elif sk == "shake":
+                                                    ap = step.get("amp_px", step.get("amp"))
+                                                    step_fields["sfx_amp"] = "" if ap is None else str(ap)
+                                                    fq = step.get("freq_hz", step.get("freq"))
+                                                    step_fields["sfx_freq"] = "" if fq is None else str(fq)
+                                                elif sk == "rain":
+                                                    dn = step.get("density")
+                                                    step_fields["sfx_rain_density"] = "" if dn is None else str(dn)
+                                                    sp = step.get("speed")
+                                                    step_fields["sfx_rain_speed"] = "" if sp is None else str(sp)
+                                                    ag = step.get("angle")
+                                                    step_fields["sfx_rain_angle"] = "" if ag is None else str(ag)
+                                                    dl = step.get("drop_len")
+                                                    step_fields["sfx_rain_len"] = "" if dl is None else str(dl)
+                                                    al = step.get("alpha")
+                                                    step_fields["sfx_rain_alpha"] = "" if al is None else str(al)
+                                                    rc = step.get("color")
+                                                    if isinstance(rc, (list, tuple)) and len(rc) >= 3:
+                                                        step_fields["sfx_rain_color"] = f"{rc[0]},{rc[1]},{rc[2]}"
+                                                    else:
+                                                        step_fields["sfx_rain_color"] = str(rc or "")
+                                                elif sk == "vignette":
+                                                    st = step.get("strength")
+                                                    step_fields["sfx_vignette_strength"] = "" if st is None else str(st)
+                                                    sz = step.get("size")
+                                                    step_fields["sfx_vignette_size"] = "" if sz is None else str(sz)
+                                                    sf = step.get("softness")
+                                                    step_fields["sfx_vignette_softness"] = "" if sf is None else str(sf)
+                                                    vc = step.get("color")
+                                                    if isinstance(vc, (list, tuple)) and len(vc) >= 3:
+                                                        step_fields["sfx_vignette_color"] = f"{vc[0]},{vc[1]},{vc[2]}"
+                                                    else:
+                                                        step_fields["sfx_vignette_color"] = str(vc or "")
+                                                elif sk == "tone":
+                                                    step_fields["sfx_tone_preset"] = str(step.get("preset", "") or "warm")
+                                                    ts = step.get("strength")
+                                                    step_fields["sfx_tone_strength"] = "" if ts is None else str(ts)
+                                                    tc = step.get("color")
+                                                    if isinstance(tc, (list, tuple)) and len(tc) >= 3:
+                                                        step_fields["sfx_tone_color"] = f"{tc[0]},{tc[1]},{tc[2]}"
+                                                    else:
+                                                        step_fields["sfx_tone_color"] = str(tc or "")
+                                            elif t == "ENTITY_FX":
+                                                step_fields["target"] = str(step.get("target", "") or "")
+                                                step_fields["efx_mode"] = str(step.get("mode", "") or "pulse")
+                                                step_fields["efx_action"] = str(step.get("action", "") or "start")
+                                                ec = step.get("color")
+                                                if isinstance(ec, (list, tuple)) and len(ec) >= 3:
+                                                    step_fields["efx_color"] = f"{ec[0]},{ec[1]},{ec[2]}"
+                                                else:
+                                                    step_fields["efx_color"] = str(ec or "")
+                                                al = step.get("alpha")
+                                                step_fields["efx_alpha"] = "" if al is None else str(al)
+                                                cy = step.get("cycle_sec")
+                                                step_fields["efx_cycle_sec"] = "" if cy is None else str(cy)
+                                                zm = step.get("zoom")
+                                                step_fields["efx_zoom"] = "" if zm is None else str(zm)
+                                                step_fields["efx_persist"] = (
+                                                    "true" if step.get("persist") else "false"
                                                 )
-                                                else "true"
+                                            elif t == "OVERLAY_UI":
+                                                step_fields["action"] = str(step.get("action") or "show")
+                                                step_fields["delay"] = (
+                                                    "" if step.get("delay") is None else str(step.get("delay"))
+                                                )
+                                                step_fields["overlay_id"] = str(step.get("overlay_id") or "")
+                                                step_fields["content"] = str(step.get("content") or "text")
+                                                step_fields["text"] = str(step.get("text") or "")
+                                                step_fields["font"] = str(step.get("font") or "default")
+                                                step_fields["size"] = "" if step.get("size") is None else str(step.get("size"))
+                                                c = step.get("color")
+                                                if isinstance(c, (list, tuple)) and len(c) >= 3:
+                                                    step_fields["color"] = f"{c[0]},{c[1]},{c[2]}"
+                                                else:
+                                                    step_fields["color"] = str(step.get("color") or "255,255,255")
+                                                step_fields["object"] = str(step.get("object") or "")
+                                                step_fields["anchor"] = str(step.get("anchor") or "center")
+                                                step_fields["margin_x"] = (
+                                                    "" if step.get("margin_x") is None else str(step.get("margin_x"))
+                                                )
+                                                step_fields["margin_y"] = (
+                                                    "" if step.get("margin_y") is None else str(step.get("margin_y"))
+                                                )
+                                                step_fields["mode"] = str(step.get("mode") or "fade")
+                                                step_fields["scroll_enter"] = str(step.get("scroll_enter") or "left")
+                                                step_fields["appear"] = (
+                                                    "" if step.get("appear") is None else str(step.get("appear"))
+                                                )
+                                                step_fields["hold"] = "" if step.get("hold") is None else str(step.get("hold"))
+                                                step_fields["disappear"] = (
+                                                    "" if step.get("disappear") is None else str(step.get("disappear"))
+                                                )
+                                                step_fields["hold_forever"] = (
+                                                    "true" if step.get("hold_forever") else ""
+                                                )
+                                                step_fields["persist"] = "true" if step.get("persist") else ""
+                                            elif t == "DEV_CMD":
+                                                step_fields["dev_cmd"] = str(
+                                                    step.get("cmd") or step.get("command") or step.get("action", "") or ""
+                                                )
+                                            elif t == "CAMERA":
+                                                fill_editor_fields_from_step(step_fields, step, t)
+                                            elif t == "ACTION_ANIM":
+                                                step_fields["anim"] = str(
+                                                    step.get("anim") or step.get("name") or step.get("state") or ""
+                                                )
+                                                step_fields["mode"] = str(step.get("mode") or "once")
+                                                step_fields["release"] = str(step.get("release") or "idle")
+                                            elif t == "CARRY":
+                                                step_fields["action"] = str(step.get("action") or "pick")
+                                                step_fields["holder"] = str(step.get("holder") or "player")
+                                                step_fields["target"] = str(step.get("target") or "")
+                                                pos = step.get("pos")
+                                                if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+                                                    step_fields["pos_x"] = str(pos[0])
+                                                    step_fields["pos_y"] = str(pos[1])
+                                                else:
+                                                    step_fields["pos_x"] = ""
+                                                    step_fields["pos_y"] = ""
+                                                w = step.get("wait")
+                                                step_fields["wait"] = (
+                                                    "false"
+                                                    if w is False
+                                                    or (
+                                                        isinstance(w, str)
+                                                        and w.strip().lower() in ("0", "false", "f", "no", "n", "off")
+                                                    )
+                                                    else "true"
+                                                )
+                                            elif t == "CHANGE":
+                                                step_fields["target"] = str(step.get("target") or "held")
+                                                step_fields["to"] = str(
+                                                    step.get("to") or step.get("new_name") or ""
+                                                )
+                                                _fd = step.get("fade", step.get("fade_sec"))
+                                                step_fields["fade"] = "" if _fd in (None, "") else str(_fd)
+                                            elif t == "CONDITION":
+                                                step_fields["condition"] = str(
+                                                    step.get("condition") or step.get("expr") or ""
+                                                )
+                                                step_fields["var"] = str(step.get("var") or "")
+                                                step_fields["op"] = str(step.get("op") or "")
+                                            elif t == "CONDITION_SKIP":
+                                                pass
+                                            step_fields["move_anim"] = str(
+                                                step.get("move_anim") or step.get("path_anim") or ""
                                             )
-                                        elif t == "CHANGE":
-                                            step_fields["target"] = str(step.get("target") or "held")
-                                            step_fields["to"] = str(
-                                                step.get("to") or step.get("new_name") or ""
-                                            )
-                                        elif t == "CONDITION":
-                                            step_fields["condition"] = str(
-                                                step.get("condition") or step.get("expr") or ""
-                                            )
-                                            step_fields["var"] = str(step.get("var") or "")
-                                            step_fields["op"] = str(step.get("op") or "")
-                                        elif t == "CONDITION_SKIP":
-                                            pass
-                                        step_fields["move_anim"] = str(
-                                            step.get("move_anim") or step.get("path_anim") or ""
-                                        )
-                                        break
+                                            break
 
-                                    if row_rect.collidepoint(mx, my):
-                                        selected_step_idx = i
-                                        print(f"Selected Step: {i}")
-                                        break
+                                        if row_rect.collidepoint(mx, my):
+                                            selected_step_idx = i
+                                            print(f"Selected Step: {i}")
+                                            break
 
                 # [4. 중앙 작업창 클릭]
                 else:
@@ -6608,10 +7802,13 @@ def editor_main():
                             last_m = (mx, my)
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # 왼쪽 클릭
                         if edit_mode == "EVENT" and in_map_area:
-                            if current_event_id and current_event_type:
-                                steps_pv = all_events[current_event_type][current_event_id].get(
-                                    "steps", []
+                            if current_event_id:
+                                sec_pv, _eid_pv, edata_pv = _editor_resolve_event_ref(
+                                    all_events, current_event_type, current_event_id
                                 )
+                                if sec_pv and sec_pv != current_event_type:
+                                    current_event_type = sec_pv
+                                steps_pv = list((edata_pv or {}).get("steps") or []) if edata_pv else []
                                 upto_pv = _preview_upto_index(
                                     show_step_config,
                                     step_edit_index,
@@ -6655,6 +7852,123 @@ def editor_main():
 
                         elif edit_mode == "FLOW":
                             pass
+
+                        elif edit_mode == "BASEBALL" and in_map_area:
+                            if baseball_ed.get("pick_xy_key"):
+                                px, py = editor_snap_pick_world_xy(
+                                    wx, wy, GRID_SIZE, is_shift_pressed
+                                )
+                                if bb_ed.apply_xy_pick(baseball_ed, px, py, flow, map_id):
+                                    continue
+                            if (
+                                not baseball_ed.get("show_settings")
+                                and not baseball_ed.get("show_zone_modal")
+                            ):
+                                if selected_asset:
+                                    new_asset, consumed = bb_ed.handle_map_click(
+                                        baseball_ed,
+                                        wx,
+                                        wy,
+                                        swx,
+                                        swy,
+                                        objs,
+                                        npcs,
+                                        flow,
+                                        map_id,
+                                        pick_top_node=_editor_pick_top_node,
+                                        selected_asset=selected_asset,
+                                    )
+                                    selected_asset = new_asset
+                                    if consumed:
+                                        continue
+                                elif str(baseball_ed.get("tool") or "ZONES") == "ZONES":
+                                    hit = bb_ed.pick_placed_object_at(
+                                        objs, npcs, wx, wy, _editor_entity_alpha_hit
+                                    )
+                                    if is_shift_pressed and hit:
+                                        if hit in selected_nodes:
+                                            selected_nodes = [o for o in selected_nodes if o is not hit]
+                                        else:
+                                            selected_nodes = list(selected_nodes) + [hit]
+                                        selected_node = (
+                                            selected_nodes[0] if len(selected_nodes) == 1 else None
+                                        )
+                                        selected_asset = None
+                                        box_select_start = None
+                                        box_select_current = None
+                                        baseball_ed["zone_edit_node"] = selected_node
+                                    elif selected_nodes:
+                                        if hit and hit in selected_nodes:
+                                            is_dragging = True
+                                            multi_drag_leader = hit
+                                            multi_drag_anchor = (float(wx), float(wy))
+                                            multi_drag_origins = {
+                                                id(o): [float(o.pos[0]), float(o.pos[1])]
+                                                for o in selected_nodes
+                                            }
+                                        elif hit and hit not in selected_nodes:
+                                            selected_nodes = [hit]
+                                            selected_node = hit
+                                            selected_asset = None
+                                            box_select_start = None
+                                            box_select_current = None
+                                            baseball_ed["zone_edit_node"] = hit
+                                            now_bb = int(pygame.time.get_ticks())
+                                            if (
+                                                hit is bb_placed_pick_node
+                                                and (now_bb - int(bb_placed_pick_ms)) <= 400
+                                                and bb_ed.is_baseball_zone_object(hit)
+                                            ):
+                                                baseball_ed["zone_edit_node"] = hit
+                                                bb_ed.sync_zone_fields_from_node(
+                                                    hit,
+                                                    baseball_ed.setdefault("zone_fields", {}),
+                                                )
+                                                baseball_ed["show_zone_modal"] = True
+                                            bb_placed_pick_node = hit
+                                            bb_placed_pick_ms = now_bb
+                                        else:
+                                            box_select_start = (wx, wy)
+                                            box_select_current = (wx, wy)
+                                    else:
+                                        if hit:
+                                            selected_nodes = [hit]
+                                            selected_node = hit
+                                            selected_asset = None
+                                            baseball_ed["zone_edit_node"] = hit
+                                            now_bb = int(pygame.time.get_ticks())
+                                            if (
+                                                hit is bb_placed_pick_node
+                                                and (now_bb - int(bb_placed_pick_ms)) <= 400
+                                                and bb_ed.is_baseball_zone_object(hit)
+                                            ):
+                                                bb_ed.sync_zone_fields_from_node(
+                                                    hit,
+                                                    baseball_ed.setdefault("zone_fields", {}),
+                                                )
+                                                baseball_ed["show_zone_modal"] = True
+                                            bb_placed_pick_node = hit
+                                            bb_placed_pick_ms = now_bb
+                                        else:
+                                            box_select_start = (wx, wy)
+                                            box_select_current = (wx, wy)
+                                    continue
+                                new_asset, consumed = bb_ed.handle_map_click(
+                                    baseball_ed,
+                                    wx,
+                                    wy,
+                                    swx,
+                                    swy,
+                                    objs,
+                                    npcs,
+                                    flow,
+                                    map_id,
+                                    pick_top_node=_editor_pick_top_node,
+                                    selected_asset=selected_asset,
+                                )
+                                selected_asset = new_asset
+                                if consumed:
+                                    continue
 
                         elif edit_mode == "MAP" and in_map_area:
                             # MAP / ZONES: 이벤트 박스 선택/드래그
@@ -6703,9 +8017,45 @@ def editor_main():
                                 is_bgzone_dragging = False
                                 continue
 
+                            # MAP / PRESENCE: 체류 박스 선택/드래그
+                            if map_tool == "PRESENCE":
+                                zones = flow.world_data.get(map_id, {}).get("presence_zones", [])
+                                if selected_presence_idx is not None and 0 <= selected_presence_idx < len(zones):
+                                    zx, zy, zw, zh = zones[selected_presence_idx].get("rect", [0, 0, 0, 0])
+                                    if zx <= wx <= zx + zw and zy <= wy <= zy + zh:
+                                        is_presence_dragging = True
+                                        presence_drag_offset = (wx - zx, wy - zy)
+                                        continue
+                                found_idx = None
+                                for i in range(len(zones) - 1, -1, -1):
+                                    zx, zy, zw, zh = zones[i].get("rect", [0, 0, 0, 0])
+                                    if zw <= 0 or zh <= 0:
+                                        continue
+                                    if zx <= wx <= zx + zw and zy <= wy <= zy + zh:
+                                        found_idx = i
+                                        break
+                                selected_presence_idx = found_idx
+                                is_presence_dragging = False
+                                continue
+
                             if selected_asset:  # 배치하기 모드 (에셋 선택 중일 때)
                                 if selected_asset in OBJ_ASSETS:
-                                    objs.append(FieldItem(selected_asset, swx, swy))
+                                    if (
+                                        bb_ed.is_baseball_map(map_id)
+                                        and str(selected_asset).startswith("bbzone_")
+                                    ):
+                                        bb_ed.place_zone_object(
+                                            str(selected_asset), swx, swy, objs
+                                        )
+                                    elif (
+                                        bb_ed.is_baseball_map(map_id)
+                                        and str(selected_asset).startswith("bbscoreboard")
+                                    ):
+                                        bb_ed.place_scoreboard_object(
+                                            str(selected_asset), swx, swy, objs
+                                        )
+                                    else:
+                                        objs.append(FieldItem(selected_asset, swx, swy))
                                 else:
                                     from char_behavior import attach_npc_from_entry
                                     ch_info = {}
@@ -6721,7 +8071,20 @@ def editor_main():
 
                             elif map_tool == "OBJECTS":
                                 hit = _editor_pick_top_node(objs, npcs, wx, wy)
-                                if selected_nodes:
+                                if is_shift_pressed and hit:
+                                    if hit in selected_nodes:
+                                        selected_nodes = [o for o in selected_nodes if o is not hit]
+                                    else:
+                                        selected_nodes = list(selected_nodes) + [hit]
+                                    selected_node = selected_nodes[0] if len(selected_nodes) == 1 else None
+                                    selected_asset = None
+                                    box_select_start = None
+                                    box_select_current = None
+                                    if len(selected_nodes) != 1:
+                                        obj_sprite_tilt_active = False
+                                        obj_height_active = False
+                                        obj_layer_active = False
+                                elif selected_nodes:
                                     if hit and hit in selected_nodes:
                                         is_dragging = True
                                         multi_drag_leader = hit
@@ -6784,6 +8147,32 @@ def editor_main():
                                     obj_sprite_tilt_active = False
                                     obj_height_active = False
                                     obj_layer_active = False
+                        elif (
+                            edit_mode == "BASEBALL"
+                            and str(baseball_ed.get("tool") or "ZONES") == "ZONES"
+                        ):
+                            x1, y1 = box_select_start
+                            x2, y2 = (
+                                box_select_current
+                                if box_select_current is not None
+                                else box_select_start
+                            )
+                            picked = [
+                                o
+                                for o in _editor_nodes_in_world_rect(objs, npcs, x1, y1, x2, y2)
+                                if bb_ed.is_placed_object(o)
+                            ]
+                            if abs(x2 - x1) < 4 and abs(y2 - y1) < 4 and not picked:
+                                selected_nodes.clear()
+                                selected_node = None
+                                baseball_ed["zone_edit_node"] = None
+                            elif picked:
+                                selected_nodes = picked
+                                selected_node = (
+                                    selected_nodes[0] if len(selected_nodes) == 1 else None
+                                )
+                                selected_asset = None
+                                baseball_ed["zone_edit_node"] = selected_node
                         box_select_start = None
                         box_select_current = None
                     is_dragging = False
@@ -6866,6 +8255,23 @@ def editor_main():
                             zones[selected_bgzone_idx]["rect"][1] = zy
                     continue
 
+                # MAP / PRESENCE: 드래그 이동
+                if edit_mode == "MAP" and map_tool == "PRESENCE" and is_presence_dragging and selected_presence_idx is not None:
+                    zones = flow.world_data.get(map_id, {}).get("presence_zones", [])
+                    if 0 <= selected_presence_idx < len(zones):
+                        r = zones[selected_presence_idx].get("rect", [0, 0, 0, 0])
+                        if len(r) == 4:
+                            nx = wx - presence_drag_offset[0]
+                            ny = wy - presence_drag_offset[1]
+                            if is_shift_pressed:
+                                zx, zy = int(nx), int(ny)
+                            else:
+                                zx = (int(nx) // GRID_SIZE) * GRID_SIZE
+                                zy = (int(ny) // GRID_SIZE) * GRID_SIZE
+                            zones[selected_presence_idx]["rect"][0] = zx
+                            zones[selected_presence_idx]["rect"][1] = zy
+                    continue
+
                 if (
                     selected_nodes
                     and is_dragging
@@ -6891,8 +8297,13 @@ def editor_main():
                     box_select_start is not None
                     and pygame.mouse.get_pressed()[0]
                     and not is_dragging
-                    and edit_mode == "MAP"
-                    and map_tool == "OBJECTS"
+                    and (
+                        (edit_mode == "MAP" and map_tool == "OBJECTS")
+                        or (
+                            edit_mode == "BASEBALL"
+                            and str(baseball_ed.get("tool") or "ZONES") == "ZONES"
+                        )
+                    )
                 ):
                     box_select_current = (wx, wy)
             
@@ -6926,6 +8337,7 @@ def editor_main():
                     left_placed_collapsed,
                     flow_entity_entries=flow_entity_entries,
                     flow_placed_collapsed=flow_placed_collapsed,
+                    baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
                 )
                 _sb = _sidebar_sb_rect(0, sidebar_w, _lt, sidebar_list_bottom)
                 _ui = _step_overlay_scrollbar_layout(_sb, SCREEN_H - _lt, _lch, -scroll_y_left)
@@ -6987,6 +8399,7 @@ def editor_main():
                         left_placed_collapsed,
                         flow_entity_entries=flow_entity_entries,
                         flow_placed_collapsed=flow_placed_collapsed,
+                        baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
                     )
                     scroll_y_left = _sidebar_scroll_clamp(scroll_y_left, _lch, _lt, sidebar_list_bottom)
                     continue
@@ -7036,6 +8449,27 @@ def editor_main():
                             scroll_y_steps = 0
                     continue
                 else: # 중앙 화면은 기존 줌 기능
+                    in_map_wheel = (
+                        sidebar_w < mx < SCREEN_W - right_panel_w and my > TOP_BAR_H
+                    )
+                    if (
+                        edit_mode == "BASEBALL"
+                        and in_map_wheel
+                        and is_alt_pressed
+                        and len(selected_nodes) == 1
+                        and bb_ed.is_baseball_zone_object(selected_nodes[0])
+                    ):
+                        bb_ed.adjust_zone_radii(
+                            selected_nodes[0],
+                            drx=event.y * 4,
+                            dry=event.y * 2,
+                        )
+                        znode = selected_nodes[0]
+                        bb_ed.sync_zone_fields_from_node(
+                            znode, baseball_ed.setdefault("zone_fields", {})
+                        )
+                        baseball_ed["zone_edit_node"] = znode
+                        continue
                     scaled_cache.clear()
                     old_wx, old_wy = get_real_pos(mx, my)
                     if event.y > 0: zoom_idx = min(len(zoom_steps) - 1, zoom_idx + 1)
@@ -7083,6 +8517,10 @@ def editor_main():
                 # [S] 키로 통합 저장
                 if event.key == pygame.K_s:
                     # 1. 맵 데이터 저장 (world_data.json)
+                    if edit_mode == "BASEBALL" and baseball_ed.get("settings_fields"):
+                        bb_ed.apply_settings_fields(
+                            flow, map_id, baseball_ed.get("settings_fields") or {}
+                        )
                     flow.save_editor_data(map_id, objs, npcs)
                     
                     # 2. 이벤트 데이터 저장 (events.json)
@@ -7111,11 +8549,20 @@ def editor_main():
                         selected_node = None
                         selected_asset = None
                         selected_nodes.clear()
+                        if edit_mode == "BASEBALL":
+                            baseball_ed["zone_edit_node"] = None
 
                 if (
                     event.key == pygame.K_DELETE
-                    and edit_mode == "MAP"
-                    and map_tool == "OBJECTS"
+                    and (
+                        (edit_mode == "MAP" and map_tool == "OBJECTS")
+                        or (
+                            edit_mode == "BASEBALL"
+                            and str(baseball_ed.get("tool") or "ZONES") == "ZONES"
+                            and not baseball_ed.get("show_settings")
+                            and not baseball_ed.get("show_zone_modal")
+                        )
+                    )
                 ):
                     if show_multi_delete_confirm:
                         pass
@@ -7132,6 +8579,8 @@ def editor_main():
                         obj_layer_active = False
                         selected_nodes.clear()
                         selected_node = None
+                        if edit_mode == "BASEBALL" and baseball_ed.get("zone_edit_node") is n:
+                            baseball_ed["zone_edit_node"] = None
 
                 if event.key == pygame.K_DELETE and edit_mode == "MAP" and map_tool == "ZONES" and selected_zone_idx is not None:
                     zones = flow.world_data.get(map_id, {}).get("event_zones", [])
@@ -7299,6 +8748,12 @@ def editor_main():
 
                 if on_map:
                     hidden = _editor_entity_play_hidden(o)
+                    skip_bb_ellipse = (
+                        bb_ed.is_baseball_map(map_id)
+                        and edit_mode in ("MAP", "BASEBALL")
+                        and bb_ed.is_baseball_zone_object(o)
+                        and bb_ed.zone_uses_ellipse_fallback(o)
+                    )
                     if hidden:
                         _editor_draw_hidden_entity_ghost(
                             map_surf,
@@ -7307,10 +8762,10 @@ def editor_main():
                             final_y,
                             selected=(o in selected_nodes),
                         )
-                    else:
+                    elif not skip_bb_ellipse:
                         map_surf.blit(s_img, (final_x, final_y))
                     if o in selected_nodes:
-                        if not hidden:
+                        if not hidden and not skip_bb_ellipse:
                             pygame.draw.rect(
                                 map_surf,
                                 (255, 255, 0),
@@ -7356,8 +8811,13 @@ def editor_main():
                                 pass
 
         # EVENT: 선택/편집 스텝까지 누적된 MOVE·PLACE 미리보기
-        if edit_mode == "EVENT" and current_event_id and current_event_type:
-                steps_pv = all_events[current_event_type][current_event_id].get("steps", [])
+        if edit_mode == "EVENT" and current_event_id:
+                sec_pv, _eid_pv, edata_pv = _editor_resolve_event_ref(
+                    all_events, current_event_type, current_event_id
+                )
+                if sec_pv and sec_pv != current_event_type:
+                    current_event_type = sec_pv
+                steps_pv = list((edata_pv or {}).get("steps") or []) if edata_pv else []
                 upto_pv = _preview_upto_index(
                     show_step_config, step_edit_index, step_insert_index, steps_pv, selected_step_idx
                 )
@@ -7494,6 +8954,84 @@ def editor_main():
                         (left + 3, top - 16),
                     )
 
+                # --- [추가] 체류 박스(presence_zones) 표시 ---
+                pzones = flow.world_data.get(map_id, {}).get("presence_zones", [])
+                for i, z in enumerate(pzones):
+                    zx, zy, zw, zh = z.get("rect", [0, 0, 0, 0])
+                    if zw <= 0 or zh <= 0:
+                        continue
+                    left, top = world_to_map_surface_xy(
+                        bg_blit_x, bg_blit_y, float(zx), float(zy), bg_w, bg_h, sw_bg, sh_bg, 0.0
+                    )
+                    w = max(1, int(round(float(zw) * float(sw_bg) / float(bg_w))))
+                    h = max(1, int(round(float(zh) * float(sh_bg) / float(bg_h))))
+                    r = pygame.Rect(left, top, w, h)
+                    fill = pygame.Surface((max(1, w), max(1, h)), pygame.SRCALPHA)
+                    sel = (map_tool == "PRESENCE" and selected_presence_idx == i)
+                    fill.fill((255, 120, 180, 45) if not sel else (255, 200, 120, 65))
+                    map_surf.blit(fill, (left, top))
+                    pygame.draw.rect(map_surf, (255, 120, 180) if not sel else (255, 200, 120), r, 2)
+                    label = z.get("name") or f"pre_{i}"
+                    map_surf.blit(
+                        font.render(str(label), True, (255, 120, 180) if not sel else (255, 200, 120)),
+                        (left + 3, top - 16),
+                    )
+
+        if edit_mode in ("MAP", "BASEBALL") and bb_ed.is_baseball_map(map_id):
+            cfg_bb = bb_ed.load_editor_config(flow, map_id)
+            for pin_key, color in (
+                ("plate", (255, 80, 80)),
+                ("tee", (255, 220, 80)),
+                ("cam_fixed", (120, 200, 255)),
+            ):
+                pv = cfg_bb.get(pin_key)
+                if not isinstance(pv, (list, tuple)) or len(pv) < 2:
+                    continue
+                px, py = world_to_map_surface_xy(
+                    bg_blit_x,
+                    bg_blit_y,
+                    float(pv[0]),
+                    float(pv[1]),
+                    bg_w,
+                    bg_h,
+                    sw_bg,
+                    sh_bg,
+                    0.0,
+                )
+                pygame.draw.circle(map_surf, color, (int(px), int(py)), 5)
+                pygame.draw.circle(map_surf, (255, 255, 255), (int(px), int(py)), 5, 1)
+            for o in objs:
+                from activities.baseball_zones import draw_zone_ellipse_on_surface
+
+                if not bb_ed.is_baseball_zone_object(o):
+                    continue
+                if not bb_ed.zone_uses_ellipse_fallback(o):
+                    continue
+                is_sel = o in selected_nodes or (
+                    edit_mode == "BASEBALL" and baseball_ed.get("zone_edit_node") is o
+                )
+
+                def _bb_w2m(wx, wy, _o=o):
+                    return world_to_map_surface_xy(
+                        bg_blit_x,
+                        bg_blit_y,
+                        float(wx),
+                        float(wy),
+                        bg_w,
+                        bg_h,
+                        sw_bg,
+                        sh_bg,
+                        0.0,
+                    )
+
+                draw_zone_ellipse_on_surface(
+                    map_surf, o, world_to_xy=_bb_w2m, selected=is_sel
+                )
+            if edit_mode == "BASEBALL" and baseball_ed.get("pick_xy_key"):
+                pk = str(baseball_ed.get("pick_xy_key") or "")
+                hint = font.render(f"맵 클릭: {pk} 좌표", True, (255, 255, 120))
+                map_surf.blit(hint, (12, 12))
+
         # 드래그 중인 이벤트 박스 프리뷰
         if is_selecting_zone_rect and zone_drag_start and zone_drag_end:
                 x1, y1 = zone_drag_start
@@ -7523,6 +9061,21 @@ def editor_main():
                 w = max(1, int(round(float(zw) * float(sw_bg) / float(bg_w))))
                 h = max(1, int(round(float(zh) * float(sh_bg) / float(bg_h))))
                 pygame.draw.rect(map_surf, (80, 160, 255), pygame.Rect(left, top, w, h), 2)
+
+        # 드래그 중인 presence 박스 프리뷰
+        if is_selecting_presence_rect and presence_drag_start and presence_drag_end:
+                x1, y1 = presence_drag_start
+                x2, y2 = presence_drag_end
+                zx = min(x1, x2)
+                zy = min(y1, y2)
+                zw = abs(x2 - x1)
+                zh = abs(y2 - y1)
+                left, top = world_to_map_surface_xy(
+                    bg_blit_x, bg_blit_y, float(zx), float(zy), bg_w, bg_h, sw_bg, sh_bg, 0.0
+                )
+                w = max(1, int(round(float(zw) * float(sw_bg) / float(bg_w))))
+                h = max(1, int(round(float(zh) * float(sh_bg) / float(bg_h))))
+                pygame.draw.rect(map_surf, (255, 120, 180), pygame.Rect(left, top, w, h), 2)
 
         # 오브젝트 다중선택 드래그 박스(월드 → 맵 서피스)
         if (
@@ -7761,22 +9314,8 @@ def editor_main():
 
 
 
-        # [NEW_UI_ADD] 1. 좌측 상단 모드 전환 — MAP / EVENT / FLOW
-        mode_band = max(1, TOP_BAR_H // 3)
-        mode_color_map = (255, 255, 255) if edit_mode == "MAP" else (100, 100, 100)
-        mode_color_evt = (255, 255, 255) if edit_mode == "EVENT" else (100, 100, 100)
-        mode_color_flow = (255, 255, 255) if edit_mode == "FLOW" else (100, 100, 100)
-        for i, col in enumerate(((60, 60, 60), (70, 70, 70), (55, 52, 48))):
-            pygame.draw.rect(screen, col, (0, i * mode_band, sidebar_w, mode_band))
-        if edit_mode == "MAP":
-            pygame.draw.rect(screen, (255, 215, 0), (0, 0, sidebar_w, mode_band), 2)
-        elif edit_mode == "EVENT":
-            pygame.draw.rect(screen, (255, 215, 0), (0, mode_band, sidebar_w, mode_band), 2)
-        else:
-            pygame.draw.rect(screen, (255, 215, 0), (0, mode_band * 2, sidebar_w, TOP_BAR_H - mode_band * 2), 2)
-        screen.blit(font.render("MAP", True, mode_color_map), (12, 2))
-        screen.blit(font.render("EVENT", True, mode_color_evt), (12, mode_band + 2))
-        screen.blit(font.render("FLOW", True, mode_color_flow), (12, mode_band * 2 + 2))
+        # [NEW_UI_ADD] 1. 좌측 상단 모드 전환 — MAP / EVENT / FLOW / BASEBALL
+        bb_ed.draw_mode_tabs(screen, font, sidebar_w, TOP_BAR_H, edit_mode)
 
         # (키 디버그 표시는 하단 상태바 위에서 처리)
 
@@ -7795,6 +9334,18 @@ def editor_main():
         # --- [4] UI: 상단 맵 목록 바 ---
         pygame.draw.rect(screen, (45, 45, 45), (sidebar_w, 0, map_area_w, TOP_BAR_H))
         pygame.draw.line(screen, (100, 100, 100), (sidebar_w, TOP_BAR_H-1), (sidebar_w + map_area_w, TOP_BAR_H-1))
+        merge_enabled = bool(
+            edit_mode == "MAP"
+            and map_tool == "OBJECTS"
+            and selected_nodes
+            and all(n in objs for n in selected_nodes)
+        )
+        merge_bg = (70, 75, 45) if merge_enabled else (45, 45, 45)
+        merge_bd = (210, 190, 95) if merge_enabled else (95, 95, 95)
+        merge_fg = (255, 240, 170) if merge_enabled else (145, 145, 145)
+        pygame.draw.rect(screen, merge_bg, merge_obj_btn, border_radius=5)
+        pygame.draw.rect(screen, merge_bd, merge_obj_btn, 2, border_radius=5)
+        screen.blit(font.render("MERGE", True, merge_fg), (merge_obj_btn.x + 12, merge_obj_btn.y + 10))
         pygame.draw.rect(screen, (55, 75, 95), export_map_btn, border_radius=5)
         pygame.draw.rect(screen, (140, 170, 210), export_map_btn, 2, border_radius=5)
         screen.blit(font.render("PNG", True, (240, 248, 255)), (export_map_btn.x + 18, export_map_btn.y + 10))
@@ -7827,23 +9378,26 @@ def editor_main():
             list_title_y = TOP_BAR_H + 10
             screen.blit(title_font.render("PLACED (category)", True, (200, 255, 200)), (10, list_title_y))
 
-            # MAP 모드: OBJECTS / ZONES / BGZONES 토글 버튼
-            tool_w = (sidebar_w - 32) // 3
+            # MAP 모드: OBJECTS / ZONES / BGZONES / PRESENCE 토글 버튼
+            tool_w = max(40, (sidebar_w - 40) // 4)
             tool_btn_obj = pygame.Rect(8, left_list_tops["map_tools"], tool_w, 28)
-            tool_btn_zone = pygame.Rect(tool_btn_obj.right + 8, left_list_tops["map_tools"], tool_w, 28)
-            tool_btn_bgz = pygame.Rect(tool_btn_zone.right + 8, left_list_tops["map_tools"], tool_w, 28)
-            pygame.draw.rect(screen, (70, 70, 70), tool_btn_obj)
-            pygame.draw.rect(screen, (70, 70, 70), tool_btn_zone)
-            pygame.draw.rect(screen, (70, 70, 70), tool_btn_bgz)
+            tool_btn_zone = pygame.Rect(tool_btn_obj.right + 4, left_list_tops["map_tools"], tool_w, 28)
+            tool_btn_bgz = pygame.Rect(tool_btn_zone.right + 4, left_list_tops["map_tools"], tool_w, 28)
+            tool_btn_pres = pygame.Rect(tool_btn_bgz.right + 4, left_list_tops["map_tools"], tool_w, 28)
+            for tb in (tool_btn_obj, tool_btn_zone, tool_btn_bgz, tool_btn_pres):
+                pygame.draw.rect(screen, (70, 70, 70), tb)
             if map_tool == "OBJECTS":
                 pygame.draw.rect(screen, (255, 215, 0), tool_btn_obj, 2)
             elif map_tool == "ZONES":
                 pygame.draw.rect(screen, (255, 215, 0), tool_btn_zone, 2)
-            else:
+            elif map_tool == "BGZONES":
                 pygame.draw.rect(screen, (255, 215, 0), tool_btn_bgz, 2)
-            screen.blit(font.render("OBJECTS", True, (255, 255, 255)), (tool_btn_obj.x + 8, tool_btn_obj.y + 4))
-            screen.blit(font.render("ZONES", True, (255, 255, 255)), (tool_btn_zone.x + 12, tool_btn_zone.y + 4))
-            screen.blit(font.render("BG", True, (255, 255, 255)), (tool_btn_bgz.x + 16, tool_btn_bgz.y + 4))
+            else:
+                pygame.draw.rect(screen, (255, 215, 0), tool_btn_pres, 2)
+            screen.blit(font.render("OBJ", True, (255, 255, 255)), (tool_btn_obj.x + 10, tool_btn_obj.y + 4))
+            screen.blit(font.render("EVT", True, (255, 255, 255)), (tool_btn_zone.x + 10, tool_btn_zone.y + 4))
+            screen.blit(font.render("BG", True, (255, 255, 255)), (tool_btn_bgz.x + 12, tool_btn_bgz.y + 4))
+            screen.blit(font.render("PRE", True, (255, 255, 255)), (tool_btn_pres.x + 8, tool_btn_pres.y + 4))
 
             # MAP / ZONES: Add Event Box 버튼
             add_zone_btn = pygame.Rect(8, left_list_tops["map_zone_btn"], sidebar_w - 16, 28)
@@ -7858,7 +9412,13 @@ def editor_main():
                 pygame.draw.rect(screen, (55, 60, 90), add_bgzone_btn)
                 pygame.draw.rect(screen, (130, 160, 200), add_bgzone_btn, 1)
                 screen.blit(font.render("+ ADD BG BOX", True, (255, 255, 255)), (add_bgzone_btn.x + 18, add_bgzone_btn.y + 6))
-            
+
+            # MAP / PRESENCE: Add Presence Box 버튼
+            add_presence_btn = pygame.Rect(8, left_list_tops["map_presence_btn"], sidebar_w - 16, 28)
+            if map_tool == "PRESENCE":
+                pygame.draw.rect(screen, (90, 55, 70), add_presence_btn)
+                pygame.draw.rect(screen, (200, 130, 160), add_presence_btn, 1)
+                screen.blit(font.render("+ ADD PRESENCE", True, (255, 255, 255)), (add_presence_btn.x + 8, add_presence_btn.y + 6))
             if map_tool == "OBJECTS":
                 list_start_y = left_list_tops["map_objects"]
                 placed_rows = _editor_filter_collapsed_rows(
@@ -7975,6 +9535,48 @@ def editor_main():
                     pygame.draw.rect(screen, (55, 75, 100), vb)
                     pygame.draw.rect(screen, (130, 160, 200), vb, 1)
                     screen.blit(font.render("View", True, (220, 230, 255)), (vb.x + 4, vb.y + 2))
+
+            elif map_tool == "PRESENCE":
+                zones = flow.world_data.get(map_id, {}).get("presence_zones", [])
+                list_start_y = left_list_tops["map_presences"]
+                for i, z in enumerate(zones):
+                    item_y = list_start_y + (i * LINE_H) + scroll_y_left
+                    if not (TOP_BAR_H + 30 < item_y < sidebar_list_bottom):
+                        continue
+                    is_sel = (selected_presence_idx == i)
+                    txt_color = (255, 255, 0) if is_sel else (180, 180, 180)
+                    name = z.get("name") or f"presence_{i}"
+                    prefix = " > " if is_sel else "   "
+                    label_x = 8
+                    vb_left = sidebar_w - 50
+                    max_name_w = max(20, vb_left - label_x - 6 - _editor_font_line_width(font, prefix))
+                    name_vis, _pc = _editor_truncate_text_to_width(font, name, max_name_w)
+                    label = f"{prefix}{name_vis}"
+                    row_rect = pygame.Rect(label_x, item_y, vb_left - label_x - 4, LINE_H)
+                    screen.blit(font.render(label, True, txt_color), (label_x, item_y))
+                    if _editor_sidebar_list_tooltip_ok(
+                        show_event_config, show_zone_config, show_bgzone_config, show_step_config, show_multi_delete_confirm
+                    ) and row_rect.collidepoint(mx, my):
+                        sidebar_list_tooltip = (mx, my, name)
+                    vb = pygame.Rect(sidebar_w - 50, item_y + 2, 44, LINE_H - 6)
+                    pygame.draw.rect(screen, (55, 75, 100), vb)
+                    pygame.draw.rect(screen, (130, 160, 200), vb, 1)
+                    screen.blit(font.render("View", True, (220, 230, 255)), (vb.x + 4, vb.y + 2))
+
+        elif edit_mode == "BASEBALL":
+            bb_ed.draw_left_panel(
+                screen,
+                font,
+                title_font,
+                baseball_ed,
+                map_id,
+                objs,
+                TOP_BAR_H,
+                sidebar_w,
+                map_view_h,
+                selected_nodes=selected_nodes,
+                list_scroll=scroll_y_left,
+            )
 
         elif edit_mode == "FLOW":
             screen.blit(
@@ -8096,6 +9698,7 @@ def editor_main():
             left_placed_collapsed,
             flow_entity_entries=flow_entity_entries,
             flow_placed_collapsed=flow_placed_collapsed,
+            baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
         )
         scroll_y_left, _ = _editor_paint_sidebar_scrollbar(
             screen, 0, sidebar_w, _lt_sb, sidebar_list_bottom, _lch_sb, scroll_y_left
@@ -8120,7 +9723,7 @@ def editor_main():
             pygame.draw.rect(
                 screen, (45, 45, 45), (SCREEN_W - right_panel_w, TOP_BAR_H, right_panel_w, map_view_h)
             )
-        if edit_mode == "MAP" and right_panel_w > 0:
+        if edit_mode in ("MAP", "BASEBALL") and right_panel_w > 0:
             _rbx = SCREEN_W - right_panel_w
             thumb_toggle_draw = pygame.Rect(_rbx + 4, 6, right_sidebar_w - 8, 34)
             pygame.draw.rect(screen, (52, 56, 72), thumb_toggle_draw)
@@ -8135,7 +9738,7 @@ def editor_main():
 
             _vb = _editor_right_sidebar_view_bottom(
                 screen_h=SCREEN_H,
-                edit_mode=edit_mode,
+                edit_mode=edit_mode if edit_mode == "MAP" else "MAP",
                 map_tool=map_tool,
                 selected_nodes=selected_nodes,
                 sidebar_w=sidebar_w,
@@ -8144,8 +9747,11 @@ def editor_main():
             _rt_draw = _editor_right_map_list_top()
             y_ptr = _rt_draw + scroll_y_right
             _rbx_list = SCREEN_W - right_panel_w
+            _asset_cats = categories
+            if edit_mode == "BASEBALL" and str(baseball_ed.get("tool") or "ZONES") == "ZONES":
+                _asset_cats = bb_ed.filter_right_categories(categories)
 
-            for line in _editor_right_map_lines(categories, right_asset_collapsed):
+            for line in _editor_right_map_lines(_asset_cats, right_asset_collapsed):
                 if line["kind"] == "header":
                     cat = line["cat"]
                     mark = _editor_collapse_mark(right_asset_collapsed, cat)
@@ -8204,42 +9810,57 @@ def editor_main():
 
         elif edit_mode == "EVENT" and right_panel_w > 0:
             if current_event_id:
-                # 선택된 이벤트 정보 표시
-                evt_title = all_events[current_event_type][current_event_id].get('title', 'No Title')
-                _hdr_x = SCREEN_W - right_panel_w + 10
-                _hdr_w = max(40, right_sidebar_w - 20)
-                ev_line = f"EVENT: {current_event_id}"
-                ev_vis, _he = _editor_truncate_text_to_width(title_font, ev_line, _hdr_w)
-                screen.blit(title_font.render(ev_vis, True, (255, 255, 100)), (_hdr_x, 45))
-                title_line = f"Title: {evt_title}"
-                tl_vis, _te = _editor_truncate_text_to_width(font, title_line, _hdr_w)
-                screen.blit(font.render(tl_vis, True, (200, 200, 200)), (_hdr_x, 70))
-                
-                pygame.draw.line(screen, (100, 100, 100), (SCREEN_W - right_panel_w + 5, 95), (SCREEN_W - 5, 95))
-                
-                # [스텝 리스트 출력 시작]
-                steps = all_events[current_event_type][current_event_id].get('steps', [])
-                s_y = EDITOR_RIGHT_STEPS_TOP + scroll_y_steps
-                for i, step in enumerate(steps):
-                    step_head, step_detail, step_tooltip = _editor_step_list_summary(i, step)
-                    color = (255, 255, 0) if i == selected_step_idx else (180, 180, 180)
-                    vb = pygame.Rect(SCREEN_W - 60, s_y + 2, 50, LINE_H - 6)
-                    if 90 < s_y < sidebar_list_bottom:
-                        _rbx_step = SCREEN_W - right_panel_w
-                        _tx_step = _rbx_step + 15
-                        _vb_x = SCREEN_W - 60
-                        max_sw = max(24, _vb_x - 6 - _tx_step)
-                        step_vis, _st = _editor_step_list_visible_line(
-                            font, step_head, step_detail, max_sw, min_detail_chars=10
-                        )
-                        screen.blit(font.render(step_vis, True, color), (_tx_step, s_y))
-                        row_rect = pygame.Rect(_rbx_step + 8, s_y - 1, right_sidebar_w - 16, LINE_H + 2)
-                        if _editor_step_list_tooltip_ok(
-                            show_event_config, show_zone_config, show_bgzone_config, show_multi_delete_confirm
-                        ) and (row_rect.collidepoint(mx, my) or vb.collidepoint(mx, my)):
-                            sidebar_list_tooltip = (mx, my, step_tooltip)
-                    # 삽입(+) 버튼 (스텝 사이)
-                    if i > 0:
+                sec_ev, _eid_ev, edata_ev = _editor_resolve_event_ref(
+                    all_events, current_event_type, current_event_id
+                )
+                if sec_ev and sec_ev != current_event_type:
+                    current_event_type = sec_ev
+                if edata_ev:
+                    # 선택된 이벤트 정보 표시
+                    evt_title = edata_ev.get('title', 'No Title')
+                    _hdr_x = SCREEN_W - right_panel_w + 10
+                    _hdr_w = max(40, right_sidebar_w - 20)
+                    ev_line = f"EVENT: {current_event_id}"
+                    ev_vis, _he = _editor_truncate_text_to_width(title_font, ev_line, _hdr_w)
+                    screen.blit(title_font.render(ev_vis, True, (255, 255, 100)), (_hdr_x, 45))
+                    title_line = f"Title: {evt_title}"
+                    tl_vis, _te = _editor_truncate_text_to_width(font, title_line, _hdr_w)
+                    screen.blit(font.render(tl_vis, True, (200, 200, 200)), (_hdr_x, 70))
+                    
+                    pygame.draw.line(screen, (100, 100, 100), (SCREEN_W - right_panel_w + 5, 95), (SCREEN_W - 5, 95))
+                    
+                    # [스텝 리스트 출력 시작]
+                    steps = list(edata_ev.get('steps') or [])
+                    s_y = EDITOR_RIGHT_STEPS_TOP + scroll_y_steps
+                    if not steps:
+                        ins0 = pygame.Rect(SCREEN_W - right_panel_w + 10, s_y, 18, 18)
+                        if 90 < s_y < sidebar_list_bottom:
+                            pygame.draw.rect(screen, (60, 60, 60), ins0)
+                            pygame.draw.rect(screen, (120, 120, 120), ins0, 1)
+                            screen.blit(font.render("+", True, (220, 220, 220)), (ins0.x + 5, ins0.y + 1))
+                            if _editor_step_list_tooltip_ok(
+                                show_event_config, show_zone_config, show_bgzone_config, show_multi_delete_confirm
+                            ) and ins0.collidepoint(mx, my):
+                                sidebar_list_tooltip = (mx, my, ["맨 앞에 스텝 삽입"])
+                    for i, step in enumerate(steps):
+                        step_head, step_detail, step_tooltip = _editor_step_list_summary(i, step)
+                        color = (255, 255, 0) if i == selected_step_idx else (180, 180, 180)
+                        vb = pygame.Rect(SCREEN_W - 60, s_y + 2, 50, LINE_H - 6)
+                        if 90 < s_y < sidebar_list_bottom:
+                            _rbx_step = SCREEN_W - right_panel_w
+                            _tx_step = _rbx_step + 15
+                            _vb_x = SCREEN_W - 60
+                            max_sw = max(24, _vb_x - 6 - _tx_step)
+                            step_vis, _st = _editor_step_list_visible_line(
+                                font, step_head, step_detail, max_sw, min_detail_chars=10
+                            )
+                            screen.blit(font.render(step_vis, True, color), (_tx_step, s_y))
+                            row_rect = pygame.Rect(_rbx_step + 8, s_y - 1, right_sidebar_w - 16, LINE_H + 2)
+                            if _editor_step_list_tooltip_ok(
+                                show_event_config, show_zone_config, show_bgzone_config, show_multi_delete_confirm
+                            ) and (row_rect.collidepoint(mx, my) or vb.collidepoint(mx, my)):
+                                sidebar_list_tooltip = (mx, my, step_tooltip)
+                        # 삽입(+) 버튼 (스텝 앞 — i==0 이면 맨 앞 삽입)
                         ins = pygame.Rect(SCREEN_W - right_panel_w + 10, s_y - 12, 18, 18)
                         if 90 < s_y < sidebar_list_bottom:
                             pygame.draw.rect(screen, (60, 60, 60), ins)
@@ -8248,27 +9869,31 @@ def editor_main():
                             if _editor_step_list_tooltip_ok(
                                 show_event_config, show_zone_config, show_bgzone_config, show_multi_delete_confirm
                             ) and ins.collidepoint(mx, my):
-                                sidebar_list_tooltip = (mx, my, step_tooltip)
+                                tip = "맨 앞에 스텝 삽입" if i == 0 else f"스텝 {i} 앞에 삽입"
+                                sidebar_list_tooltip = (mx, my, [tip])
 
-                    # View 버튼
-                    if 90 < s_y < sidebar_list_bottom:
-                        pygame.draw.rect(screen, (55, 75, 100), vb)
-                        pygame.draw.rect(screen, (130, 160, 200), vb, 1)
-                        screen.blit(font.render("View", True, (220, 230, 255)), (vb.x + 6, vb.y + 2))
+                        # View 버튼
+                        if 90 < s_y < sidebar_list_bottom:
+                            pygame.draw.rect(screen, (55, 75, 100), vb)
+                            pygame.draw.rect(screen, (130, 160, 200), vb, 1)
+                            screen.blit(font.render("View", True, (220, 230, 255)), (vb.x + 6, vb.y + 2))
 
-                    s_y += LINE_H
-                
-                # [+] 스텝 추가 버튼 (임시 시각화)
-                add_step_rect = pygame.Rect(SCREEN_W - right_panel_w + 10, s_y + 12, 120, 26)
-                if add_step_rect.y < SCREEN_H - 10:
-                    pygame.draw.rect(screen, (60, 80, 60), add_step_rect)
-                    pygame.draw.rect(screen, (120, 160, 120), add_step_rect, 1)
-                    screen.blit(font.render("+ ADD STEP", True, (255, 255, 255)), (add_step_rect.x + 10, add_step_rect.y + 5))
+                        s_y += LINE_H
+                    
+                    # [+] 스텝 추가 버튼 (임시 시각화)
+                    add_step_rect = pygame.Rect(SCREEN_W - right_panel_w + 10, s_y + 12, 120, 26)
+                    if add_step_rect.y < SCREEN_H - 10:
+                        pygame.draw.rect(screen, (60, 80, 60), add_step_rect)
+                        pygame.draw.rect(screen, (120, 160, 120), add_step_rect, 1)
+                        screen.blit(font.render("+ ADD STEP", True, (255, 255, 255)), (add_step_rect.x + 10, add_step_rect.y + 5))
             else:
                 screen.blit(font.render("Select an event from left", True, (120, 120, 120)), (SCREEN_W - right_panel_w + 10, 100))
 
-            if current_event_id and current_event_type:
-                _steps_sb = all_events[current_event_type][current_event_id].get("steps", [])
+            if current_event_id:
+                _sec_sb, _eid_sb, edata_sb = _editor_resolve_event_ref(
+                    all_events, current_event_type, current_event_id
+                )
+                _steps_sb = list((edata_sb or {}).get("steps") or [])
                 scroll_y_steps, _ = _editor_paint_sidebar_scrollbar(
                     screen,
                     SCREEN_W - right_panel_w,
@@ -8446,6 +10071,54 @@ def editor_main():
             except Exception:
                 pass
 
+        if show_obj_merge_modal:
+            overlay = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 170))
+            screen.blit(overlay, (0, 0))
+            mw, mh = 520, 282
+            mr = pygame.Rect(SCREEN_W // 2 - mw // 2, SCREEN_H // 2 - mh // 2, mw, mh)
+            pygame.draw.rect(screen, (28, 30, 36), mr, border_radius=8)
+            pygame.draw.rect(screen, (165, 150, 90), mr, 2, border_radius=8)
+            screen.blit(title_font.render("MERGE OBJECTS TO PNG", True, (255, 235, 170)), (mr.x + 24, mr.y + 18))
+            rows = [
+                ("이름", "name", "assets/images/object/{name}.png"),
+                ("카테고리", "category", "오른쪽 오브젝트 리스트 분류"),
+                ("type", "type", "보통 item"),
+                ("layer", "layer", "새 object_defs layer"),
+            ]
+            for i, (label, key, hint) in enumerate(rows):
+                y = mr.y + 62 + i * 36
+                screen.blit(font.render(label, True, (220, 225, 235)), (mr.x + 36, y + 6))
+                r = pygame.Rect(mr.x + 166, y, 300 if key != "layer" else 120, 28)
+                pygame.draw.rect(screen, (14, 15, 19), r)
+                c = (245, 220, 140) if obj_merge_active_field == key else (105, 110, 125)
+                pygame.draw.rect(screen, c, r, 1)
+                val = str(obj_merge_fields.get(key) or "")
+                screen.blit(font.render(val, True, (245, 245, 245)), (r.x + 6, r.y + 6))
+                if key != "layer":
+                    screen.blit(font.render(hint, True, (115, 120, 135)), (r.right + 8, r.y + 6))
+            rep_on = str(obj_merge_fields.get("replace") or "").lower() in ("1", "true", "yes", "on")
+            cb = pygame.Rect(mr.x + 166, mr.y + 206, 22, 22)
+            pygame.draw.rect(screen, (14, 15, 19), cb)
+            pygame.draw.rect(screen, (170, 170, 170), cb, 1)
+            if rep_on:
+                pygame.draw.line(screen, (255, 235, 120), (cb.x + 4, cb.centery), (cb.x + 9, cb.bottom - 5), 2)
+                pygame.draw.line(screen, (255, 235, 120), (cb.x + 9, cb.bottom - 5), (cb.right - 4, cb.y + 5), 2)
+            screen.blit(font.render("선택 항목을 새 합성 오브젝트로 교체", True, (220, 225, 235)), (cb.right + 8, cb.y + 2))
+            if obj_merge_msg:
+                screen.blit(font.render(str(obj_merge_msg), True, (255, 120, 100)), (mr.x + 36, mr.bottom - 82))
+            else:
+                cnt = len([o for o in selected_nodes if o in objs])
+                screen.blit(font.render(f"선택 오브젝트 {cnt}개를 투명 PNG로 합성합니다. 배경은 저장하지 않습니다.", True, (145, 155, 170)), (mr.x + 36, mr.bottom - 82))
+            save_btn = pygame.Rect(mr.centerx - 112, mr.bottom - 50, 104, 34)
+            cancel_btn = pygame.Rect(mr.centerx + 8, mr.bottom - 50, 104, 34)
+            pygame.draw.rect(screen, (64, 88, 54), save_btn, border_radius=5)
+            pygame.draw.rect(screen, (140, 200, 120), save_btn, 1, border_radius=5)
+            screen.blit(font.render("저장", True, (235, 255, 225)), (save_btn.x + 34, save_btn.y + 8))
+            pygame.draw.rect(screen, (70, 55, 55), cancel_btn, border_radius=5)
+            pygame.draw.rect(screen, (190, 130, 130), cancel_btn, 1, border_radius=5)
+            screen.blit(font.render("취소", True, (255, 230, 230)), (cancel_btn.x + 34, cancel_btn.y + 8))
+
 
 
 
@@ -8516,6 +10189,23 @@ def editor_main():
             obj_def_modal.draw(screen, title_font, font, _editor_char_modal_ctx())
         if obj_inst_modal.show:
             obj_inst_modal.draw(screen, title_font, font, _editor_char_modal_ctx())
+        if presence_zone_modal.show:
+            presence_zone_modal.draw(screen, title_font, font, _editor_char_modal_ctx())
+
+        if baseball_ed.get("show_settings"):
+            ov = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            ov.fill((0, 0, 0, 160))
+            screen.blit(ov, (0, 0))
+            baseball_bb_ui["settings"] = bb_ed.draw_settings_modal(
+                screen, font, baseball_ed, SCREEN_W, SCREEN_H
+            )
+        if baseball_ed.get("show_zone_modal"):
+            ov = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            ov.fill((0, 0, 0, 160))
+            screen.blit(ov, (0, 0))
+            baseball_bb_ui["zone"] = bb_ed.draw_zone_modal(
+                screen, font, baseball_ed, SCREEN_W, SCREEN_H
+            )
 
         # --- [UI] 이벤트 박스(event_zones) 설정 팝업창 ---
         if show_zone_config:
@@ -8615,6 +10305,9 @@ def editor_main():
         if is_selecting_bgzone_rect:
             msg = f"BG 영역 지정 (드래그) · {GRID_SIZE}px 격자 스냅 · Shift=미세"
             screen.blit(font.render(msg, True, (80, 160, 255)), (mx + 15, my + 15))
+        if is_selecting_presence_rect:
+            msg = f"PRESENCE 영역 지정 (드래그) · {GRID_SIZE}px 격자 스냅 · Shift=미세"
+            screen.blit(font.render(msg, True, (255, 120, 180)), (mx + 15, my + 15))
         if is_picking_zone_target:
             screen.blit(
                 font.render("맵에서 Target 픽 (오브젝트/NPC 클릭) · ESC 취소", True, (255, 220, 160)),
@@ -8667,9 +10360,14 @@ def editor_main():
 
             draw_t_cur = (step_fields.get("type") or "MOVE").upper()
             step_body_sb_ui = None
-            rows_draw = _step_field_rows(step_fields.get("type", "MOVE"))
+            rows_draw = _step_field_rows(step_fields.get("type", "MOVE"), step_fields)
+            if draw_t_cur == "SCREEN_FX":
+                _draw_screen_fx_tabs(screen, font, panel_rect, _screen_fx_tab_kind(step_fields))
+            body_top_px = _step_config_body_top(panel_rect, step_fields)
             scroll_draw = step_body_scroll
-            body_clip_rect, sb_draw_rect, max_body_scroll, ch_draw = _step_overlay_body_geometry(panel_rect, rows_draw)
+            body_clip_rect, sb_draw_rect, max_body_scroll, ch_draw = _step_overlay_body_geometry(
+                panel_rect, rows_draw, body_top=body_top_px
+            )
             step_body_scroll = min(step_body_scroll, max_body_scroll)
             prev_clip_fields = screen.get_clip()
             screen.set_clip(body_clip_rect)
@@ -8687,7 +10385,7 @@ def editor_main():
                 else:
                     before_ix_draw = len(steps_draw_ref)
             for label, key in rows_draw:
-                y_ptr = panel_rect.y + 120 + cy - scroll_draw
+                y_ptr = body_top_px + cy - scroll_draw
                 if key.startswith("_hint"):
                     show_hint = (
                         body_clip_rect is not None
@@ -8760,6 +10458,26 @@ def editor_main():
                     pygame.draw.rect(screen, (50, 70, 90), list_btn)
                     pygame.draw.rect(screen, (120, 160, 200), list_btn, 1)
                     screen.blit(font.render("List", True, (230, 240, 255)), (list_btn.x + 8, list_btn.y + 7))
+                elif _step_row_color_palette(draw_t_cur, key):
+                    r = pygame.Rect(panel_rect.x + 180, y_ptr - 5, 168, 30)
+                    pal_btn = pygame.Rect(panel_rect.x + 180 + 172, y_ptr - 5, 58, 30)
+                    triplet = _editor_parse_rgb_triplet(step_fields.get(key, ""))
+                    pygame.draw.rect(screen, (20, 20, 20), r)
+                    pygame.draw.rect(screen, color, r, 1)
+                    if triplet:
+                        sw = pygame.Rect(r.x + 4, r.y + 5, 20, 20)
+                        pygame.draw.rect(screen, triplet, sw)
+                        pygame.draw.rect(screen, (80, 80, 80), sw, 1)
+                        txt_x = sw.right + 6
+                    else:
+                        txt_x = r.x + 8
+                    txt = str(step_fields.get(key, ""))
+                    if len(txt) > 18:
+                        txt = txt[:15] + "..."
+                    screen.blit(font.render(txt, True, (255, 255, 255)), (txt_x, r.y + 5))
+                    pygame.draw.rect(screen, (55, 70, 55), pal_btn)
+                    pygame.draw.rect(screen, (140, 180, 140), pal_btn, 1)
+                    screen.blit(font.render("Pal", True, (240, 255, 240)), (pal_btn.x + 14, pal_btn.y + 7))
                 elif _step_row_entity_pick(draw_t_cur, key):
                     r = pygame.Rect(panel_rect.x + 180, y_ptr - 5, 220, 30)
                     list_btn = pygame.Rect(panel_rect.x + 180 + 225, y_ptr - 5, 52, 30)
@@ -8805,11 +10523,11 @@ def editor_main():
                     pygame.draw.rect(screen, (140, 150, 180), thm, 1, border_radius=3)
 
             if step_target_dropdown_open and step_target_options:
-                yy_sync = panel_rect.y + 120
+                yy_sync = body_top_px
                 fk = step_target_field_key or "target"
                 sy = 0
                 for _lb, ky in rows_draw:
-                    yy_sync = panel_rect.y + 120 + sy - scroll_draw
+                    yy_sync = body_top_px + sy - scroll_draw
                     if ky.startswith("_hint"):
                         sy += STEP_BODY_ROW_H
                         continue
@@ -8849,16 +10567,36 @@ def editor_main():
 
             if step_target_dropdown_open and step_target_dropdown_rect and step_target_options:
                 dr = step_target_dropdown_rect
-                step_target_dd_ui = _draw_dropdown_with_scrollbar(
-                    screen,
-                    font,
-                    dr,
-                    step_target_options,
-                    -1,
-                    step_target_scroll,
-                    d_titem_h,
-                    colors={},
-                )
+                fk_dd = step_target_field_key or "target"
+                if fk_dd in ("color", "efx_color", "sfx_color", "sfx_rain_color", "sfx_vignette_color", "sfx_tone_color"):
+                    pal_entries = _editor_color_palette_entries()
+                    cur_rgb = str(step_fields.get(fk_dd) or "").strip()
+                    pal_sel = -1
+                    for pi, (_pn, prgb) in enumerate(pal_entries):
+                        if prgb == cur_rgb:
+                            pal_sel = pi
+                            break
+                    step_target_dd_ui = _draw_color_palette_dropdown(
+                        screen,
+                        font,
+                        dr,
+                        pal_entries,
+                        pal_sel,
+                        step_target_scroll,
+                        d_titem_h,
+                        colors={},
+                    )
+                else:
+                    step_target_dd_ui = _draw_dropdown_with_scrollbar(
+                        screen,
+                        font,
+                        dr,
+                        step_target_options,
+                        -1,
+                        step_target_scroll,
+                        d_titem_h,
+                        colors={},
+                    )
 
             save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
             canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)

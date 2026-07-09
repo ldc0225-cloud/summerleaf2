@@ -10,7 +10,12 @@ activities — 필드 위 미니게임(그네·낚시 등) 통합 패키지.
   { "type": "DEV_CMD", "cmd": "start_fishing", "pond": "jjangpu_pond" }
 
   범용 형태 (추가 활동용):
-  { "type": "DEV_CMD", "cmd": "start_activity_swing" }   ← 추후 그네 통합 시
+  { "type": "DEV_CMD", "cmd": "start_activity_baseball" }
+
+[야구]
+  { "type": "DEV_CMD", "cmd": "start_baseball" }
+  { "type": "DEV_CMD", "cmd": "start_baseball", "mode": "story" }
+  OVERLAY_UI click_action: stop_baseball
 
 [main.py 역할]
   - FieldActivityHost 인스턴스 1개
@@ -25,11 +30,13 @@ activities — 필드 위 미니게임(그네·낚시 등) 통합 패키지.
 from __future__ import annotations
 
 from .base import BaseFieldActivity, FieldDrawContext
+from .baseball import BaseballActivity
 from .fishing import FishingActivity
 from .host import FieldActivityHost
 from ._registry import create_activity, list_registered, register_activity
 
 register_activity("fishing", FishingActivity)
+register_activity("baseball", BaseballActivity)
 
 
 def list_activities():
@@ -57,6 +64,7 @@ __all__ = [
     "FieldActivityHost",
     "FieldDrawContext",
     "FishingActivity",
+    "BaseballActivity",
     "create_activity",
     "list_activities",
     "request_field_activity",

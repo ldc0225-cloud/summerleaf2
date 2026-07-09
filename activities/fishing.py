@@ -809,8 +809,9 @@ class FishingActivity(BaseFieldActivity):
         if self.state == ST_CHARGING:
             self._draw_cast_gauge(ctx, self._cast_charge_power_now())
 
-        tip = hud.render(self._msg, True, (248, 252, 255))
-        surf.blit(tip, (8, surf.get_height() - 15))
+        if self._msg and str(self._msg).strip():
+            tip = hud.render(self._msg, True, (248, 252, 255))
+            surf.blit(tip, (8, surf.get_height() - 15))
 
         if self.state == ST_SUCCESS:
             big = ctx.font_fn(max(12, min(18, surf.get_width() // 20)))

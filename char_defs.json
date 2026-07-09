@@ -1,26 +1,82 @@
 {
   "carrot": {
-    "jump_max_gap": 30
+    "type": "adult",
+    "jump_max_gap": 30,
+    "name": "당근",
+    "display_name": "carrot",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "broccoli": {
-    "jump_max_gap": 30
+    "type": "adult",
+    "jump_max_gap": 30,
+    "name": "브로콜리",
+    "display_name": "broccoli",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "summer": {
     "jump_max_gap": 30
   },
   "babydino": {
-    "jump_max_gap": 30
+    "type": "animal",
+    "jump_max_gap": 30,
+    "name": "아기공룡",
+    "display_name": "babydino",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "dog": {
+    "type": "animal",
     "jump_max_gap": 30
   },
   "c1": {
+    "type": "adult",
     "jump_max_gap": 30,
-    "mask_nav": true
+    "mask_nav": true,
+    "name": "선생님1",
+    "display_name": "c1",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "c2": {
+    "type": "adult",
     "jump_max_gap": 30,
-    "mask_nav": true
+    "mask_nav": true,
+    "name": "선생님2",
+    "display_name": "c2",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "c3": {
     "jump_max_gap": 30
@@ -32,7 +88,18 @@
     "jump_max_gap": 30
   },
   "c6": {
-    "jump_max_gap": 30
+    "type": "adult",
+    "jump_max_gap": 30,
+    "name": "여름",
+    "display_name": "c6",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "c7": {
     "jump_max_gap": 30
@@ -44,6 +111,7 @@
     "jump_max_gap": 30
   },
   "c10": {
+    "type": "kid",
     "jump_max_gap": 30,
     "mask_nav": true,
     "display_name": "여름이",
@@ -110,22 +178,77 @@
     }
   },
   "cc1": {
-    "jump_max_gap": 30
+    "type": "kid",
+    "jump_max_gap": 30,
+    "name": "꼬마1",
+    "display_name": "cc1",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "cc2": {
-    "jump_max_gap": 30
+    "type": "kid",
+    "jump_max_gap": 30,
+    "name": "꼬마2",
+    "display_name": "cc2",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "cc3": {
-    "jump_max_gap": 30
+    "type": "kid",
+    "jump_max_gap": 30,
+    "name": "꼬마3",
+    "display_name": "cc3",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "cc4": {
-    "jump_max_gap": 30
+    "type": "kid",
+    "jump_max_gap": 30,
+    "name": "꼬마4",
+    "display_name": "cc4",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "fairy1": {
+    "type": "kid",
     "jump_max_gap": 30,
-    "display_name": "fairy1"
+    "display_name": "fairy1",
+    "name": "들꽃요정",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
   },
   "flower_fairy1": {
+    "type": "kid",
     "jump_max_gap": 30,
     "display_name": "flower_fairy1",
     "spawn_state": {
@@ -149,7 +272,10 @@
         "visible": true,
         "anim": "jump",
         "anim_mode": "hold",
-        "dir": "left"
+        "dir": "left",
+        "entity_fx": {
+          "mode": "pulse"
+        }
       }
     ],
     "interact": {

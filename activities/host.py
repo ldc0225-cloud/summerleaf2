@@ -43,7 +43,9 @@ class FieldActivityHost:
         except Exception:
             return True
 
-    def consume_request(self, request: dict, *, player) -> bool:
+    def consume_request(
+        self, request: dict, *, player, objs=None, npcs=None, mask=None, world_data=None
+    ) -> bool:
         """ev_mgr.field_activity_request 소비."""
         if not isinstance(request, dict):
             return False
@@ -58,6 +60,14 @@ class FieldActivityHost:
             print(f"[activity] unknown id: {aid}")
             return False
         params = {k: v for k, v in request.items() if k not in ("id", "action")}
+        if objs is not None:
+            params["objs"] = objs
+        if npcs is not None:
+            params["npcs"] = npcs
+        if mask is not None:
+            params["mask"] = mask
+        if world_data is not None:
+            params["world_data"] = world_data
         try:
             ok = bool(session.begin(player, **params))
         except Exception as e:
@@ -78,6 +88,25 @@ class FieldActivityHost:
                 cancel_fn()
         except Exception:
             self._session = None
+            return
+        if self._session.is_finished:
+            try:
+                self._finished = dict(self._session.result())
+            except Exception:
+                self._finished = {"activity": self.active_id, "won": False, "quit": True}
+            print(f"[activity] cancelled/finished: {self._finished}")
+            self._session = None
+
+    def get_save_location_override(self):
+        if self._session is None:
+            return None
+        try:
+            fn = getattr(self._session, "save_location_override", None)
+            if callable(fn):
+                return fn()
+        except Exception:
+            pass
+        return None
 
     def tick(self, dt_sec: float, player, now_ms: int) -> None:
         if self._session is None:
@@ -100,9 +129,28 @@ class FieldActivityHost:
         if self._session is None:
             return False
         try:
-            return bool(self._session.on_pointer_down(screen_xy, world_xy, now_ms))
+            handled = bool(self._session.on_pointer_down(screen_xy, world_xy, now_ms))
         except Exception:
-            return True
+            handled = True
+        if self._session is not None and self._session.is_finished:
+            try:
+                self._finished = dict(self._session.result())
+            except Exception:
+                self._finished = {"activity": self.active_id, "won": False, "quit": True}
+            print(f"[activity] finished (input): {self._finished}")
+            self._session = None
+        return handled
+
+    def on_primary_key(self, key: int) -> bool:
+        if self._session is None:
+            return False
+        try:
+            fn = getattr(self._session, "on_primary_key", None)
+            if callable(fn):
+                return bool(fn(key))
+        except Exception:
+            pass
+        return False
 
     def on_pointer_up(self, now_ms: int) -> bool:
         if self._session is None:
@@ -112,13 +160,42 @@ class FieldActivityHost:
         except Exception:
             return True
 
+    def draw_world(self, ctx: FieldDrawContext) -> None:
+        if self._session is None:
+            return
+        try:
+            draw_world = getattr(self._session, "draw_world", None)
+            if callable(draw_world):
+                draw_world(ctx)
+            else:
+                self._session.draw(ctx)
+        except Exception as e:
+            print(f"[activity] draw_world error: {e}")
+
     def draw(self, ctx: FieldDrawContext) -> None:
         if self._session is None:
             return
         try:
-            self._session.draw(ctx)
+            draw_world = getattr(self._session, "draw_world", None)
+            if callable(draw_world):
+                draw_world(ctx)
+            else:
+                self._session.draw(ctx)
         except Exception as e:
             print(f"[activity] draw error: {e}")
+
+    def draw_screen(self, ctx: FieldDrawContext) -> None:
+        """월드 줌 이후 논리 화면에 그릴 UI (야구 메뉴·게이지 등)."""
+        if self._session is None:
+            return
+        try:
+            draw_screen = getattr(self._session, "draw_screen", None)
+            if callable(draw_screen):
+                draw_screen(ctx)
+            else:
+                self._session.draw(ctx)
+        except Exception as e:
+            print(f"[activity] draw_screen error: {e}")
 
     def pop_finished_result(self) -> Optional[Dict[str, Any]]:
         """종료 직후 1회만 반환."""

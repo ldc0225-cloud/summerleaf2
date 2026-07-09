@@ -30,6 +30,26 @@ def get_char_type_def(name: str) -> dict:
     return dict(CHAR_ASSETS.get(name, {}) or {})
 
 
+def get_char_ui_name(char_id: str) -> str:
+    """UI·야구 등에 쓸 짧은 이름 (char_defs name → id)."""
+    cid = str(char_id or "").strip()
+    if not cid:
+        return ""
+    info = get_char_type_def(cid)
+    nm = str(info.get("name") or "").strip()
+    return nm or cid
+
+
+def char_body_type(cdef: dict | None) -> str:
+    """캐릭터 체형 — adult | kid | animal (야구 오버레이 세트 선택)."""
+    t = str((cdef or {}).get("type") or "adult").strip().lower()
+    if t in ("kid", "child"):
+        return "kid"
+    if t in ("animal", "pet"):
+        return "animal"
+    return "adult"
+
+
 def build_npc_def(name: str, world_entry: Optional[dict] = None) -> dict:
     """타입(char_defs) + world_data 인스턴스(overrides/behavior/interact) 병합."""
     base = get_char_type_def(name)
@@ -508,7 +528,49 @@ def apply_state_patch(entity, patch: dict) -> bool:
     if patch.get("anim") or patch.get("state"):
         _apply_char_anim(entity, patch)
 
+    if "playing_baseball" in patch:
+        entity.playing_baseball = _coerce_visible(patch.get("playing_baseball"))
+        if not entity.playing_baseball:
+            clr = getattr(entity, "clear_sprite_overlay", None)
+            if callable(clr):
+                try:
+                    clr()
+                except Exception:
+                    pass
+
     return remove
+
+
+def _resolve_entity_fx_patch(ndef: dict, spawn: dict | None, rule: dict | None):
+    """progress 규칙 entity_fx > (규칙 있으면) 타입 기본 > spawn_state > 타입 기본."""
+    if isinstance(rule, dict):
+        if "entity_fx" in rule:
+            return rule.get("entity_fx"), True
+        st = rule.get("state")
+        if isinstance(st, dict) and "entity_fx" in st:
+            return st.get("entity_fx"), True
+        if isinstance(ndef, dict) and "entity_fx" in ndef:
+            return ndef.get("entity_fx"), True
+        return None, True
+    if isinstance(spawn, dict) and "entity_fx" in spawn:
+        return spawn.get("entity_fx"), True
+    if isinstance(ndef, dict) and "entity_fx" in ndef:
+        return ndef.get("entity_fx"), True
+    return None, False
+
+
+def apply_entity_fx_from_def(entity, ndef: dict, *, spawn=None, rule=None) -> None:
+    from engine import apply_entity_visual_patch, clear_entity_fx
+
+    fx, explicit = _resolve_entity_fx_patch(ndef or {}, spawn, rule)
+    if not explicit:
+        # progress 규칙에 FX가 없을 때 tint만 끔 — 이벤트 ZOOM persist 등 entity_def_zoom 은 유지
+        clear_entity_fx(entity)
+        return
+    if fx is None:
+        clear_entity_fx(entity)
+    else:
+        apply_entity_visual_patch(entity, fx)
 
 
 def apply_entity_progress_state(entity, save_data: dict, *, session_vars=None) -> bool:
@@ -528,9 +590,14 @@ def apply_entity_progress_state(entity, save_data: dict, *, session_vars=None) -
             if apply_state_patch(entity, state):
                 return True
         else:
-            row = {k: v for k, v in rule.items() if k not in ("when", "condition", "after")}
+            row = {
+                k: v
+                for k, v in rule.items()
+                if k not in ("when", "condition", "after", "entity_fx")
+            }
             if apply_state_patch(entity, row):
                 return True
+    apply_entity_fx_from_def(entity, ndef, spawn=spawn if isinstance(spawn, dict) else None, rule=rule)
     return bool(getattr(entity, "_progress_spawn_removed", False))
 
 

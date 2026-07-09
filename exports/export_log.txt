@@ -1,0 +1,2 @@
+[5497] EXPORT OK: L:\pygame\summerleaf2\exports\bg_jjangpu_5630.png
+[69151] EXPORT OK: L:\pygame\summerleaf2\exports\bg_baseball1_69164.png

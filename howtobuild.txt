@@ -1,0 +1,9 @@
+ubuntu
+
+cd /mnt/l/pygame/summerleaf2
+
+source .venv/bin/activate
+
+buildozer init
+
+buildozer -v android debug

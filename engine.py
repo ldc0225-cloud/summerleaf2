@@ -1,6 +1,6 @@
 import pygame, os, math, uuid
 import heapq
-from collections import deque
+from collections import deque, OrderedDict
 
 from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES
 try:
@@ -26,6 +26,7 @@ from render_align import (
 from field_runtime import (
     PARALLEL_EFFECT_STEP_TYPES,
     effect_now_ms,
+    fade_alpha_delta,
     parse_camera_step,
     parse_shear_step,
     parse_tilt_step,
@@ -33,12 +34,15 @@ from field_runtime import (
     timed_effect_finished,
     timed_effect_init,
     timed_effect_value,
+    visual_smooth_step,
 )
 
 # --- global image caches (reduce duplicate loads, critical for 1GB devices) ---
-_IMG_CACHE = {}   # abs_path -> pygame.Surface
-_ANIM_CACHE = {}  # norm_dir_path -> [pygame.Surface, ...]  (오브젝트 등)
-_CHAR_ANIM_CACHE = {}  # (norm_dir, state, direction) -> [pygame.Surface, ...]
+_IMG_CACHE = OrderedDict()   # abs_path -> pygame.Surface (LRU)
+_ANIM_CACHE = OrderedDict()  # norm_dir_path -> [pygame.Surface, ...]
+_CHAR_ANIM_CACHE = OrderedDict()  # (norm_dir, state, direction) -> [pygame.Surface, ...]
+_IMG_CACHE_MAX = 2048
+_ANIM_CACHE_MAX = 512
 
 # --- swing prototype caches (kept here to slim main.py) ---
 _SWING_IMG_IDLE = None
@@ -298,6 +302,10 @@ def _load_image_cached(path: str):
     p = os.path.normpath(path)
     img = _IMG_CACHE.get(p)
     if img is not None:
+        try:
+            _IMG_CACHE.move_to_end(p)
+        except Exception:
+            pass
         return img
     try:
         raw = pygame.image.load(p)
@@ -308,10 +316,15 @@ def _load_image_cached(path: str):
     except Exception:
         return None
     _IMG_CACHE[p] = img
-    # defensive cap: avoid unbounded growth on dev machines
-    if len(_IMG_CACHE) > 2048:
-        _IMG_CACHE.clear()
-        _IMG_CACHE[p] = img
+    try:
+        _IMG_CACHE.move_to_end(p)
+    except Exception:
+        pass
+    while len(_IMG_CACHE) > _IMG_CACHE_MAX:
+        try:
+            _IMG_CACHE.popitem(last=False)
+        except Exception:
+            break
     return img
 
 
@@ -494,6 +507,10 @@ def _load_anim_dir_cached(dir_path: str):
     d = os.path.normpath(dir_path)
     cached = _ANIM_CACHE.get(d)
     if cached is not None:
+        try:
+            _ANIM_CACHE.move_to_end(d)
+        except Exception:
+            pass
         return cached
     if not (os.path.exists(d) and os.path.isdir(d)):
         return None
@@ -512,9 +529,15 @@ def _load_anim_dir_cached(dir_path: str):
     if not frames:
         return None
     _ANIM_CACHE[d] = frames
-    if len(_ANIM_CACHE) > 512:
-        _ANIM_CACHE.clear()
-        _ANIM_CACHE[d] = frames
+    try:
+        _ANIM_CACHE.move_to_end(d)
+    except Exception:
+        pass
+    while len(_ANIM_CACHE) > _ANIM_CACHE_MAX:
+        try:
+            _ANIM_CACHE.popitem(last=False)
+        except Exception:
+            break
     return frames
 
 
@@ -605,6 +628,10 @@ def _load_char_anim_dir_cached(dir_path: str, state: str, direction: str, char_n
     cache_key = (d, str(state), str(direction))
     cached = _CHAR_ANIM_CACHE.get(cache_key)
     if cached is not None:
+        try:
+            _CHAR_ANIM_CACHE.move_to_end(cache_key)
+        except Exception:
+            pass
         return cached
     if not (os.path.exists(d) and os.path.isdir(d)):
         return None
@@ -629,9 +656,15 @@ def _load_char_anim_dir_cached(dir_path: str, state: str, direction: str, char_n
     if not frames:
         return None
     _CHAR_ANIM_CACHE[cache_key] = frames
-    if len(_CHAR_ANIM_CACHE) > 512:
-        _CHAR_ANIM_CACHE.clear()
-        _CHAR_ANIM_CACHE[cache_key] = frames
+    try:
+        _CHAR_ANIM_CACHE.move_to_end(cache_key)
+    except Exception:
+        pass
+    while len(_CHAR_ANIM_CACHE) > _ANIM_CACHE_MAX:
+        try:
+            _CHAR_ANIM_CACHE.popitem(last=False)
+        except Exception:
+            break
     return frames
 
 
@@ -882,6 +915,315 @@ def _scan_music_library():
     return out
 
 
+# --- vertical top-anchored shear (bg/mask) — main.py 와 동일 공식, dx 병합으로 blit 횟수 축소 ---
+_VERTICAL_TOP_SHEAR_PLAN_CACHE = OrderedDict()
+_VERTICAL_TOP_SHEAR_PLAN_MAX = 64
+
+
+def vertical_top_shear_merged_plan(surface_h: int, shear_px: int, slice_h: int):
+    """round((1 - yy/h) * shear) 슬라이스 계획. 연속 동일 dx 행은 blit 1회로 병합."""
+    try:
+        sh = int(surface_h)
+        spx = int(shear_px)
+        sh_slice = int(slice_h)
+    except Exception:
+        return ()
+    sh = max(0, sh)
+    spx = max(0, spx)
+    sh_slice = max(1, min(64, sh_slice))
+    key = (sh, spx, sh_slice)
+    cached = _VERTICAL_TOP_SHEAR_PLAN_CACHE.get(key)
+    if cached is not None:
+        try:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        except Exception:
+            pass
+        return cached
+    raw = []
+    for yy in range(0, sh, sh_slice):
+        hh = min(sh_slice, sh - yy)
+        rel = 0.0 if sh <= 1 else (yy / float(sh))
+        dxs = int(round((1.0 - rel) * float(spx)))
+        raw.append((yy, hh, dxs))
+    if not raw:
+        plan = ()
+    else:
+        merged = []
+        i = 0
+        n = len(raw)
+        while i < n:
+            yy0, hh0, dx0 = raw[i]
+            total_h = hh0
+            j = i + 1
+            while j < n and raw[j][2] == dx0:
+                total_h += raw[j][1]
+                j += 1
+            merged.append((yy0, total_h, dx0))
+            i = j
+        plan = tuple(merged)
+    try:
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE[key] = plan
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        while len(_VERTICAL_TOP_SHEAR_PLAN_CACHE) > _VERTICAL_TOP_SHEAR_PLAN_MAX:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.popitem(last=False)
+    except Exception:
+        pass
+    return plan
+
+
+def apply_vertical_top_shear(dst, src, shear_px, slice_h, *, plan=None, clear_dst=True):
+    """배경/마스크용 상단 고정 선형 쉬어 — 시각 결과는 main 슬라이스 루프와 동일."""
+    if dst is None or src is None:
+        return dst
+    try:
+        sw = int(src.get_width())
+        sh = int(src.get_height())
+    except Exception:
+        return dst
+    if sw <= 0 or sh <= 0:
+        return dst
+    try:
+        spx = int(shear_px)
+    except Exception:
+        spx = 0
+    if spx <= 0:
+        if clear_dst:
+            try:
+                dst.fill((0, 0, 0, 0))
+            except Exception:
+                pass
+        try:
+            dst.blit(src, (0, 0))
+        except Exception:
+            pass
+        return dst
+    try:
+        sh_slice = int(slice_h)
+    except Exception:
+        sh_slice = 8
+    sh_slice = max(1, min(64, sh_slice))
+    if plan is None:
+        plan = vertical_top_shear_merged_plan(sh, spx, sh_slice)
+    if clear_dst:
+        try:
+            dst.fill((0, 0, 0, 0))
+        except Exception:
+            pass
+    blit = dst.blit
+    Rect = pygame.Rect
+    for yy, hh, dxs in plan:
+        try:
+            blit(src, (dxs, yy), area=Rect(0, yy, sw, hh))
+        except Exception:
+            pass
+    return dst
+
+
+def vertical_top_shear_merged_plan_region(
+    surface_h_full: int,
+    shear_px: int,
+    slice_h: int,
+    row_start: int,
+    row_end: int,
+):
+    """전체 높이 sh_full 기준 rel 공식으로 [row_start, row_end) 구간만 슬라이스·병합."""
+    try:
+        shf = int(surface_h_full)
+        spx = int(shear_px)
+        sh_slice = int(slice_h)
+        r0 = int(row_start)
+        r1 = int(row_end)
+    except Exception:
+        return ()
+    shf = max(1, shf)
+    spx = max(0, spx)
+    sh_slice = max(1, min(64, sh_slice))
+    r0 = max(0, min(shf, r0))
+    r1 = max(r0, min(shf, r1))
+    if r1 <= r0 or spx <= 0:
+        return ()
+    key = (shf, spx, sh_slice, r0, r1)
+    cached = _VERTICAL_TOP_SHEAR_PLAN_CACHE.get(key)
+    if cached is not None:
+        try:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        except Exception:
+            pass
+        return cached
+    raw = []
+    for yy in range(r0, r1, sh_slice):
+        hh = min(sh_slice, r1 - yy, shf - yy)
+        if hh <= 0:
+            break
+        rel = 0.0 if shf <= 1 else (yy / float(shf))
+        dxs = int(round((1.0 - rel) * float(spx)))
+        raw.append((yy, hh, dxs))
+    if not raw:
+        plan = ()
+    else:
+        merged = []
+        i = 0
+        n = len(raw)
+        while i < n:
+            yy0, hh0, dx0 = raw[i]
+            total_h = hh0
+            j = i + 1
+            while j < n and raw[j][2] == dx0:
+                total_h += raw[j][1]
+                j += 1
+            merged.append((yy0, total_h, dx0))
+            i = j
+        plan = tuple(merged)
+    try:
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE[key] = plan
+        _VERTICAL_TOP_SHEAR_PLAN_CACHE.move_to_end(key)
+        while len(_VERTICAL_TOP_SHEAR_PLAN_CACHE) > _VERTICAL_TOP_SHEAR_PLAN_MAX:
+            _VERTICAL_TOP_SHEAR_PLAN_CACHE.popitem(last=False)
+    except Exception:
+        pass
+    return plan
+
+
+def apply_vertical_top_shear_region(
+    dst,
+    src,
+    shear_px,
+    slice_h,
+    row_start,
+    row_end,
+    surface_h_full,
+    *,
+    plan=None,
+    clear_dst=True,
+):
+    """전체 맵 쉬어의 [row_start,row_end) 부분만 dst(높이=row_end-row_start)에 기록."""
+    if dst is None or src is None:
+        return dst
+    try:
+        sw = int(src.get_width())
+        shf = int(surface_h_full)
+        r0 = int(row_start)
+        r1 = int(row_end)
+        spx = int(shear_px)
+    except Exception:
+        return dst
+    if sw <= 0 or shf <= 0 or spx <= 0 or r1 <= r0:
+        return dst
+    r0 = max(0, min(shf, r0))
+    r1 = max(r0, min(shf, r1))
+    strip_h = r1 - r0
+    try:
+        sh_slice = int(slice_h)
+    except Exception:
+        sh_slice = 8
+    sh_slice = max(1, min(64, sh_slice))
+    if plan is None:
+        plan = vertical_top_shear_merged_plan_region(shf, spx, sh_slice, r0, r1)
+    if clear_dst:
+        try:
+            dst.fill((0, 0, 0, 0))
+        except Exception:
+            pass
+    blit = dst.blit
+    Rect = pygame.Rect
+    for yy, hh, dxs in plan:
+        try:
+            blit(src, (dxs, yy - r0), area=Rect(0, yy, sw, hh))
+        except Exception:
+            pass
+    return dst
+
+
+def shear_strip_row_span(surface_h, blit_y, view_h, *, pad_px=64, bucket_px=128):
+    """화면에 보이는 tilt 행 구간 [r0,r1). bucket 으로 수직 팬 시 캐시 재사용."""
+    try:
+        sh = int(surface_h)
+        by = float(blit_y)
+        vh = int(view_h)
+        pad = max(0, int(pad_px))
+        bucket = max(16, int(bucket_px))
+    except Exception:
+        return 0, max(1, int(surface_h or 1))
+    sh = max(1, sh)
+    vh = max(1, vh)
+    r0 = max(0, int(math.floor(-by)) - pad)
+    r1 = min(sh, int(math.ceil(float(vh) - by)) + pad)
+    if r1 <= r0:
+        r0, r1 = 0, sh
+    r0b = (r0 // bucket) * bucket
+    r1b = min(sh, ((r1 + bucket - 1) // bucket) * bucket)
+    if r1b <= r0b:
+        r0b, r1b = 0, sh
+    return int(r0b), int(r1b)
+
+
+# --- sprite field shear cache (동일 qtop/qbot 밴드 오브젝트 간 공유) ---
+_SPRITE_FIELD_SHEAR_CACHE = OrderedDict()  # key -> (Surface, dx_adj, est_mb)
+_SPRITE_FIELD_SHEAR_CACHE_MB = 0.0
+
+
+def _sprite_field_shear_cache_get(key):
+    v = _SPRITE_FIELD_SHEAR_CACHE.get(key)
+    if v is None:
+        return None
+    try:
+        _SPRITE_FIELD_SHEAR_CACHE.move_to_end(key)
+    except Exception:
+        pass
+    return v[0], int(v[1])
+
+
+def _sprite_field_shear_cache_put(key, surf, dx_adj):
+    global _SPRITE_FIELD_SHEAR_CACHE_MB
+    if surf is None:
+        return
+    try:
+        w, h = surf.get_size()
+    except Exception:
+        return
+    est = _est_rgba_mb(w, h)
+    try:
+        mb_limit = float(CONFIG.get("SPRITE_FIELD_SHEAR_CACHE_MB_LIMIT", 48.0))
+    except Exception:
+        mb_limit = 48.0
+    mb_limit = max(8.0, min(256.0, mb_limit))
+    try:
+        max_items = int(CONFIG.get("SPRITE_FIELD_SHEAR_CACHE_MAX_ITEMS", 128) or 128)
+    except Exception:
+        max_items = 128
+    max_items = max(16, min(1024, max_items))
+    if est <= 0.0 or est > mb_limit * 0.5:
+        return
+    old = _SPRITE_FIELD_SHEAR_CACHE.get(key)
+    if old is not None:
+        try:
+            _SPRITE_FIELD_SHEAR_CACHE_MB -= float(old[2])
+        except Exception:
+            pass
+        try:
+            del _SPRITE_FIELD_SHEAR_CACHE[key]
+        except Exception:
+            pass
+    try:
+        while (_SPRITE_FIELD_SHEAR_CACHE_MB + est) > mb_limit and _SPRITE_FIELD_SHEAR_CACHE:
+            _k, (_s, _dx, mb) = _SPRITE_FIELD_SHEAR_CACHE.popitem(last=False)
+            try:
+                _SPRITE_FIELD_SHEAR_CACHE_MB -= float(mb)
+            except Exception:
+                pass
+        while len(_SPRITE_FIELD_SHEAR_CACHE) >= max_items and _SPRITE_FIELD_SHEAR_CACHE:
+            _k, (_s, _dx, mb) = _SPRITE_FIELD_SHEAR_CACHE.popitem(last=False)
+            try:
+                _SPRITE_FIELD_SHEAR_CACHE_MB -= float(mb)
+            except Exception:
+                pass
+    except Exception:
+        _SPRITE_FIELD_SHEAR_CACHE.clear()
+        _SPRITE_FIELD_SHEAR_CACHE_MB = 0.0
+    _SPRITE_FIELD_SHEAR_CACHE[key] = (surf, int(dx_adj), float(est))
+    _SPRITE_FIELD_SHEAR_CACHE_MB += float(est)
+
+
 def _shear_surface_by_field_xoffset(
     render_img: pygame.Surface,
     top_y_screen: float,
@@ -942,13 +1284,21 @@ def _shear_surface_by_field_xoffset(
 
     out_w = w + (mx - mn)
     out = pygame.Surface((out_w, h), pygame.SRCALPHA)
+    bands = []
     i = 0
     for yy in range(0, h, slice_h):
         hh = min(slice_h, h - yy)
-        dx = (shifts[i] - mn)
+        dx = int(shifts[i] - mn)
         i += 1
+        if bands and bands[-1][2] == dx and bands[-1][0] + bands[-1][1] == yy:
+            bands[-1] = (bands[-1][0], bands[-1][1] + hh, dx)
+        else:
+            bands.append((yy, hh, dx))
+    blit = out.blit
+    Rect = pygame.Rect
+    for yy, hh, dx in bands:
         try:
-            out.blit(render_img, (dx, yy), area=pygame.Rect(0, yy, w, hh))
+            blit(render_img, (dx, yy), area=Rect(0, yy, w, hh))
         except Exception:
             pass
     # bottom 행은 shift=0 → 원래 x에 오도록 dx_adjust=mn 반환
@@ -1194,10 +1544,7 @@ def _blit_feet_shadow(
     # x_offset_fn에는 정수 픽셀 y를 넣는다(가벼운 안정화).
     cy_q = float(int(round(float(cy))))
     if callable(x_offset_fn):
-        try:
-            cx = float(cx) + float(x_offset_fn(float(cy_q)))
-        except Exception:
-            pass
+        cx = float(cx) + float(shear_base_offset_px(cy_q, x_offset_fn))
     base_rx = float(CONFIG.get("SHADOW_ELLIPSE_RX", 15))
     base_ry = float(CONFIG.get("SHADOW_ELLIPSE_RY", 7))
     rx = max(2, int(base_rx * zoom * size_scale * entity_scale_mul))
@@ -1294,6 +1641,22 @@ def load_anim_auto(char_name, state, direction):
                 return [img]
             return [_missing_anim_placeholder()]
     return frames
+
+
+def load_baseball_overlay_frames(body_type: str, anim_set: str):
+    """
+    공용 야구 오버레이 — assets/images/character/baseball_a|k/<anim_set>_left/
+    body_type: adult | kid | animal (animal → 빈 목록)
+    anim_set: idle_baseball | swing_baseball
+    """
+    bt = str(body_type or "adult").strip().lower()
+    if bt in ("animal", "pet"):
+        return []
+    folder = "baseball_k" if bt in ("kid", "child") else "baseball_a"
+    st = str(anim_set or "idle_baseball").strip().lower()
+    path = os.path.join("assets", "images", "character", folder, f"{st}_left")
+    frames = _load_anim_dir_cached(path)
+    return list(frames) if frames else []
 
 
 def _load_char_state_or_fallback(char_name, state, fallback="walk"):
@@ -1681,9 +2044,12 @@ class BaseCharacter:
         # - duration_ms > 0: 해당 시간동안 반복 후 종료(원래 상태로 복귀)
         # - duration_ms <= 0 or None: 다음 명령이 오기 전까지 지속
         self._anim_override = None  # {"state":str,"t_end":int|None,"prev":str,"loop":bool}
+        self.playing_baseball = False
+        self._sprite_overlay = None
         # 이벤트 ZOOM: 카메라 줌과 별도로 스프라이트만 추가 배율 (1.0=기본)
         self.event_entity_zoom = 1.0
         self.event_entity_zoom_target = 1.0
+        self.entity_def_zoom = 1.0
         try:
             self.event_entity_zoom_speed = float(CONFIG.get("ENTITY_ZOOM_LERP", 0.12))
         except Exception:
@@ -1872,8 +2238,113 @@ class BaseCharacter:
             return
         self.state = "idle"
 
+    def clear_sprite_overlay(self):
+        self._sprite_overlay = None
+
+    def set_sprite_overlay(self, frames, *, loop=True, fps=6.0):
+        if not frames:
+            self._sprite_overlay = None
+            return
+        self._sprite_overlay = {
+            "frames": list(frames),
+            "idx": 0,
+            "last_ms": pygame.time.get_ticks(),
+            "fps": max(1.0, float(fps)),
+            "loop": bool(loop),
+            "phase": "play",
+            "hold_until_ms": 0,
+            "release_frames": None,
+            "hold_sec": 0.0,
+        }
+
+    def play_sprite_overlay_once(
+        self, frames, *, fps=8.0, hold_sec=2.0, release_frames=None
+    ):
+        if not frames:
+            return
+        self._sprite_overlay = {
+            "frames": list(frames),
+            "idx": 0,
+            "last_ms": pygame.time.get_ticks(),
+            "fps": max(1.0, float(fps)),
+            "loop": False,
+            "phase": "play",
+            "hold_until_ms": 0,
+            "release_frames": list(release_frames) if release_frames else None,
+            "hold_sec": max(0.0, float(hold_sec)),
+        }
+
+    def _tick_sprite_overlay(self, now_ms):
+        ov = getattr(self, "_sprite_overlay", None)
+        if not isinstance(ov, dict):
+            return
+        frames = ov.get("frames") or []
+        if not frames:
+            self._sprite_overlay = None
+            return
+        if ov.get("phase") == "hold":
+            if now_ms >= int(ov.get("hold_until_ms") or 0):
+                rel = ov.get("release_frames")
+                if rel:
+                    self.set_sprite_overlay(rel, loop=True, fps=float(ov.get("fps") or 6.0))
+                else:
+                    self.clear_sprite_overlay()
+            return
+        fps = float(ov.get("fps") or 6.0)
+        delay_ms = max(1, int(round(1000.0 / fps)))
+        last = int(ov.get("last_ms") or 0)
+        if now_ms - last < delay_ms:
+            return
+        ov["last_ms"] = now_ms
+        n = len(frames)
+        if ov.get("loop"):
+            ov["idx"] = (int(ov.get("idx") or 0) + 1) % n
+            return
+        idx = int(ov.get("idx") or 0)
+        if idx < n - 1:
+            ov["idx"] = idx + 1
+            return
+        hold_sec = float(ov.get("hold_sec") or 0.0)
+        rel = ov.get("release_frames")
+        if hold_sec > 0.0 and rel:
+            ov["phase"] = "hold"
+            ov["hold_until_ms"] = int(now_ms + hold_sec * 1000.0)
+        elif rel:
+            self.set_sprite_overlay(rel, loop=True, fps=fps)
+        else:
+            self.clear_sprite_overlay()
+
+    def _draw_sprite_overlay(self, screen, feet_x_px, feet_y_px, zoom_mul, sprite_perspective_q=None):
+        ov = getattr(self, "_sprite_overlay", None)
+        if not isinstance(ov, dict):
+            return
+        frames = ov.get("frames") or []
+        if not frames:
+            return
+        idx = int(ov.get("idx") or 0) % len(frames)
+        img = frames[idx]
+        if str(getattr(self, "direction", "left") or "left") == "right":
+            try:
+                img = pygame.transform.flip(img, True, False)
+            except Exception:
+                pass
+        render_img = get_cached_scaled_sprite(
+            img,
+            float(zoom_mul),
+            sprite_perspective_q=sprite_perspective_q,
+            sprite_tilt=getattr(self, "sprite_tilt", 1.0),
+        )
+        dx, dy = blit_topleft_bottom_center(
+            int(feet_x_px),
+            int(feet_y_px),
+            render_img.get_width(),
+            render_img.get_height(),
+        )
+        screen.blit(render_img, (dx, dy))
+
     def update_anim(self):
         now = pygame.time.get_ticks()
+        self._tick_sprite_overlay(now)
         ao = getattr(self, "_anim_override", None)
         if ao is not None:
             t_end = ao.get("t_end")
@@ -1956,10 +2427,9 @@ class BaseCharacter:
         if not self.is_visible: return # 플레이어가 숨김 상태면 그리지 않음
 
         try:
-            ez = float(getattr(self, "event_entity_zoom", 1.0) or 1.0)
+            ez = entity_combined_zoom_mul(self)
         except Exception:
             ez = 1.0
-        ez = max(0.05, min(8.0, ez))
         eff = float(zoom) * ez
 
         self._draw_feet_shadow(
@@ -1986,6 +2456,7 @@ class BaseCharacter:
                 render_img.set_alpha(a)
             except Exception:
                 pass
+        render_img = apply_entity_fx_to_image(render_img, getattr(self, "entity_fx", None))
         render_img = get_cached_scaled_sprite(
             render_img,
             eff,
@@ -2004,10 +2475,7 @@ class BaseCharacter:
         feet_y_q = float(int(round(float(feet_y))))
         feet_x = float((self.pos[0] - cam_x) * zoom)
         if callable(x_offset_fn):
-            try:
-                feet_x = float(feet_x) + float(x_offset_fn(float(feet_y_q)))
-            except Exception:
-                pass
+            feet_x = float(feet_x) + float(shear_base_offset_px(feet_y_q, x_offset_fn))
         h_off = float(getattr(self, "height", 0) or 0)
         if h_off > 0.0:
             feet_y = float(feet_y_q) - h_off * float(zoom)
@@ -2018,6 +2486,14 @@ class BaseCharacter:
         dx, dy = blit_topleft_bottom_center(fpx, fpy, render_img.get_width(), render_img.get_height())
 
         screen.blit(render_img, (dx, dy))
+        if getattr(self, "_sprite_overlay", None) is not None:
+            self._draw_sprite_overlay(
+                screen,
+                fpx,
+                fpy,
+                eff,
+                sprite_perspective_q=sprite_perspective_q,
+            )
 
         # 3. 손에 든 물건 — is_held 일 때만 (발 중앙 앵커 = FieldItem·ANIM_ONCE 와 동일 규칙)
         if self.held_item and bool(getattr(self.held_item, "is_held", False)):
@@ -2025,6 +2501,7 @@ class BaseCharacter:
             if len(getattr(hi, "frames", []) or []) > 1:
                 hi.update_anim()
             h_img = hi.image
+            h_img = apply_entity_fx_to_image(h_img, getattr(hi, "entity_fx", None))
             if self.direction == "right":
                 try:
                     fc = getattr(self, "_held_flip_cache", None)
@@ -2049,7 +2526,10 @@ class BaseCharacter:
             hi.origin_pos[1] = foot_wy
 
             try:
-                hez = float(getattr(hi, "event_entity_zoom", 1.0) or 1.0)
+                try:
+                    hez = entity_combined_zoom_mul(hi)
+                except Exception:
+                    hez = 1.0
             except Exception:
                 hez = 1.0
             hez = max(0.05, min(8.0, hez))
@@ -2103,6 +2583,11 @@ class MaskWalkingCharacter(BaseCharacter):
         self._follow_target = None  # (x,y) or None
         self._follow_slot_goal = None  # 리더 뒤 목표 슬롯; 도랑 점프 경로 덮어쓰기 방지용
         self._follow_last_plan_ms = 0
+        # 캐릭터/오브젝트 자연 회피(동적 A* 재계획) 상태 — 효율 위해 쿨다운/횟수 제한
+        self._avoid_block_since_ms = 0   # 현재 막힘이 시작된 시각(0=안 막힘)
+        self._avoid_replans = 0          # 연속 막힘 동안 누적 재계획 횟수
+        self._avoid_next_replan_ms = 0   # 다음 재계획 허용 시각(쿨다운)
+        self._steer_side = 0             # 장애물 비껴가기 선호 방향(+1/-1, 0=없음) — 좌우 떨림 방지
 
     def ground_feet_position(self):
         ja = self._jump_arc
@@ -2325,6 +2810,23 @@ class MaskWalkingCharacter(BaseCharacter):
         grids = job.get("grids") or []
         gi = int(job.get("grid_idx") or 0)
         if gi >= len(grids):
+            # 모든 격자 실패 → 마지막으로 코너 탈출(BFS로 빠져나간 뒤 A*) 1회 시도.
+            # 좁은 모서리/장애물 옆에 끼어 A* 시작점이 막힌 경우를 구제한다.
+            if (not job.get("escape_tried")) and bool(CONFIG.get("PATHFIND_CORNER_ESCAPE_ENABLED", True)):
+                job["escape_tried"] = True
+                base_vis = int(job.get("base_vis") or 200)
+                grid_anchor = min(grids) if grids else max(1, int(CONFIG.get("PATHFIND_GRID_PX", 5)))
+                mv_esc = max(base_vis * 2, 5200)
+                try:
+                    raw = self._plan_path_corner_escape(
+                        job["tx"], job["ty"], mask_img, objects or [], npcs or [],
+                        (job["sx"], job["sy"]), grid_anchor, mv_esc,
+                    )
+                except Exception:
+                    raw = []
+                if self._apply_raw_path(raw, grid_anchor):
+                    self._path_plan_job = None
+                    return
             self._path_plan_job = None
             return
 
@@ -2363,28 +2865,7 @@ class MaskWalkingCharacter(BaseCharacter):
         if raw:
             job["result"] = raw
             # 완료: 현재 위치에 가장 가까운 지점부터 경로를 적용(뒤로 돌아가는 현상 방지)
-            cx, cy = float(self.pos[0]), float(self.pos[1])
-            best_i = 0
-            best_d = None
-            for i, p in enumerate(raw):
-                try:
-                    d = math.hypot(float(p[0]) - cx, float(p[1]) - cy)
-                except Exception:
-                    continue
-                if best_d is None or d < best_d:
-                    best_d = d
-                    best_i = i
-            try:
-                near_cut = float(CONFIG.get("PATHFIND_ATTACH_NEAR_CUT_PX", max(6.0, float(g) * 2.0)))
-            except Exception:
-                near_cut = max(6.0, float(g) * 2.0)
-            if best_d is not None and best_d <= near_cut:
-                raw2 = raw[int(best_i):]
-            else:
-                raw2 = raw
-            # 현재 경로를 A* 결과로 자연스럽게 덮어쓰기
-            self.path = [(float(p[0]), float(p[1]), 0) for p in (raw2 or raw)]
-            self._strip_redundant_path_head()
+            self._apply_raw_path(raw, g)
             self._path_plan_job = None
             return
 
@@ -2526,14 +3007,18 @@ class MaskWalkingCharacter(BaseCharacter):
             target_x, target_y, mask_img, objects, npcs, (int(self.pos[0]), int(self.pos[1])), g, mv
         )
 
-    def check_walkable(self, x, y, mask_img, objects, npcs):
-        """기존의 복잡한 레이어 및 충돌 판정을 독립적으로 수행합니다."""
+    def _walk_probe(self, x, y, mask_img, objects, npcs):
+        """check_walkable 와 동일 판정 + 막힌 사유를 함께 반환.
+
+        반환: (walkable, layer, reason)
+          reason in (None, "bounds", "terrain", "layer", "object", "npc")
+        """
         cx, cy = int(x), int(y)
         if not (0 <= cx < mask_img.get_width() and 0 <= cy < mask_img.get_height()):
-            return False, self.layer
+            return False, self.layer, "bounds"
 
         if mask_terrain_class(mask_img, x, y) != "walk":
-            return False, self.layer
+            return False, self.layer, "terrain"
 
         col = mask_img.get_at((cx, cy))
         r, g, b = col[0], col[1], col[2]
@@ -2546,22 +3031,27 @@ class MaskWalkingCharacter(BaseCharacter):
         elif g > r and g > b: new_layer = 2; can_pass = True
         elif b > r and b > g: new_layer = 3; can_pass = True
 
-        if not can_pass: return False, self.layer
+        if not can_pass: return False, self.layer, "layer"
 
         # 오브젝트 충돌 (살짝 넉넉하게 판정하여 끼임 방지)
         for o in objects:
             if o.collision and not getattr(o, 'is_held', False) and getattr(o, 'layer', 0) == new_layer:
                 rw = o.rect_for_logic.width // 2 - 2 # 2픽셀 여유
                 if abs(o.pos[0] - x) < rw and -8 < y - o.pos[1] < 1:
-                    return False, new_layer
-        
+                    return False, new_layer, "object"
+
         if npcs:
             for n in npcs:
                 if n != self and getattr(n, 'layer', 0) == new_layer:
                     if abs(n.pos[0] - x) < 10 and -8 < y - n.pos[1] < 1:
-                        return False, new_layer
-                        
-        return True, new_layer
+                        return False, new_layer, "npc"
+
+        return True, new_layer, None
+
+    def check_walkable(self, x, y, mask_img, objects, npcs):
+        """기존의 복잡한 레이어 및 충돌 판정을 독립적으로 수행합니다."""
+        walkable, layer, _ = self._walk_probe(x, y, mask_img, objects, npcs)
+        return walkable, layer
 
     def move(self, mask_img, objects, npcs=None):
         """계산된 경로(Path)를 따라 한 스텝씩 이동합니다."""
@@ -2708,16 +3198,249 @@ class MaskWalkingCharacter(BaseCharacter):
                 self.event_waypoints = None
                 return
 
-            walkable, nl = self.check_walkable(nx, ny, mask_img, objects, npcs)
+            walkable, nl, block_reason = self._walk_probe(nx, ny, mask_img, objects, npcs)
             if walkable:
                 self.pos = [nx, ny]
                 self.layer = nl
                 self.state = "run" if str(getattr(self, "_move_mode", "walk")) == "run" else "walk"
                 self._fire_jump_pad_hooks(mask_img, objects, npcs)
+                # 직진 성공 → 회피/스티어 상태 초기화(다시 막히면 새로 판단)
+                self._avoid_block_since_ms = 0
+                self._avoid_replans = 0
+                self._steer_side = 0
             else:
+                # 캐릭터/오브젝트에 막힌 경우: 멈추지 말고 목표 방향으로 비껴 가며 우회 시도
+                if self._try_avoid(block_reason, mask_img, objects, npcs, desired_dx=dx, desired_dy=dy):
+                    return
                 self.path = []
                 self.state = "idle"
                 self.event_waypoints = None
+                self._avoid_reset()
+
+    def _avoid_reset(self):
+        self._avoid_block_since_ms = 0
+        self._avoid_replans = 0
+        self._avoid_next_replan_ms = 0
+        self._steer_side = 0
+
+    def _steer_around_step(self, desired_dx, desired_dy, mask_img, objects, npcs):
+        """막힌 목표 방향 기준으로 좌우로 각도를 틀어, 갈 수 있는 가장 가까운 방향으로 한 칸 전진.
+
+        명령 즉시 그 방향으로 움직이며 장애물을 따라 비껴 가도록 한다(벽 슬라이드/스티어링).
+        좌우 떨림 방지를 위해 직전에 택한 방향(_steer_side)을 우선 시도한다.
+        실제로 한 칸 전진했으면 True.
+        """
+        if mask_img is None:
+            return False
+        if abs(float(desired_dx)) < 1e-9 and abs(float(desired_dy)) < 1e-9:
+            return False
+        try:
+            spd = float(CONFIG["CHAR_SPEED"]) * float(getattr(self, "event_speed_mul", 1.0) or 1.0)
+        except Exception:
+            spd = float(CONFIG.get("CHAR_SPEED", 1.6))
+        base = math.atan2(float(desired_dy), float(desired_dx))
+        try:
+            max_deg = float(CONFIG.get("AVOID_STEER_MAX_DEG", 105))
+        except Exception:
+            max_deg = 105.0
+        try:
+            step_deg = float(CONFIG.get("AVOID_STEER_STEP_DEG", 18))
+        except Exception:
+            step_deg = 18.0
+        step_deg = max(5.0, min(45.0, step_deg))
+        max_deg = max(step_deg, min(150.0, max_deg))
+
+        pref = int(getattr(self, "_steer_side", 0) or 0)
+        # 시도 각도(라디안) 목록: 크기를 키워 가며, 같은 크기에서는 선호 방향 먼저.
+        offsets = []
+        d = step_deg
+        while d <= max_deg + 1e-6:
+            if pref >= 0:
+                offsets.append(+d)
+                offsets.append(-d)
+            else:
+                offsets.append(-d)
+                offsets.append(+d)
+            d += step_deg
+
+        for off_deg in offsets:
+            a = base + math.radians(off_deg)
+            nx = self.pos[0] + math.cos(a) * spd
+            ny = self.pos[1] + math.sin(a) * spd
+            walkable, nl, _ = self._walk_probe(nx, ny, mask_img, objects, npcs)
+            if walkable:
+                self.pos = [nx, ny]
+                self.layer = nl
+                stepx = math.cos(a) * spd
+                try:
+                    dir_eps = float(CONFIG.get("DIR_CHANGE_EPS_X", 0.28))
+                except Exception:
+                    dir_eps = 0.28
+                if abs(stepx) >= dir_eps:
+                    self.direction = "left" if stepx < 0 else "right"
+                self.state = "run" if str(getattr(self, "_move_mode", "walk")) == "run" else "walk"
+                self._steer_side = 1 if off_deg > 0 else -1
+                self._fire_jump_pad_hooks(mask_img, objects, npcs)
+                return True
+        return False
+
+    def _terrain_walk_ok(self, x, y, mask_img):
+        """엔티티는 무시하고 지형만 walk 인지(끼임 탈출용)."""
+        cx, cy = int(x), int(y)
+        if not (0 <= cx < mask_img.get_width() and 0 <= cy < mask_img.get_height()):
+            return False
+        return mask_terrain_class(mask_img, x, y) == "walk"
+
+    def _nearest_blocker_pos(self, objects, npcs):
+        """현재 위치와 겹쳐 있는 가장 가까운 오브젝트/NPC 의 중심 좌표(없으면 None)."""
+        px, py = float(self.pos[0]), float(self.pos[1])
+        best = None
+        best_d = None
+        for o in objects or []:
+            if getattr(o, "collision", False) and not getattr(o, "is_held", False) and getattr(o, "layer", 0) == self.layer:
+                try:
+                    rw = o.rect_for_logic.width // 2 - 2
+                except Exception:
+                    rw = 8
+                if abs(o.pos[0] - px) < rw and -8 < py - o.pos[1] < 1:
+                    d = math.hypot(px - o.pos[0], py - o.pos[1])
+                    if best_d is None or d < best_d:
+                        best_d = d
+                        best = (float(o.pos[0]), float(o.pos[1]))
+        for n in npcs or []:
+            if n is not self and getattr(n, "layer", 0) == self.layer:
+                if abs(n.pos[0] - px) < 10 and -8 < py - n.pos[1] < 1:
+                    d = math.hypot(px - n.pos[0], py - n.pos[1])
+                    if best_d is None or d < best_d:
+                        best_d = d
+                        best = (float(n.pos[0]), float(n.pos[1]))
+        return best
+
+    def _unstick_step(self, mask_img, objects, npcs):
+        """현재 위치가 엔티티와 겹쳐 끼었으면 장애물 반대 방향으로 한 칸 빠져나온다.
+
+        처리(이동)했으면 True. 겹침이 아니거나 빠져나갈 지형이 없으면 False.
+        지형(벽/도랑)만 검사하고 엔티티는 무시한다 — 겹친 상태에서 빠져나오는 동작이므로.
+        """
+        if mask_img is None:
+            return False
+        walkable, _, reason = self._walk_probe(self.pos[0], self.pos[1], mask_img, objects, npcs)
+        if walkable or reason not in ("object", "npc"):
+            return False
+        blocker = self._nearest_blocker_pos(objects, npcs)
+        if blocker is None:
+            return False
+        dx = float(self.pos[0]) - blocker[0]
+        dy = float(self.pos[1]) - blocker[1]
+        ln = math.hypot(dx, dy)
+        base = math.atan2(dy, dx) if ln > 1e-6 else math.pi  # 겹침 중심이면 좌측으로
+        try:
+            spd = float(CONFIG["CHAR_SPEED"]) * float(getattr(self, "event_speed_mul", 1.0) or 1.0)
+        except Exception:
+            spd = float(CONFIG.get("CHAR_SPEED", 1.6))
+        # 반대방향을 중심으로 약간씩 각도를 틀어 지형이 허용하는 첫 후보로 빠져나온다.
+        for off in (0.0, 0.6, -0.6, 1.2, -1.2, math.pi):
+            a = base + off
+            nx = self.pos[0] + math.cos(a) * spd
+            ny = self.pos[1] + math.sin(a) * spd
+            if not self._terrain_walk_ok(nx, ny, mask_img):
+                continue
+            self.pos = [nx, ny]
+            if abs(math.cos(a)) > 0.05:
+                self.direction = "left" if math.cos(a) < 0 else "right"
+            self.state = "walk"
+            return True
+        return False
+
+    def _apply_raw_path(self, raw, grid_for_cut):
+        """A* raw 결과를 현재 위치 기준으로 잘라 self.path 에 적용. 적용하면 True."""
+        if not raw:
+            return False
+        cx, cy = float(self.pos[0]), float(self.pos[1])
+        best_i = 0
+        best_d = None
+        for i, p in enumerate(raw):
+            try:
+                d = math.hypot(float(p[0]) - cx, float(p[1]) - cy)
+            except Exception:
+                continue
+            if best_d is None or d < best_d:
+                best_d = d
+                best_i = i
+        try:
+            near_cut = float(CONFIG.get("PATHFIND_ATTACH_NEAR_CUT_PX", max(6.0, float(grid_for_cut) * 2.0)))
+        except Exception:
+            near_cut = max(6.0, float(grid_for_cut) * 2.0)
+        if best_d is not None and best_d <= near_cut:
+            raw2 = raw[int(best_i):]
+        else:
+            raw2 = raw
+        self.path = [(float(p[0]), float(p[1]), 0) for p in (raw2 or raw)]
+        self._strip_redundant_path_head()
+        return True
+
+    def _try_avoid(self, reason, mask_img, objects, npcs, desired_dx=0.0, desired_dy=0.0):
+        """이동 중 엔티티에 막혔을 때: 멈추지 말고 즉시 목표 방향으로 비껴 가며 우회. 처리했으면 True.
+
+        우선순위:
+          1) 끼임(겹침) → 장애물 반대로 빠져나옴
+          2) 스티어링(벽 슬라이드) → 목표 방향 기준 좌우로 틀어 한 칸 전진(즉각 반응)
+          3) 스티어 불가(거의 갇힘)일 때만 A* 재계획/양보로 폴백
+        지형(벽/도랑/경계)·층 변화·강제이동·달리기에는 관여하지 않는다(기존처럼 정지).
+        백그라운드 A* 경로가 완성되면 자연스럽게 그 경로로 전환된다.
+        """
+        # 엔티티(object/npc)뿐 아니라 맵 마스크 벽/모서리/경계(terrain/bounds/layer)도
+        # 멈추지 말고 벽을 따라 미끄러지며 목표 방향으로 가도록 처리한다.
+        if reason not in ("object", "npc", "terrain", "bounds", "layer"):
+            return False
+        if not bool(CONFIG.get("AVOID_ENABLED", True)):
+            return False
+        if getattr(self, "_event_force_move", False):
+            return False
+        if str(getattr(self, "_move_mode", "walk")) == "run":
+            return False
+
+        now = pygame.time.get_ticks()
+        if int(getattr(self, "_avoid_block_since_ms", 0) or 0) == 0:
+            self._avoid_block_since_ms = now
+        blocked_ms = now - int(self._avoid_block_since_ms)
+
+        # 1) 끼임 해소 최우선(엔티티와 겹친 경우만): 겹친 상태에선 경로를 못 따라가므로 반대로 빠져나온다.
+        if reason in ("object", "npc") and self._unstick_step(mask_img, objects, npcs):
+            return True
+
+        # 2) 스티어링: 목표 방향으로 즉시 비껴 가며 전진(명령 즉시 반응 + 장애물 따라 돌기).
+        #    움직이는 NPC가 막은 경우엔 잠깐(AVOID_NPC_WAIT_MS) 양보 후 비껴 간다.
+        npc_wait = reason == "npc" and blocked_ms < int(CONFIG.get("AVOID_NPC_WAIT_MS", 250))
+        if not npc_wait:
+            if self._steer_around_step(desired_dx, desired_dy, mask_img, objects, npcs):
+                return True
+
+        # 3) 스티어 실패(거의 갇힘) → A* 재계획으로 우회로 확보(백그라운드 진행 중이면 대기).
+        if getattr(self, "_path_plan_job", None):
+            self.state = "idle"
+            return True
+        if blocked_ms > int(CONFIG.get("AVOID_GIVEUP_MS", 1500)):
+            return False  # 너무 오래 못 뚫으면 정지
+        if npc_wait:
+            self.state = "idle"
+            return True
+        if now >= int(getattr(self, "_avoid_next_replan_ms", 0) or 0) and \
+           int(getattr(self, "_avoid_replans", 0) or 0) < int(CONFIG.get("AVOID_MAX_REPLANS", 4)):
+            self._avoid_next_replan_ms = now + int(CONFIG.get("AVOID_REPLAN_COOLDOWN_MS", 350))
+            self._avoid_replans = int(getattr(self, "_avoid_replans", 0) or 0) + 1
+            tgt = list(getattr(self, "target", None) or self.pos)
+            self.set_new_target(
+                tgt[0], tgt[1], mask_img, objects, npcs,
+                preserve_path_anim=True, clear_event_waypoints=False,
+                avoid_replan=True,
+            )
+            self.path = []
+            self.state = "idle"
+            return True
+
+        self.state = "idle"
+        return True
 
     def follow_step(self, leader_pos, desired_dist, mask_img, objects, npcs, speed_mul=1.0, leader=None):
         """
@@ -2836,8 +3559,11 @@ class MaskWalkingCharacter(BaseCharacter):
                 break
             self.path.pop(0)
 
-    def set_new_target(self, tx, ty, mask_img=None, objects=None, npcs=None, preserve_path_anim=False, clear_event_waypoints=True):
+    def set_new_target(self, tx, ty, mask_img=None, objects=None, npcs=None, preserve_path_anim=False, clear_event_waypoints=True, avoid_replan=False):
         """목표가 생기면 경로를 미리 짜둡니다."""
+        # 외부에서 새 목표를 줄 때만 회피 누적 상태 초기화(회피 재계획은 누적 유지).
+        if not avoid_replan:
+            self._avoid_reset()
         if clear_event_waypoints:
             self.event_waypoints = None
         if not preserve_path_anim:
@@ -2847,7 +3573,9 @@ class MaskWalkingCharacter(BaseCharacter):
         self._path_plan_job = None
         tx, ty = float(tx), float(ty)
         self.target = [tx, ty]
-        self.direction = "left" if tx < self.pos[0] else "right"
+        # 회피 재계획 중에는 방향을 목표 쪽으로 강제로 돌리지 않는다(좌우 흔들림 방지).
+        if not avoid_replan:
+            self.direction = "left" if tx < self.pos[0] else "right"
         sx, sy = float(self.pos[0]), float(self.pos[1])
         objects = objects or []
         npcs = npcs or []
@@ -2869,7 +3597,8 @@ class MaskWalkingCharacter(BaseCharacter):
                     return
                 tx, ty = float(sn[0]), float(sn[1])
                 self.target = [tx, ty]
-                self.direction = "left" if tx < self.pos[0] else "right"
+                if not avoid_replan:
+                    self.direction = "left" if tx < self.pos[0] else "right"
             # 이동 모드: 기본은 걷기(A* 분할), 더블클릭은 직선 달리기(길찾기 없이)
             move_mode = str(getattr(self, "_move_mode", "walk") or "walk")
             if move_mode == "run":
@@ -2896,6 +3625,7 @@ class MaskWalkingCharacter(BaseCharacter):
         self.event_waypoints = None
         self._move_mode = "walk"
         self._follow_slot_goal = None
+        self._avoid_reset()
         # 이벤트 MOVE force(true): 마스크/충돌 무시 플래그 해제
         try:
             self._event_force_move = False
@@ -3123,6 +3853,36 @@ class Player(MaskWalkingCharacter):
         return "move", None
 
 
+def shear_base_offset_px(y_screen, x_offset_fn):
+    """쉬어(기울기) 가로 오프셋을 '정수 + y 격자 양자화'로 계산한다.
+
+    연속 실수 오프셋을 매 프레임 final round 직전에 더하면, 카메라가 미세하게 흔들릴 때
+    입력 y(→오프셋)가 흔들리고 그것이 스프라이트 월드좌표 소수부(짝/홀)와 맞물려 ±1px로 떨린다.
+    입력 y를 슬라이스 양자화(SPRITE_SHEAR_Y_QUANT_PX, 배경/필드 슬라이스 쉬어와 동일)에 맞추고
+    결과를 정수로 만들어, 본체·그림자·필드 오브젝트가 모두 같은 정수 오프셋으로 lockstep 이동하게 한다.
+    """
+    if not callable(x_offset_fn):
+        return 0
+    if not bool(CONFIG.get("SHEAR_SPRITE_STABILIZE", True)):
+        try:
+            return int(round(float(x_offset_fn(float(y_screen)))))
+        except Exception:
+            return 0
+    try:
+        q = int(CONFIG.get("SPRITE_SHEAR_Y_QUANT_PX", 2) or 2)
+    except Exception:
+        q = 2
+    q = max(1, min(32, q))
+    try:
+        yq = round(float(y_screen) / q) * q
+        return int(round(float(x_offset_fn(float(yq)))))
+    except Exception:
+        try:
+            return int(round(float(x_offset_fn(float(y_screen)))))
+        except Exception:
+            return 0
+
+
 def _field_world_to_screen_anchor(
     world_x,
     world_y,
@@ -3154,10 +3914,8 @@ def _field_world_to_screen_anchor(
             pass
     dy_q = float(int(round(float(dy_base))))
     if callable(x_offset_fn):
-        try:
-            dx_base = float(dx_base) + float(x_offset_fn(float(dy_q)))
-        except Exception:
-            pass
+        # 슬라이스 쉬어(_prepare_field_sprite_blit)의 qbot 양자화와 일치하도록 반올림 전 dy_base 사용.
+        dx_base = float(dx_base) + float(shear_base_offset_px(dy_base, x_offset_fn))
     anc = (anchor or "feet").strip().lower()
     if anc in ("feet", "foot", "ground", "bottom"):
         h_off = float(height or 0.0)
@@ -3208,6 +3966,7 @@ def _prepare_field_sprite_blit(
             render_img.set_alpha(a)
         except Exception:
             pass
+    anchor_y_from_top = int(render_img.get_height())
 
     anc = (anchor or "feet").strip().lower()
     if anc in ("center", "c", "middle", "head", "top"):
@@ -3237,8 +3996,8 @@ def _prepare_field_sprite_blit(
                 slice_h = max(int(slice_h), int(CONFIG.get("SPRITE_SHEAR_SLICE_H_PX_LOD", 14) or 14))
             except Exception:
                 slice_h = max(int(slice_h), 14)
-        top_y = float(dy_base) - float(render_img.get_height())
-        bot_y = float(dy_base)
+        top_y = float(dy_base) - float(anchor_y_from_top)
+        bot_y = float(dy_base) + float(render_img.get_height() - int(anchor_y_from_top))
         try:
             q = int(CONFIG.get("SPRITE_SHEAR_Y_QUANT_PX", 2) or 2)
         except Exception:
@@ -3256,30 +4015,35 @@ def _prepare_field_sprite_blit(
         except Exception:
             qtop, qbot, base_off_i = int(round(top_y)), int(round(bot_y)), 0
         skey = (id(render_img), int(slice_h), int(qtop), int(qbot), int(base_off_i))
-        cached = getattr(shear_cache_holder, "_sprite_shear_cache", None) if shear_cache_holder else None
-        if cached is not None and cached.get("key") == skey:
-            render_img = cached.get("surf", render_img)
-            dx_adj = int(cached.get("dx", 0) or 0)
+        g_cached = _sprite_field_shear_cache_get(skey)
+        if g_cached is not None:
+            render_img, dx_adj = g_cached[0], int(g_cached[1])
         else:
-            if int(slice_h) >= 999999:
-                dx_adj = 0
+            cached = getattr(shear_cache_holder, "_sprite_shear_cache", None) if shear_cache_holder else None
+            if cached is not None and cached.get("key") == skey:
+                render_img = cached.get("surf", render_img)
+                dx_adj = int(cached.get("dx", 0) or 0)
             else:
-                render_img, dx_adj = _shear_surface_by_field_xoffset(
-                    render_img,
-                    top_y_screen=float(qtop),
-                    bottom_y_screen=float(qbot),
-                    x_offset_fn=x_offset_fn,
-                    slice_h=slice_h,
-                )
-            if shear_cache_holder is not None:
-                try:
-                    shear_cache_holder._sprite_shear_cache = {
-                        "key": skey,
-                        "surf": render_img,
-                        "dx": int(dx_adj),
-                    }
-                except Exception:
-                    pass
+                if int(slice_h) >= 999999:
+                    dx_adj = 0
+                else:
+                    render_img, dx_adj = _shear_surface_by_field_xoffset(
+                        render_img,
+                        top_y_screen=float(qtop),
+                        bottom_y_screen=float(qbot),
+                        x_offset_fn=x_offset_fn,
+                        slice_h=slice_h,
+                    )
+                _sprite_field_shear_cache_put(skey, render_img, dx_adj)
+                if shear_cache_holder is not None:
+                    try:
+                        shear_cache_holder._sprite_shear_cache = {
+                            "key": skey,
+                            "surf": render_img,
+                            "dx": int(dx_adj),
+                        }
+                    except Exception:
+                        pass
         shear_applied = int(render_img.get_width()) != int(pre_w)
 
     feet_sx = int(round(float(dx_base)))
@@ -3288,8 +4052,1110 @@ def _prepare_field_sprite_blit(
         final_dx = float(left_edge_bottom_center_x(feet_sx, pre_w)) + float(dx_adj)
     else:
         final_dx = float(left_edge_bottom_center_x(feet_sx, render_img.get_width()))
-    final_dy = float(feet_sy - render_img.get_height())
+    final_dy = float(feet_sy - float(anchor_y_from_top))
     return render_img, int(round(final_dx)), int(round(final_dy))
+
+
+# =============================================================================
+# 엔티티 FX (이벤트 FX 스텝 kind=entity_fx)
+# 캐릭터·오브젝트 스프라이트 불투명 픽셀에 단색을 섞어 반짝임(pulse) 또는 고정 틴트(tint).
+# FieldItem.draw · BaseCharacter.draw 에서 _apply_entity_fx_to_image() 호출.
+# =============================================================================
+
+_ENTITY_FX_TINT_CACHE = OrderedDict()
+
+
+def _entity_fx_cache_max_items():
+    try:
+        return max(16, min(512, int(CONFIG.get("ENTITY_FX_TINT_CACHE_MAX", 96) or 96)))
+    except Exception:
+        return 96
+
+
+def _entity_fx_parse_rgb(step_or_val, default=(255, 240, 160)):
+    raw = step_or_val
+    if isinstance(step_or_val, dict):
+        raw = step_or_val.get("color") or step_or_val.get("rgb") or step_or_val.get("tint")
+    if raw is None:
+        return tuple(int(default[i]) for i in range(3))
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        try:
+            return (
+                int(max(0, min(255, float(raw[0])))),
+                int(max(0, min(255, float(raw[1])))),
+                int(max(0, min(255, float(raw[2])))),
+            )
+        except (TypeError, ValueError):
+            pass
+    s = str(raw or "").strip()
+    if not s:
+        return tuple(int(default[i]) for i in range(3))
+    try:
+        parts = [int(float(x.strip())) for x in s.replace(";", ",").split(",") if x.strip() != ""]
+        if len(parts) >= 3:
+            return (
+                max(0, min(255, parts[0])),
+                max(0, min(255, parts[1])),
+                max(0, min(255, parts[2])),
+            )
+    except (TypeError, ValueError):
+        pass
+    return tuple(int(default[i]) for i in range(3))
+
+
+def entity_fx_strength(fx) -> float:
+    """FX 상태 → 0~1 (불투명 픽셀에 섞을 단색 비율)."""
+    if not fx:
+        return 0.0
+    mode = (fx.get("mode") or "pulse").strip().lower()
+    try:
+        peak = int(fx.get("alpha", fx.get("alpha_max", 160) or 160))
+    except (TypeError, ValueError):
+        peak = 160
+    peak = max(0, min(255, peak))
+    if mode in ("tint", "cover", "solid", "overlay"):
+        return peak / 255.0
+    try:
+        cycle = float(fx.get("cycle_sec", fx.get("speed", 1.0) or 1.0))
+    except (TypeError, ValueError):
+        cycle = 1.0
+    cycle = max(0.15, min(30.0, cycle))
+    phase = float(fx.get("phase_sec", 0.0) or 0.0)
+    u = (math.sin(2.0 * math.pi * phase / cycle) + 1.0) * 0.5
+    return max(0.0, min(1.0, u * (peak / 255.0)))
+
+
+def tick_entity_fx_state(fx, dt_sec: float) -> None:
+    """pulse 모드 phase 진행 (실제 경과 초)."""
+    if not fx:
+        return
+    mode = (fx.get("mode") or "pulse").strip().lower()
+    if mode in ("tint", "cover", "solid", "overlay"):
+        return
+    fx["phase_sec"] = float(fx.get("phase_sec", 0.0) or 0.0) + max(0.0, float(dt_sec))
+
+
+def _tint_sprite_lerp_opaque(src, rgb, strength: float):
+    """불투명 픽셀만 원본↔단색 선형 보간. strength 0=원본."""
+    strength = max(0.0, min(1.0, float(strength)))
+    if strength <= 1e-6:
+        return src
+    sq = int(round(strength * 64.0))
+    tr, tg, tb = [int(max(0, min(255, int(rgb[i])))) for i in range(3)]
+    key = (id(src), sq, tr, tg, tb)
+    hit = _ENTITY_FX_TINT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = src.copy()
+    inv = 1.0 - strength
+    w, h = out.get_size()
+    for y in range(h):
+        for x in range(w):
+            c = out.get_at((x, y))
+            a = c[3]
+            if a <= 8:
+                continue
+            out.set_at(
+                (x, y),
+                (
+                    int(c[0] * inv + tr * strength),
+                    int(c[1] * inv + tg * strength),
+                    int(c[2] * inv + tb * strength),
+                    a,
+                ),
+            )
+    try:
+        _ENTITY_FX_TINT_CACHE[key] = out
+        while len(_ENTITY_FX_TINT_CACHE) > _entity_fx_cache_max_items():
+            _ENTITY_FX_TINT_CACHE.popitem(last=False)
+    except Exception:
+        pass
+    return out
+
+
+def apply_entity_fx_to_image(img, fx):
+    if img is None or not fx:
+        return img
+    try:
+        strength = entity_fx_strength(fx)
+        if strength <= 1e-6:
+            return img
+        rgb = fx.get("color")
+        if not rgb:
+            return img
+        return _tint_sprite_lerp_opaque(img, rgb, strength)
+    except Exception:
+        return img
+
+
+def clear_entity_fx(entity) -> None:
+    try:
+        entity.entity_fx = None
+    except Exception:
+        pass
+
+
+def clamp_entity_def_zoom(val) -> float:
+    try:
+        zmin = float(CONFIG.get("ENTITY_ZOOM_MIN", 0.5))
+        zmax = float(CONFIG.get("ENTITY_ZOOM_MAX", 2.0))
+    except Exception:
+        zmin, zmax = 0.5, 2.0
+    try:
+        z = float(val)
+    except (TypeError, ValueError):
+        z = 1.0
+    return max(zmin, min(zmax, z))
+
+
+def entity_combined_zoom_mul(entity) -> float:
+    """def·progress·binding 줌 × 이벤트 ZOOM 스텝 줌."""
+    try:
+        dz = float(getattr(entity, "entity_def_zoom", 1.0) or 1.0)
+    except Exception:
+        dz = 1.0
+    try:
+        ez = float(getattr(entity, "event_entity_zoom", 1.0) or 1.0)
+    except Exception:
+        ez = 1.0
+    return max(0.05, min(8.0, dz)) * max(0.05, min(8.0, ez))
+
+
+def clear_entity_visual(entity) -> None:
+    clear_entity_fx(entity)
+    try:
+        entity.entity_def_zoom = 1.0
+    except Exception:
+        pass
+
+
+def apply_entity_visual_patch(entity, patch) -> None:
+    """def·binding·progress 의 entity_fx + zoom (False/ stop = 시각효과 전부 끔)."""
+    if entity is None:
+        return
+    if patch is None:
+        return
+    if patch is False:
+        clear_entity_visual(entity)
+        return
+    if isinstance(patch, str):
+        if patch.strip().lower() in ("false", "off", "stop", "clear", "none", "0"):
+            clear_entity_visual(entity)
+        return
+    if not isinstance(patch, dict):
+        return
+    action = (patch.get("action") or patch.get("cmd") or "start").strip().lower()
+    if action in ("stop", "clear", "off", "remove", "end"):
+        clear_entity_visual(entity)
+        return
+    if patch.get("enabled") is False:
+        clear_entity_visual(entity)
+        return
+
+    mode = (patch.get("mode") or patch.get("efx_mode") or patch.get("fx_mode") or "").strip().lower()
+    has_tint = bool(mode and mode not in ("off", "none", "clear", "stop"))
+    has_tint = has_tint or any(
+        patch.get(k) is not None and str(patch.get(k)).strip() != ""
+        for k in ("color", "efx_color", "rgb", "alpha", "efx_alpha", "cycle_sec", "efx_cycle_sec", "speed")
+    )
+    if mode in ("off", "none", "clear", "stop"):
+        clear_entity_fx(entity)
+    elif has_tint:
+        step = {
+            "mode": mode or "pulse",
+            "color": patch.get("color") or patch.get("efx_color") or patch.get("rgb"),
+            "alpha": patch.get("alpha", patch.get("efx_alpha")),
+            "cycle_sec": patch.get("cycle_sec", patch.get("efx_cycle_sec", patch.get("speed"))),
+        }
+        entity.entity_fx = build_entity_fx_from_step(step)
+
+    if "zoom" in patch:
+        try:
+            entity.entity_def_zoom = clamp_entity_def_zoom(patch.get("zoom"))
+        except Exception:
+            pass
+    elif mode in ("off", "none", "clear", "stop") and not has_tint:
+        try:
+            entity.entity_def_zoom = 1.0
+        except Exception:
+            pass
+
+
+def apply_entity_fx_patch(entity, patch) -> None:
+    """하위 호환 별칭 — tint·zoom 통합 패치."""
+    apply_entity_visual_patch(entity, patch)
+
+
+def _entity_visual_snapshot(ent) -> dict:
+    fx = getattr(ent, "entity_fx", None)
+    if isinstance(fx, dict):
+        fx = dict(fx)
+    try:
+        dz = float(getattr(ent, "entity_def_zoom", 1.0) or 1.0)
+    except Exception:
+        dz = 1.0
+    try:
+        ez = float(getattr(ent, "event_entity_zoom", 1.0) or 1.0)
+    except Exception:
+        ez = 1.0
+    try:
+        ezt = float(getattr(ent, "event_entity_zoom_target", 1.0) or 1.0)
+    except Exception:
+        ezt = 1.0
+    return {
+        "entity_fx": fx,
+        "entity_def_zoom": dz,
+        "event_entity_zoom": ez,
+        "event_entity_zoom_target": ezt,
+        "event_entity_zoom_timed": getattr(ent, "event_entity_zoom_timed", None),
+    }
+
+
+def _entity_visual_restore(ent, snap: dict) -> None:
+    if not snap:
+        return
+    try:
+        ent.entity_fx = snap.get("entity_fx")
+        ent.entity_def_zoom = float(snap.get("entity_def_zoom", 1.0) or 1.0)
+        ent.event_entity_zoom = float(snap.get("event_entity_zoom", 1.0) or 1.0)
+        ent.event_entity_zoom_target = float(snap.get("event_entity_zoom_target", 1.0) or 1.0)
+        ent.event_entity_zoom_timed = snap.get("event_entity_zoom_timed")
+    except Exception:
+        pass
+
+
+def build_entity_fx_from_step(step: dict) -> dict:
+    """FX entity_fx 스텝 → entity.entity_fx dict."""
+    mode = (step.get("mode") or step.get("fx_mode") or "pulse").strip().lower()
+    if mode in ("shimmer", "glow", "blink", "sparkle"):
+        mode = "pulse"
+    try:
+        alpha = int(float(step.get("alpha", step.get("alpha_max", 160) or 160)))
+    except (TypeError, ValueError):
+        alpha = 160
+    alpha = max(0, min(255, alpha))
+    try:
+        cycle = float(
+            step.get("cycle_sec")
+            if step.get("cycle_sec") is not None
+            else step.get("speed", CONFIG.get("ENTITY_FX_DEFAULT_CYCLE_SEC", 1.0))
+        )
+    except (TypeError, ValueError):
+        cycle = 1.0
+    cycle = max(0.15, min(30.0, cycle))
+    return {
+        "mode": mode,
+        "color": _entity_fx_parse_rgb(step),
+        "alpha": alpha,
+        "cycle_sec": cycle,
+        "phase_sec": 0.0,
+    }
+
+
+# 화면 전체 FX (이벤트 SCREEN_FX — kind: cloud | flash | shake | rain | vignette | tone)
+# cloud: 구름 그림자 (field_runtime)
+# flash: 논리 해상도 전체 색 오버레이 pulse/tint
+# shake: 합성 프레임 오프셋 (main.py 렌더 말미)
+# rain: 전경 비 라인 파티클 (SRCALPHA 오버레이)
+# vignette: 가장자리 어둡게 (SRCALPHA radial)
+# tone: 화이트밸런스/색온도 틴트 (warm/cool/custom)
+# =============================================================================
+
+_vignette_surf_cache = {}
+
+
+def resolve_screen_fx_kind(step) -> str:
+    """SCREEN_FX 스텝 → cloud | flash | shake | rain | vignette | tone."""
+    if not isinstance(step, dict):
+        return "cloud"
+    k = str(step.get("kind") or step.get("sfx_kind") or step.get("name") or "").strip().lower()
+    if k in ("cloud", "cloudshadow", "cloud_shadow", "cloud-shadow"):
+        return "cloud"
+    if k in ("screen_flash", "flash", "fullscreen_flash", "screen_glow"):
+        return "flash"
+    if k in ("screen_shake", "shake", "screen_quake", "quake"):
+        return "shake"
+    if k in ("rain", "screen_rain", "비"):
+        return "rain"
+    if k in ("vignette", "screen_vignette", "비네팅"):
+        return "vignette"
+    if k in ("tone", "screen_tone", "white_balance", "whitebalance", "wb", "색온도", "톤"):
+        return "tone"
+    if k in ("all", "clear", "none", "reset", "off"):
+        return "all"
+    if k in ("cloud", "flash", "shake", "rain", "vignette", "tone"):
+        return k
+    return "cloud"
+
+
+def build_cloud_shadow_control_from_step(step: dict) -> dict:
+    """SCREEN_FX kind=cloud → cloud_shadow_control dict."""
+    d = {"enabled": True}
+    d["dir"] = (step.get("dir") or step.get("direction") or "RANDOM")
+    sp = step.get("speed", None)
+    if sp is not None and sp != "":
+        try:
+            d["speed"] = float(sp)
+        except (TypeError, ValueError):
+            pass
+    fr = step.get("freq", step.get("frequency", None))
+    if fr is not None and fr != "":
+        try:
+            d["freq"] = float(fr)
+        except (TypeError, ValueError):
+            pass
+    for gk, sk in (
+        ("grid_cell", "grid_cell"),
+        ("grid_jitter", "grid_jitter"),
+        ("grid_max", "grid_max"),
+    ):
+        gv = step.get(sk)
+        if gv is not None and str(gv).strip() != "":
+            try:
+                d[gk] = float(gv) if gk != "grid_max" else int(float(gv))
+            except (TypeError, ValueError):
+                pass
+    return d
+
+
+def build_screen_flash_from_step(step: dict) -> dict:
+    """SCREEN_FX kind=flash → screen_fx_flash dict."""
+    mode = (step.get("flash_mode") or step.get("mode") or "pulse").strip().lower()
+    if mode in ("shimmer", "glow", "blink", "sparkle", "flash"):
+        mode = "pulse"
+    try:
+        alpha = int(float(step.get("alpha", step.get("alpha_max", CONFIG.get("SCREEN_FX_FLASH_DEFAULT_ALPHA", 140)) or 140)))
+    except (TypeError, ValueError):
+        alpha = int(CONFIG.get("SCREEN_FX_FLASH_DEFAULT_ALPHA", 140) or 140)
+    alpha = max(0, min(255, alpha))
+    try:
+        cycle = float(
+            step.get("cycle_sec")
+            if step.get("cycle_sec") is not None
+            else step.get("speed", CONFIG.get("SCREEN_FX_FLASH_DEFAULT_CYCLE_SEC", 0.7))
+        )
+    except (TypeError, ValueError):
+        cycle = float(CONFIG.get("SCREEN_FX_FLASH_DEFAULT_CYCLE_SEC", 0.7) or 0.7)
+    cycle = max(0.15, min(30.0, cycle))
+    return {
+        "enabled": True,
+        "mode": mode,
+        "color": _entity_fx_parse_rgb(step, (255, 255, 255)),
+        "alpha": alpha,
+        "cycle_sec": cycle,
+        "phase_sec": 0.0,
+    }
+
+
+def build_screen_shake_from_step(step: dict) -> dict:
+    """SCREEN_FX kind=shake → screen_fx_shake dict."""
+    try:
+        amp = float(step.get("amp_px", step.get("amp", CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_AMP_PX", 7)) or 7))
+    except (TypeError, ValueError):
+        amp = float(CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_AMP_PX", 7) or 7)
+    amp = max(0.0, min(48.0, amp))
+    try:
+        freq = float(step.get("freq_hz", step.get("freq", CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_FREQ_HZ", 14)) or 14))
+    except (TypeError, ValueError):
+        freq = float(CONFIG.get("SCREEN_FX_SHAKE_DEFAULT_FREQ_HZ", 14) or 14)
+    freq = max(0.5, min(60.0, freq))
+    return {
+        "enabled": True,
+        "amp_px": amp,
+        "freq_hz": freq,
+        "phase_sec": 0.0,
+    }
+
+
+def build_screen_vignette_from_step(step: dict) -> dict:
+    """SCREEN_FX kind=vignette → screen_fx_vignette dict."""
+    try:
+        strength = float(step.get("strength", CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_STRENGTH", 0.55) or 0.55))
+    except (TypeError, ValueError):
+        strength = float(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_STRENGTH", 0.55) or 0.55)
+    strength = max(0.0, min(1.0, strength))
+    try:
+        size = float(step.get("size", step.get("inner", CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SIZE", 0.42) or 0.42)))
+    except (TypeError, ValueError):
+        size = float(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SIZE", 0.42) or 0.42)
+    size = max(0.0, min(0.95, size))
+    try:
+        softness = float(step.get("softness", CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SOFTNESS", 0.65) or 0.65))
+    except (TypeError, ValueError):
+        softness = float(CONFIG.get("SCREEN_FX_VIGNETTE_DEFAULT_SOFTNESS", 0.65) or 0.65)
+    softness = max(0.05, min(1.0, softness))
+    return {
+        "enabled": True,
+        "strength": strength,
+        "size": size,
+        "softness": softness,
+        "color": _entity_fx_parse_rgb(step, (0, 0, 0)),
+    }
+
+
+def _screen_fx_tone_preset_rgb(preset: str):
+    """톤 preset → RGB (오버레이 틴트 색)."""
+    p = str(preset or "warm").strip().lower()
+    if p in ("cool", "cold", "차가", "차가운", "blue"):
+        raw = CONFIG.get("SCREEN_FX_TONE_COOL_RGB", (170, 205, 255))
+    elif p in ("neutral", "none", "off", "중립"):
+        raw = CONFIG.get("SCREEN_FX_TONE_NEUTRAL_RGB", (255, 255, 255))
+    elif p in ("warm", "따뜻", "따뜻한", "orange"):
+        raw = CONFIG.get("SCREEN_FX_TONE_WARM_RGB", (255, 210, 170))
+    else:
+        raw = CONFIG.get("SCREEN_FX_TONE_WARM_RGB", (255, 210, 170))
+    try:
+        return int(raw[0]), int(raw[1]), int(raw[2])
+    except Exception:
+        return 255, 210, 170
+
+
+def build_screen_tone_from_step(step: dict) -> dict:
+    """SCREEN_FX kind=tone → screen_fx_tone dict (warm/cool/neutral/custom)."""
+    preset = str(
+        step.get("preset") or step.get("tone") or step.get("white_balance") or step.get("mode") or "warm"
+    ).strip().lower()
+    if preset in ("따뜻", "따뜻한"):
+        preset = "warm"
+    elif preset in ("차가", "차가운"):
+        preset = "cool"
+    elif preset in ("중립",):
+        preset = "neutral"
+    if preset not in ("warm", "cool", "neutral", "custom"):
+        preset = "warm"
+    try:
+        strength = float(step.get("strength", CONFIG.get("SCREEN_FX_TONE_DEFAULT_STRENGTH", 0.32) or 0.32))
+    except (TypeError, ValueError):
+        strength = float(CONFIG.get("SCREEN_FX_TONE_DEFAULT_STRENGTH", 0.32) or 0.32)
+    strength = max(0.0, min(1.0, strength))
+    if preset == "custom":
+        color = _entity_fx_parse_rgb(step, _screen_fx_tone_preset_rgb("warm"))
+    else:
+        color = _screen_fx_tone_preset_rgb(preset)
+    return {
+        "enabled": True,
+        "preset": preset,
+        "strength": strength,
+        "color": color,
+    }
+
+
+def _get_vignette_overlay_surf(w, h, strength, size, softness, color):
+    """비네팅 SRCALPHA 서피스 — 파라미터별 캐시."""
+    try:
+        r, g, b = int(color[0]), int(color[1]), int(color[2])
+    except Exception:
+        r, g, b = 0, 0, 0
+    key = (
+        int(w),
+        int(h),
+        round(float(strength), 3),
+        round(float(size), 3),
+        round(float(softness), 3),
+        r,
+        g,
+        b,
+    )
+    cached = _vignette_surf_cache.get(key)
+    if cached is not None:
+        return cached
+    tex_n = 128
+    tmp = pygame.Surface((tex_n, tex_n), pygame.SRCALPHA)
+    cx = cy = (tex_n - 1) * 0.5
+    max_r = math.hypot(cx, cy) or 1.0
+    inner_r = max_r * float(size)
+    span = max(1e-3, max_r * float(softness))
+    smax = max(0.0, min(1.0, float(strength)))
+    for y in range(tex_n):
+        for x in range(tex_n):
+            d = math.hypot(x - cx, y - cy)
+            if d <= inner_r:
+                a = 0
+            else:
+                t = min(1.0, (d - inner_r) / span)
+                a = int(round(t * smax * 255.0))
+            tmp.set_at((x, y), (r, g, b, a))
+    try:
+        surf = pygame.transform.smoothscale(tmp, (int(w), int(h)))
+    except Exception:
+        surf = pygame.transform.scale(tmp, (int(w), int(h)))
+    if len(_vignette_surf_cache) > 24:
+        _vignette_surf_cache.clear()
+    _vignette_surf_cache[key] = surf
+    return surf
+
+
+def draw_screen_fx_vignette(target_surf, overlay_surf, fx) -> None:
+    """비네팅 — 화면 가장자리 어둡게. tilt/shear/카메라 무관."""
+    if target_surf is None or overlay_surf is None or not isinstance(fx, dict) or not fx.get("enabled"):
+        return
+    try:
+        strength = float(fx.get("strength", 0.0) or 0.0)
+    except Exception:
+        strength = 0.0
+    if strength <= 1e-6:
+        return
+    try:
+        tw, th = target_surf.get_size()
+    except Exception:
+        return
+    if overlay_surf.get_size() != (tw, th):
+        return
+    vignette = _get_vignette_overlay_surf(
+        tw,
+        th,
+        strength,
+        float(fx.get("size", 0.42) or 0.42),
+        float(fx.get("softness", 0.65) or 0.65),
+        fx.get("color") or (0, 0, 0),
+    )
+    target_surf.blit(vignette, (0, 0))
+
+
+def draw_screen_fx_tone(target_surf, overlay_surf, fx) -> None:
+    """색온도/톤 틴트 — warm/cool/custom. tilt/shear/카메라 무관."""
+    if target_surf is None or overlay_surf is None or not isinstance(fx, dict) or not fx.get("enabled"):
+        return
+    preset = str(fx.get("preset") or "warm").strip().lower()
+    if preset == "neutral":
+        return
+    try:
+        strength = float(fx.get("strength", 0.0) or 0.0)
+    except Exception:
+        strength = 0.0
+    if strength <= 1e-6:
+        return
+    try:
+        tw, th = target_surf.get_size()
+    except Exception:
+        return
+    if overlay_surf.get_size() != (tw, th):
+        return
+    rgb = fx.get("color") or (255, 210, 170)
+    try:
+        r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+    except Exception:
+        r, g, b = 255, 210, 170
+    alpha = int(round(max(0.0, min(1.0, strength)) * 255.0))
+    if alpha <= 0:
+        return
+    overlay_surf.fill((r, g, b))
+    overlay_surf.set_alpha(alpha)
+    target_surf.blit(overlay_surf, (0, 0))
+    overlay_surf.set_alpha(255)
+
+
+def _screen_fx_rain_parse_angle(step: dict) -> float:
+    """SCREEN_FX rain 각도(도) — 수직(↓) 기준. 0=수직, 45=대각, 클수록 바람 성분↑."""
+    raw = step.get("angle", step.get("rain_angle", None))
+    if raw is None or raw == "":
+        try:
+            return float(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ANGLE", 82) or 82)
+        except Exception:
+            return 82.0
+    try:
+        angle_deg = float(raw)
+    except (TypeError, ValueError):
+        try:
+            return float(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ANGLE", 82) or 82)
+        except Exception:
+            return 82.0
+    try:
+        lo = float(CONFIG.get("SCREEN_FX_RAIN_ANGLE_MIN", 0) or 0)
+        hi = float(CONFIG.get("SCREEN_FX_RAIN_ANGLE_MAX", 88) or 88)
+    except Exception:
+        lo, hi = 0.0, 88.0
+    lo = max(0.0, min(89.0, lo))
+    hi = max(lo, min(89.0, hi))
+    return max(lo, min(hi, angle_deg))
+
+
+def _screen_fx_rain_velocity(speed, angle_deg):
+    """낙하 속도·각도 → 월드 vx, vy (vy>0 유지 — 재유입·낙하용)."""
+    try:
+        spd = float(speed)
+    except (TypeError, ValueError):
+        spd = float(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_SPEED", 280) or 280)
+    spd = max(20.0, min(900.0, spd))
+    ang = _screen_fx_rain_parse_angle({"angle": angle_deg})
+    rad = math.radians(ang)
+    vx = math.sin(rad) * spd
+    vy = math.cos(rad) * spd
+    if vy < 1e-3:
+        vy = 1e-3
+    return float(vx), float(vy), float(ang)
+
+
+def _screen_fx_rain_drop_count(density: float, view_w: float, view_h: float) -> int:
+    """현재 뷰포트 면적 기준 드롭 수."""
+    try:
+        div = float(CONFIG.get("SCREEN_FX_RAIN_DENSITY_AREA_DIV", 280.0) or 280.0)
+    except Exception:
+        div = 280.0
+    div = max(80.0, min(3000.0, div))
+    try:
+        max_drops = int(CONFIG.get("SCREEN_FX_RAIN_MAX_DROPS", 320) or 320)
+    except Exception:
+        max_drops = 320
+    max_drops = max(8, min(600, max_drops))
+    d = max(0.0, min(1.0, float(density)))
+    return max(0, min(max_drops, int(d * view_w * view_h / div)))
+
+
+def _screen_fx_rain_jitter(i: int, salt: int = 0) -> tuple:
+    """인덱스별 0~1 의사난수 두 개.
+
+    [중요] 예전 LCG(선형) 방식은 i·salt에 대해 결과가 선형이라, 재생성 salt가 (상수+k*i)
+    꼴이면 연속 인덱스 드롭이 거의 같은 x에 몰려 '국지적으로 겹쳐 내리는' 뭉침이 생겼다.
+    그래서 비트 혼합(xorshift/finalizer)로 바꿔 인접 인덱스도 무상관하게 흩어지도록 한다.
+    """
+    h = (int(i) * 0x9E3779B1 + int(salt) * 0x85EBCA77 + 0x165667B1) & 0xFFFFFFFF
+    h ^= h >> 15
+    h = (h * 0x2C1B3C6D) & 0xFFFFFFFF
+    h ^= h >> 12
+    h = (h * 0x297A2D39) & 0xFFFFFFFF
+    h ^= h >> 15
+    a = (h & 0xFFFFFFFF) / 4294967295.0
+    h2 = (h ^ 0x68E31DA4) & 0xFFFFFFFF
+    h2 = (h2 * 0x2545F491) & 0xFFFFFFFF
+    h2 ^= h2 >> 13
+    h2 = (h2 * 0x9E3779B1) & 0xFFFFFFFF
+    h2 ^= h2 >> 16
+    b = (h2 & 0xFFFFFFFF) / 4294967295.0
+    return a, b
+
+
+def _screen_fx_rain_stratified_xy(i, n, left, top, width, height, salt=0):
+    """격자+지터 — 영역 전체에 고르게 분포."""
+    if n <= 0 or width <= 1e-6 or height <= 1e-6:
+        return float(left), float(top)
+    aspect = width / max(height, 1.0)
+    cols = max(1, int(math.ceil(math.sqrt(n * aspect))))
+    rows = max(1, (n + cols - 1) // cols)
+    row = i // cols
+    col = i % cols
+    jx, jy = _screen_fx_rain_jitter(i, salt)
+    cell_w = width / cols
+    cell_h = height / rows
+    x = left + (col + jx) * cell_w
+    y = top + (row + jy) * cell_h
+    return float(x), float(y)
+
+
+def _screen_fx_rain_viewport_band(cam_x, cam_y, view_w, view_h):
+    """카메라를 따라가는 월드 사각형(화면 + 사방 여백).
+
+    드롭은 월드 좌표에 두고 카메라 스크롤·줌으로 화면에 투영한다.
+    tilt/shear 는 draw 단계에서 적용하지 않는다(비는 수직/설정각 유지).
+    """
+    try:
+        mx = float(CONFIG.get("SCREEN_FX_RAIN_MARGIN_X", 64) or 64)
+    except Exception:
+        mx = 64.0
+    mt = mx
+    below = 32.0
+    left = float(cam_x) - mx
+    top = float(cam_y) - mt
+    width = float(view_w) + mx * 2.0
+    height = mt + float(view_h) + below
+    ground = float(cam_y) + float(view_h)
+    return left, top, width, height, ground
+
+
+def _screen_fx_rain_assign_profile(d, i, drop_len):
+    """드롭에 '깊이 레이어' 프로파일을 부여(지속 필드).
+
+    실제 게임 비처럼 원경/근경 2겹으로 나눠 깊이감을 준다. 인덱스 해시로 결정하므로
+    매 프레임 재계산 없이 값이 고정되고(뭉침·깜빡임 없음), 레이어별로 속도·길이·밝기·
+    굵기를 다르게 해 '일제히 떨어지는 장막' 현상을 없앤다.
+      - lay=1 근경: 길고·진하고·빠르게 (필요시 굵게)
+      - lay=0 원경: 짧고·흐리고·느리게 (가늘게)
+    저장 필드: sp(속도배율) am(밝기배율) w(선 굵기) len(길이) lay(레이어)
+    """
+    try:
+        near_ratio = float(CONFIG.get("SCREEN_FX_RAIN_NEAR_RATIO", 0.45) or 0.45)
+    except Exception:
+        near_ratio = 0.45
+    near_ratio = max(0.0, min(1.0, near_ratio))
+    a, b = _screen_fx_rain_jitter(i, 7)   # a: 레이어 선택, b: 속도 편차
+    c, e = _screen_fx_rain_jitter(i, 23)  # c: 밝기 편차, e: 길이 편차
+    base = max(2, int(drop_len))
+    if a < near_ratio:
+        d["lay"] = 1
+        d["sp"] = 1.0 + 0.28 * b            # 1.00 ~ 1.28 (빠름)
+        d["am"] = 0.82 + 0.18 * c           # 0.82 ~ 1.00 (진함)
+        d["w"] = 1
+        d["len"] = max(3, int(round(base * (1.0 + 0.35 * e))))  # 김
+    else:
+        d["lay"] = 0
+        d["sp"] = 0.60 + 0.28 * b           # 0.60 ~ 0.88 (느림)
+        d["am"] = 0.38 + 0.22 * c           # 0.38 ~ 0.60 (흐림)
+        d["w"] = 1
+        d["len"] = max(2, int(round(base * (0.45 + 0.30 * e))))  # 짧음
+
+
+def _screen_fx_rain_assign_land_y(d, i, band_top, band_h, salt=0):
+    """탑다운: 드롭마다 화면 밴드 안 랜덤 착지 y (여기 닿으면 스플래시 후 재유입)."""
+    _f, g = _screen_fx_rain_jitter(int(i), 101 + int(salt))
+    # 밴드 상단 여백 아래 ~ 하단 직전 사이. 화면 어디서든 착지하도록 전 구간 분포.
+    d["land_y"] = float(band_top) + (0.12 + 0.86 * g) * float(band_h)
+
+
+def _screen_fx_rain_ensure_drops(fx, view_w, view_h):
+    density = float(fx.get("density", CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DENSITY", 0.35)) or 0.35)
+    n = _screen_fx_rain_drop_count(density, view_w, view_h)
+    drop_len = int(fx.get("drop_len", CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DROP_LEN", 7)) or 7)
+    drops = fx.get("drops")
+    if not isinstance(drops, list):
+        drops = []
+    while len(drops) < n:
+        i = len(drops)
+        nd = {}
+        _screen_fx_rain_assign_profile(nd, i, drop_len)
+        drops.append(nd)
+    if len(drops) > n:
+        del drops[n:]
+    for i, d in enumerate(drops):
+        if not isinstance(d, dict):
+            d = {}
+            drops[i] = d
+        if "sp" not in d or "lay" not in d or "am" not in d:
+            _screen_fx_rain_assign_profile(d, i, drop_len)
+    fx["drops"] = drops
+    return drops, n
+
+
+def _screen_fx_rain_sync_viewport(fx, cam_x, cam_y, view_w, view_h) -> float:
+    """드롭 개수 보장 + 최초/카메라 점프 시 월드 밴드에 균일 재분포. ground_y 반환.
+
+    정상 스크롤 중에는 드롭을 건드리지 않는다(카메라 변환으로 자연스럽게 따라감).
+    화면 밖 유출 재유입은 draw 루프의 _screen_fx_rain_respawn_drop 이 담당한다.
+    """
+    drops, n = _screen_fx_rain_ensure_drops(fx, view_w, view_h)
+    band_left, band_top, band_w, band_h, ground_y = _screen_fx_rain_viewport_band(
+        cam_x, cam_y, view_w, view_h
+    )
+    last = fx.get("_rain_cam")
+    cam_jump = not bool(fx.get("world_coords")) or bool(fx.get("screen_coords"))
+    if isinstance(last, (list, tuple)) and len(last) >= 4:
+        lx, ly, lw, lh = float(last[0]), float(last[1]), float(last[2]), float(last[3])
+        if abs(float(cam_x) - lx) > lw * 0.35 or abs(float(cam_y) - ly) > lh * 0.35:
+            cam_jump = True
+    salt = int((float(cam_x) + float(cam_y)) * 0.17) & 0xFFFF
+    for i, d in enumerate(drops):
+        if cam_jump or ("x" not in d) or ("y" not in d):
+            wx, wy = _screen_fx_rain_stratified_xy(
+                i, n, band_left, band_top, band_w, band_h, salt=salt
+            )
+            d["x"], d["y"] = wx, wy
+        if "land_y" not in d:
+            _screen_fx_rain_assign_land_y(d, i, band_top, band_h, salt=salt)
+    fx["world_coords"] = True
+    fx.pop("screen_coords", None)
+    fx["_rain_cam"] = (float(cam_x), float(cam_y), float(view_w), float(view_h))
+    return ground_y
+
+
+def _screen_fx_rain_respawn_drop(i, d, cam_x, cam_y, view_w, view_h, vx, vy):
+    """화면 밖으로 나간 드롭을 월드 유입 경계(위·바람 불어오는 옆)에서 재생성."""
+    band_left, band_top, band_w, band_h, _ground = _screen_fx_rain_viewport_band(
+        cam_x, cam_y, view_w, view_h
+    )
+    band_right = band_left + band_w
+    avx = abs(float(vx))
+    avy = abs(float(vy)) or 1.0
+    top_flux = avy * band_w        # 위 경계 유입량 (가로 전체)
+    side_flux = avx * band_h       # 옆 경계 유입량 (세로 전체)
+    total = top_flux + side_flux or 1.0
+    rc = int(d.get("rc", 0)) + 1
+    d["rc"] = rc
+    a, b = _screen_fx_rain_jitter(int(i) + rc * 7919, rc * 40503 + int(i) * 97)
+    if side_flux <= 1e-6 or a * total <= top_flux:
+        # 위 경계에서 유입 — x 는 가로 전체 균일, y 는 화면 위(약간 바깥)
+        d["x"] = band_left + b * band_w
+        d["y"] = band_top - 2.0
+    else:
+        # 바람 불어오는 옆 경계에서 유입 — y 는 세로 전체 균일
+        d["x"] = (band_left - 2.0) if float(vx) >= 0.0 else (band_right + 2.0)
+        d["y"] = band_top + b * band_h
+    # 탑다운: 다음 착지 지점(화면 어디든)도 새로 뽑는다.
+    _screen_fx_rain_assign_land_y(d, int(i) + rc * 131, band_top, band_h, salt=rc * 733)
+
+
+def build_screen_rain_from_step(step: dict) -> dict:
+    """SCREEN_FX kind=rain → screen_fx_rain dict (drops 초기화)."""
+    try:
+        w = int(CONFIG.get("WIDTH", 640) or 640)
+        h = int(CONFIG.get("HEIGHT", 480) or 480)
+    except Exception:
+        w, h = 640, 480
+    try:
+        density = float(step.get("density", CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DENSITY", 0.35) or 0.35))
+    except (TypeError, ValueError):
+        density = float(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DENSITY", 0.35) or 0.35)
+    density = max(0.0, min(1.0, density))
+    try:
+        speed = float(step.get("speed", CONFIG.get("SCREEN_FX_RAIN_DEFAULT_SPEED", 280) or 280))
+    except (TypeError, ValueError):
+        speed = float(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_SPEED", 280) or 280)
+    speed = max(20.0, min(900.0, speed))
+    angle_deg = _screen_fx_rain_parse_angle(step)
+    try:
+        drop_len = int(float(step.get("drop_len", CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DROP_LEN", 7) or 7)))
+    except (TypeError, ValueError):
+        drop_len = int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_DROP_LEN", 7) or 7)
+    drop_len = max(2, min(24, drop_len))
+    try:
+        alpha = int(float(step.get("alpha", step.get("rain_alpha", CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ALPHA", 170)) or 170)))
+    except (TypeError, ValueError):
+        alpha = int(CONFIG.get("SCREEN_FX_RAIN_DEFAULT_ALPHA", 170) or 170)
+    alpha = max(0, min(255, alpha))
+    count = _screen_fx_rain_drop_count(density, float(w), float(h))
+    vx, vy, angle_deg = _screen_fx_rain_velocity(speed, angle_deg)
+    drops = [{"len": drop_len + (i % 3) - 1} for i in range(count)]
+    return {
+        "enabled": True,
+        "drops": drops,
+        "splashes": [],
+        "density": density,
+        "drop_len": drop_len,
+        "angle": angle_deg,
+        "vx": vx,
+        "vy": vy,
+        "alpha": alpha,
+        "color": _entity_fx_parse_rgb(step, (180, 200, 255)),
+        "width": w,
+        "height": h,
+    }
+
+
+def screen_fx_flash_alpha(fx) -> int:
+    """screen_flash 상태 → 0~255 오버레이 알파."""
+    if not isinstance(fx, dict) or not fx.get("enabled"):
+        return 0
+    return int(round(max(0.0, min(1.0, entity_fx_strength(fx))) * 255.0))
+
+
+def screen_fx_shake_offset(fx):
+    """screen_shake 상태 → (dx, dy) 픽셀 오프셋."""
+    if not isinstance(fx, dict) or not fx.get("enabled"):
+        return 0, 0
+    try:
+        amp = float(fx.get("amp_px", fx.get("amp", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        amp = 0.0
+    if amp <= 1e-6:
+        return 0, 0
+    try:
+        freq = float(fx.get("freq_hz", fx.get("freq", 12.0)) or 12.0)
+    except (TypeError, ValueError):
+        freq = 12.0
+    t = float(fx.get("phase_sec", 0.0) or 0.0)
+    w = 2.0 * math.pi * max(0.5, freq)
+    dx = math.sin(t * w) * amp
+    dy = math.sin(t * w * 1.37 + 0.65) * amp * 0.55
+    return int(round(dx)), int(round(dy))
+
+
+def tick_screen_fx_flash(fx, dt_sec: float) -> None:
+    tick_entity_fx_state(fx, dt_sec)
+
+
+def tick_screen_fx_shake(fx, dt_sec: float) -> None:
+    if not isinstance(fx, dict) or not fx.get("enabled"):
+        return
+    fx["phase_sec"] = float(fx.get("phase_sec", 0.0) or 0.0) + max(0.0, float(dt_sec))
+
+
+def tick_screen_fx_rain(fx, dt_sec: float) -> None:
+    if not isinstance(fx, dict) or not fx.get("enabled"):
+        return
+    vx = float(fx.get("vx", 0.0) or 0.0)
+    vy = float(fx.get("vy", 280.0) or 280.0)
+    dt = max(0.0, float(dt_sec))
+    drops = fx.get("drops") or []
+    for i, d in enumerate(drops):
+        sp = float(d.get("sp", 1.0) or 1.0)  # 드롭별 속도 편차(깊이감·장막 방지)
+        d["x"] = float(d.get("x", 0.0)) + vx * sp * dt
+        d["y"] = float(d.get("y", 0.0)) + vy * sp * dt
+    # splashes: draw 에서 생성, 여기서는 수명만 줄임
+    spl = fx.get("splashes")
+    if isinstance(spl, list) and spl:
+        keep = []
+        for s in spl:
+            if not isinstance(s, dict):
+                continue
+            try:
+                t = float(s.get("t", 0.0) or 0.0) - dt
+            except Exception:
+                t = -1.0
+            if t > 0.0:
+                s["t"] = t
+                keep.append(s)
+        fx["splashes"] = keep
+
+
+def draw_screen_fx_rain(
+    target_surf,
+    overlay_surf,
+    fx,
+    *,
+    cam_draw_x: float = 0.0,
+    cam_draw_y: float = 0.0,
+    zoom: float = 1.0,
+) -> None:
+    """비 FX — 월드 좌표, 카메라 스크롤·줌 추종. tilt/shear 미적용."""
+    if target_surf is None or overlay_surf is None or not isinstance(fx, dict) or not fx.get("enabled"):
+        return
+    try:
+        tw, th = target_surf.get_size()
+    except Exception:
+        return
+    if overlay_surf.get_size() != (tw, th):
+        return
+    overlay_surf.fill((0, 0, 0, 0))
+    try:
+        alpha = int(fx.get("alpha", 170) or 170)
+    except Exception:
+        alpha = 170
+    alpha = max(0, min(255, alpha))
+    rgb = fx.get("color") or (180, 200, 255)
+    try:
+        r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+    except Exception:
+        r, g, b = 180, 200, 255
+    vx = float(fx.get("vx", 0.0) or 0.0)
+    vy = float(fx.get("vy", 280.0) or 280.0)
+    mag = math.hypot(vx, vy) or 1.0
+    ux, uy = vx / mag, vy / mag
+    try:
+        z = max(1e-6, float(zoom))
+    except Exception:
+        z = 1.0
+    view_w = float(tw) / z
+    view_h = float(th) / z
+    _ground_y = _screen_fx_rain_sync_viewport(fx, cam_draw_x, cam_draw_y, view_w, view_h)
+    drops = fx.get("drops") or []
+    if not drops:
+        return
+
+    # 탑다운: 각 드롭은 자기 land_y(화면 아무 곳)에 닿으면 스플래시 후 재유입.
+    band_left, band_top, band_w, band_h, _bg = _screen_fx_rain_viewport_band(
+        cam_draw_x, cam_draw_y, view_w, view_h
+    )
+    band_right = band_left + band_w
+    out_m = 16.0
+    try:
+        splash_max = int(CONFIG.get("SCREEN_FX_RAIN_SPLASH_MAX", 120) or 120)
+    except Exception:
+        splash_max = 120
+    splash_max = max(0, min(400, splash_max))
+    try:
+        splash_life = float(CONFIG.get("SCREEN_FX_RAIN_SPLASH_LIFE_SEC", 0.28) or 0.28)
+    except Exception:
+        splash_life = 0.28
+    splash_life = max(0.05, min(2.0, splash_life))
+    try:
+        splash_r0 = float(CONFIG.get("SCREEN_FX_RAIN_SPLASH_R0", 1.0) or 1.0)
+        splash_r_max = float(CONFIG.get("SCREEN_FX_RAIN_SPLASH_R_MAX", 5.0) or 5.0)
+    except Exception:
+        splash_r0, splash_r_max = 1.0, 5.0
+    splash_enabled = bool(CONFIG.get("SCREEN_FX_RAIN_SPLASH_ENABLED", True))
+    splashes = fx.get("splashes")
+    if not isinstance(splashes, list):
+        splashes = []
+        fx["splashes"] = splashes
+    for i, d in enumerate(drops):
+        if not isinstance(d, dict):
+            continue
+        try:
+            wy = float(d.get("y", 0.0))
+            wx = float(d.get("x", 0.0))
+            land_y = float(d.get("land_y", band_top + band_h))
+        except (TypeError, ValueError):
+            continue
+        landed = wy >= land_y
+        outside = (
+            landed
+            or wx < band_left - out_m
+            or wx > band_right + out_m
+            or wy < band_top - out_m
+        )
+        if outside:
+            # 근경(lay=1)만 스플래시 — 원경까지 튀기면 과함/과부하.
+            if (
+                landed
+                and splash_enabled
+                and int(d.get("lay", 0)) == 1
+                and len(splashes) < splash_max
+            ):
+                splashes.append(
+                    {"x": wx, "y": land_y, "t": splash_life, "life": splash_life}
+                )
+            _screen_fx_rain_respawn_drop(i, d, cam_draw_x, cam_draw_y, view_w, view_h, vx, vy)
+
+    scr_margin = 32.0
+    for d in drops:
+        try:
+            wx = float(d.get("x", 0.0))
+            wy = float(d.get("y", 0.0))
+            ln = max(2, int(d.get("len", 6) or 6))
+        except Exception:
+            continue
+        d_am = float(d.get("am", 1.0) or 1.0)
+        d_w = max(1, int(d.get("w", 1) or 1))
+        d_alpha = max(0, min(255, int(alpha * d_am)))
+        d_line_c = (r, g, b, d_alpha)
+        # 카메라·줌만 적용 — tilt/shear 없음
+        sx0 = (wx - float(cam_draw_x)) * z
+        sy0 = (wy - float(cam_draw_y)) * z
+        sx1 = (wx - ux * (float(ln) / z) - float(cam_draw_x)) * z
+        sy1 = (wy - uy * (float(ln) / z) - float(cam_draw_y)) * z
+        if (
+            sx0 < -scr_margin
+            or sx0 > float(tw) + scr_margin
+            or sy0 < -scr_margin
+            or sy0 > float(th) + scr_margin
+        ):
+            continue
+        pygame.draw.line(
+            overlay_surf,
+            d_line_c,
+            (int(round(sx0)), int(round(sy0))),
+            (int(round(sx1)), int(round(sy1))),
+            d_w,
+        )
+
+    # 스플래시: 속 빈 하얀 테두리 원이 커지다 사라짐 (알파 페이드 없음).
+    ring_col = (r, g, b, alpha)
+    for s in fx.get("splashes") or []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            wx = float(s.get("x", 0.0))
+            wy = float(s.get("y", 0.0))
+            t = float(s.get("t", 0.0) or 0.0)
+            life = float(s.get("life", splash_life) or splash_life)
+        except Exception:
+            continue
+        if t <= 0.0:
+            continue
+        prog = 1.0 - max(0.0, min(1.0, t / max(1e-3, life)))  # 0→1 로 커짐
+        rr = splash_r0 + (splash_r_max - splash_r0) * prog
+        rr_px = max(1, int(round(rr * z)))
+        sx0 = (wx - float(cam_draw_x)) * z
+        sy0 = (wy - float(cam_draw_y)) * z
+        if (
+            sx0 < -scr_margin
+            or sx0 > float(tw) + scr_margin
+            or sy0 < -scr_margin
+            or sy0 > float(th) + scr_margin
+        ):
+            continue
+        pygame.draw.circle(
+            overlay_surf, ring_col, (int(round(sx0)), int(round(sy0))), rr_px, 1
+        )
+    target_surf.blit(overlay_surf, (0, 0))
 
 
 def _held_item_foot_world_pos(player_x, player_y, direction):
@@ -3314,7 +5180,16 @@ def _held_item_foot_world_pos(player_x, player_y, direction):
 
 
 class FieldItem:
-    def __init__(self, name, x, y, sprite_tilt=None, height=None, ysort_mode=None, layer=None):
+    def __init__(
+        self,
+        name,
+        x,
+        y,
+        sprite_tilt=None,
+        height=None,
+        ysort_mode=None,
+        layer=None,
+    ):
         from data import OBJ_ASSETS, CONFIG # CONFIG 추가
         self.name, self.pos, self.origin_pos = name, [float(x), float(y)], [float(x), float(y)]
         self.sprite_tilt = _clamp_sprite_tilt(sprite_tilt if sprite_tilt is not None else 1.0)
@@ -3340,6 +5215,7 @@ class FieldItem:
 
         self.event_entity_zoom = 1.0
         self.event_entity_zoom_target = 1.0
+        self.entity_def_zoom = 1.0
         try:
             self.event_entity_zoom_speed = float(CONFIG.get("ENTITY_ZOOM_LERP", 0.12))
         except Exception:
@@ -3534,10 +5410,9 @@ class FieldItem:
             return
 
         try:
-            ez = float(getattr(self, "event_entity_zoom", 1.0) or 1.0)
+            ez = entity_combined_zoom_mul(self)
         except Exception:
             ez = 1.0
-        ez = max(0.05, min(8.0, ez))
         eff_z = float(zoom) * ez
 
         # --- [1. 기본 좌표 계산] — FieldItem·Effect(ANIM_ONCE) 공통 규칙 ---
@@ -3554,14 +5429,14 @@ class FieldItem:
         )
 
         # --- [2. 이미지 준비 & 크기 파악] ---
-        # 최적화 검사 전에 이미지 크기를 알아야 정확한 마진을 잡을 수 있습니다.
-        # anim_delay_ms 기준(전역 global_frame은 사용하지 않음 — 예전 100ms 고정 타이머)
         current_img = self.image
         if len(self.frames) > 1:
             idx = self._anim_frame_idx()
-            current_img = self.frames[idx]
-            self.frame_idx = idx
-            self.image = current_img
+            if idx != self.frame_idx:
+                self.frame_idx = idx
+                self.image = self.frames[idx]
+            current_img = self.image
+        current_img = apply_entity_fx_to_image(current_img, getattr(self, "entity_fx", None))
 
         # 실제 그려질 이미지의 너비와 높이 (카메라 줌 × 이벤트 엔티티 배율)
         img_w = int(current_img.get_width() * eff_z)
@@ -3585,7 +5460,6 @@ class FieldItem:
             margin_w = max(50, img_w // 2 + 10)
         margin_h = max(50, img_h + 10)
 
-        from data import CONFIG
         screen_w = CONFIG["WIDTH"]
         screen_h = CONFIG["HEIGHT"]
 
@@ -3598,7 +5472,16 @@ class FieldItem:
         # --- [4. 나머지 로직 (슬롯, 스케일링, 투명도 등 동일)] ---
         if self.is_slot and not self.has_real_image:
             import math
-            self.blink_timer += 0.05
+            try:
+                _now_b = int(pygame.time.get_ticks())
+            except Exception:
+                _now_b = 0
+            _last_b = int(getattr(self, "_slot_blink_last_ms", _now_b) or _now_b)
+            if _last_b <= 0:
+                _last_b = _now_b
+            _dt_b = max(0.0, (_now_b - _last_b) / 1000.0)
+            self._slot_blink_last_ms = _now_b
+            self.blink_timer += _dt_b * 3.0
             alpha = int((math.sin(self.blink_timer * 5) + 1) * 127.5)
             
             base_size = int(20 * eff_z)
@@ -3640,15 +5523,20 @@ class FieldItem:
 
             # 최종 판정: 뒤에 있거나 아래층에 있으면서, '실제 이미지 영역(X, Y)' 안에 들어왔을 때만!
             if (is_lower or is_same_layer_behind) and is_inside_x and is_inside_y:
-                # shared frame surface를 직접 set_alpha 하지 않도록 copy
                 try:
-                    ci = current_img.copy()
-                    ci.set_alpha(150)
-                    current_img = ci
+                    cid = id(current_img)
+                    cached_dim = getattr(self, "_hide_dim_surf", None)
+                    cached_key = getattr(self, "_hide_dim_key", None)
+                    if cached_dim is not None and cached_key == cid:
+                        current_img = cached_dim
+                    else:
+                        ci = current_img.copy()
+                        ci.set_alpha(150)
+                        self._hide_dim_surf = ci
+                        self._hide_dim_key = cid
+                        current_img = ci
                 except Exception:
                     pass
-            else:
-                pass
 
         # 줌·쉬어·발 앵커 (Effect/ANIM_ONCE 와 동일 — _prepare_field_sprite_blit)
         prepared = _prepare_field_sprite_blit(
@@ -4040,11 +5928,14 @@ class Camera:
         if (
             self._cam_blend_duration_sec is not None
             and float(self._cam_blend_duration_sec) > 0.0
-            and self._cam_blend_t0_ms is not None
             and self._cam_blend_start is not None
         ):
-            elapsed = max(0.0, (int(pygame.time.get_ticks()) - int(self._cam_blend_t0_ms)) / 1000.0)
-            return min(1.0, elapsed / float(self._cam_blend_duration_sec))
+            elapsed = float(getattr(self, "_cam_blend_elapsed_sec", 0.0) or 0.0)
+            u = min(1.0, elapsed / float(self._cam_blend_duration_sec))
+            # 긴 패닝만 ease-in-out, 짧은 추적/복귀는 선형
+            if float(self._cam_blend_duration_sec) >= 0.35:
+                return u * u * (3.0 - 2.0 * u)
+            return u
         return None
 
     def _cam_blend_active(self):
@@ -4057,9 +5948,11 @@ class Camera:
         if d is not None:
             self._cam_blend_t0_ms = int(pygame.time.get_ticks())
             self._cam_blend_start = [float(self.pos[0]), float(self.pos[1])]
+            self._cam_blend_elapsed_sec = 0.0
         else:
             self._cam_blend_t0_ms = None
             self._cam_blend_start = None
+            self._cam_blend_elapsed_sec = 0.0
 
     def set_follow_player(self, smooth=True, lerp=None, duration_sec=None):
         self._cam_mode = "follow_player"
@@ -4140,6 +6033,13 @@ class Camera:
         return self._resolve_follow_center(player, npcs, objs)
 
     def update(self, player, npcs, objs, map_w, map_h, shear_screen_px=0.0, dt_sec=1.0 / 60.0):
+        dt_vis = max(0.0, float(dt_sec))
+        if (
+            self._cam_blend_duration_sec is not None
+            and float(self._cam_blend_duration_sec) > 0.0
+            and self._cam_blend_start is not None
+        ):
+            self._cam_blend_elapsed_sec = float(getattr(self, "_cam_blend_elapsed_sec", 0.0) or 0.0) + dt_vis
         # 새 월드 줌 시스템(main.py)로 전환:
         # - 카메라 줌/양자화/스냅은 사용하지 않는다.
         # - 카메라는 "월드 좌표계에서 무엇을 볼지"만 담당하고, 화면 확대/축소는 후처리로 한 장을 스케일한다.
@@ -4233,11 +6133,12 @@ class Camera:
                     self._view_lock_blend_from = None
                     self._view_lock_blend_to = None
         else:
-            ler = float(self._cam_lerp)
-            if not self._cam_smooth:
-                ler = 1.0
-            self.pos[0] += (float(tx) - float(self.pos[0])) * ler
-            self.pos[1] += (float(ty) - float(self.pos[1])) * ler
+            if self._cam_smooth:
+                ler_eff = visual_smooth_step(float(self._cam_lerp), dt_vis)
+            else:
+                ler_eff = 1.0
+            self.pos[0] += (float(tx) - float(self.pos[0])) * ler_eff
+            self.pos[1] += (float(ty) - float(self.pos[1])) * ler_eff
 
         # 수치 드리프트·초기 스냅 오차 방지
         if mw > view_w:
@@ -4400,14 +6301,39 @@ def _load_obj_surface_ui(obj_name: str):
     return None
 
 
+def _overlay_ui_should_scale(step: dict | None) -> bool:
+    if step and step.get("ui_scale") is False:
+        return False
+    return True
+
+
+def _overlay_ui_px(px_320: float, *, screen_w: int, step: dict | None = None) -> int:
+    """OVERLAY_UI 스텝 수치는 320 설계 기준 — 논리 해상도에 맞게 스케일."""
+    if not _overlay_ui_should_scale(step):
+        try:
+            return int(round(float(px_320)))
+        except Exception:
+            return 0
+    try:
+        from field_runtime import scale_ui_text_px
+
+        return int(round(scale_ui_text_px(px_320, screen_w=screen_w)))
+    except Exception:
+        try:
+            return int(round(float(px_320) * float(screen_w) / 320.0))
+        except Exception:
+            return int(round(float(px_320)))
+
+
 def _build_overlay_surface_from_step(step: dict):
+    try:
+        screen_w = int(CONFIG.get("WIDTH", 320) or 320)
+    except Exception:
+        screen_w = 320
     ct = (step.get("content") or step.get("content_type") or "text").strip().lower()
     if ct == "button":
         font_key = (step.get("font") or "default").strip() or "default"
-        try:
-            fs = int(float(step.get("size") or step.get("font_size") or 14))
-        except Exception:
-            fs = 14
+        fs = max(1, _overlay_ui_px(step.get("size") or step.get("font_size") or 14, screen_w=screen_w, step=step))
         col = _parse_overlay_rgb(step)
         font = _resolve_ui_font(font_key, fs)
         label = str(step.get("text") or step.get("label") or "OK")
@@ -4415,12 +6341,8 @@ def _build_overlay_surface_from_step(step: dict):
             ts = font.render(label, True, col)
         except Exception:
             ts = font.render("OK", True, col)
-        pad_x, pad_y = 10, 6
-        try:
-            pad_x = int(float(step.get("pad_x", pad_x)))
-            pad_y = int(float(step.get("pad_y", pad_y)))
-        except Exception:
-            pass
+        pad_x = _overlay_ui_px(step.get("pad_x") if step.get("pad_x") is not None else 10, screen_w=screen_w, step=step)
+        pad_y = _overlay_ui_px(step.get("pad_y") if step.get("pad_y") is not None else 6, screen_w=screen_w, step=step)
         w = ts.get_width() + pad_x * 2
         h = ts.get_height() + pad_y * 2
         out = pygame.Surface((max(4, w), max(4, h)), pygame.SRCALPHA)
@@ -4436,8 +6358,10 @@ def _build_overlay_surface_from_step(step: dict):
                 bgc = (40, 60, 80)
         except Exception:
             bgc = (40, 60, 80)
-        pygame.draw.rect(out, bgc, (0, 0, out.get_width(), out.get_height()), border_radius=4)
-        pygame.draw.rect(out, (180, 200, 220), (0, 0, out.get_width(), out.get_height()), 1, border_radius=4)
+        br = max(1, _overlay_ui_px(step.get("border_radius") if step.get("border_radius") is not None else 4, screen_w=screen_w, step=step))
+        bw = max(1, _overlay_ui_px(1, screen_w=screen_w, step=step))
+        pygame.draw.rect(out, bgc, (0, 0, out.get_width(), out.get_height()), border_radius=br)
+        pygame.draw.rect(out, (180, 200, 220), (0, 0, out.get_width(), out.get_height()), bw, border_radius=br)
         out.blit(ts, (pad_x, pad_y))
         return out
     if ct == "image":
@@ -4446,10 +6370,7 @@ def _build_overlay_surface_from_step(step: dict):
             return None
         return _load_obj_surface_ui(name)
     font_key = (step.get("font") or "default").strip() or "default"
-    try:
-        fs = int(float(step.get("size") or step.get("font_size") or 16))
-    except Exception:
-        fs = 16
+    fs = max(1, _overlay_ui_px(step.get("size") or step.get("font_size") or 16, screen_w=screen_w, step=step))
     col = _parse_overlay_rgb(step)
     font = _resolve_ui_font(font_key, fs)
     raw = step.get("text") or ""
@@ -4457,7 +6378,7 @@ def _build_overlay_surface_from_step(step: dict):
     surfaces = []
     max_w = 4
     total_h = 0
-    line_gap = 2
+    line_gap = _overlay_ui_px(step.get("line_gap") if step.get("line_gap") is not None else 2, screen_w=screen_w, step=step)
     for ln in lines:
         try:
             surf = font.render(ln, True, col)
@@ -4595,6 +6516,62 @@ def _sanitize_ui_emotion_token(s) -> str:
     return "".join(c for c in x if c.isalnum() or c == "_")[:64]
 
 
+def load_interact_prompt_frames(entity_key: str, prompt_set: str = None, *, max_frames: int = None):
+    """
+    상호작용 안내 아이콘 프레임 로드.
+    1) assets/images/ui/{entity_key}/{set}0.png …
+    2) assets/images/ui/pushbutton/{set}0.png …
+    3) 구형 존 프롬프트: assets/images/ui/pushbutton0.png …
+    각 경로에서 {set}{i}.png 와 {set}_{i}.png 를 순서대로 시도.
+    """
+    try:
+        ps = str(
+            prompt_set or CONFIG.get("INTERACT_PROMPT_DEFAULT_SET", "pushbutton") or "pushbutton"
+        ).strip()
+    except Exception:
+        ps = "pushbutton"
+    if not ps:
+        ps = "pushbutton"
+    try:
+        nfr = int(
+            max_frames
+            if max_frames is not None
+            else CONFIG.get("INTERACT_PROMPT_FRAMES", CONFIG.get("ZONE_CONFIRM_PROMPT_FRAMES", 4))
+            or 4
+        )
+    except Exception:
+        nfr = 4
+    nfr = max(1, min(32, nfr))
+    ek = str(entity_key or "").strip().replace("\\", "/").strip("/")
+    prefixes = []
+    if ek:
+        prefixes.append(os.path.join("assets", "images", "ui", ek.replace("/", os.sep), ps))
+    prefixes.append(os.path.join("assets", "images", "ui", "pushbutton", ps))
+    if ps == "pushbutton":
+        prefixes.append(os.path.join("assets", "images", "ui", "pushbutton"))
+    seen = set()
+    for pre in prefixes:
+        pre_n = os.path.normpath(pre)
+        if pre_n in seen:
+            continue
+        seen.add(pre_n)
+        frames = []
+        for i in range(nfr):
+            found = None
+            for suffix in (f"{i}.png", f"_{i}.png"):
+                p = os.path.normpath(pre_n + suffix)
+                surf = _load_image_cached(p)
+                if surf is not None:
+                    found = surf
+                    break
+            if found is None:
+                break
+            frames.append(found)
+        if frames:
+            return frames
+    return []
+
+
 def _load_numbered_ui_sequence(rel_stem: str, *, max_frames: int = 64):
     """rel_stem 예: 'images/ui/speechbubble' → assets/.../speechbubble_0.png …"""
     mf = max(1, min(128, int(max_frames or 64)))
@@ -4642,10 +6619,7 @@ def _head_top_center_screen(ent, head_ctx):
     feet_y_q = float(int(round(float(feet_y))))
     feet_x = float((wx - cam_x) * z)
     if callable(x_offset_fn):
-        try:
-            feet_x = float(feet_x) + float(x_offset_fn(float(feet_y_q)))
-        except Exception:
-            pass
+        feet_x = float(feet_x) + float(shear_base_offset_px(feet_y_q, x_offset_fn))
     h_off = float(getattr(ent, "height", 0) or 0)
     if h_off > 0.0:
         feet_y = float(feet_y_q) - h_off * z
@@ -4653,7 +6627,7 @@ def _head_top_center_screen(ent, head_ctx):
         feet_y = float(feet_y_q)
     fpx, fpy = int(round(float(feet_x))), int(round(float(feet_y)))
     try:
-        ez = float(getattr(ent, "event_entity_zoom", 1.0) or 1.0)
+        ez = entity_combined_zoom_mul(ent)
     except Exception:
         ez = 1.0
     eff = float(z) * max(0.05, min(8.0, ez))
@@ -4788,6 +6762,7 @@ class EventManager:
         self._pending_fade_in_after_fadeout_sec = None  # 페이드아웃 완료 직후 페이드인(초)
         self.active_effects = [] # 현재 화면에 떠 있는 이펙트들
         self._effect_wait_ref = None  # EFFECT wait:true — 재생 끝날 때까지 next_step 보류
+        self._change_fade = None  # CHANGE fade — 디졸브 진행 상태 dict (완료 시 next_step)
         self._carry_wait_item = None  # CARRY wait — fly 중인 FieldItem (완료 시 next_step)
         self.active_event_result = None  # events.json의 result (종료 시 적용)
         self._progress_refresh_pending = False
@@ -4795,6 +6770,8 @@ class EventManager:
         self.active_screen = None  # dict or None
         # UI 오버레이 (로고/텍스트, 논리 해상도 좌표)
         self._ui_overlays = []  # list of dict, see _apply_overlay_ui_step
+        self._ui_overlay_pending = []  # [{execute_at_ms, step}] — 트랙별 예약
+        self._overlay_track_free_at = {}  # overlay_id → ms (해당 트랙 다음 스텝 가능 시각)
         self.pending_map_change = None # {"map_id": ..., "pos": ...}
         self.cursor_visible = True # 커서 가시성 제어 추가
         self._cursor_visible_persist = False  # True면 이벤트 종료 후에도 cursor_visible 유지
@@ -4822,6 +6799,12 @@ class EventManager:
         self.pending_field_tilt_restore = None  # end_event 후 main이 한 번 소비
         # FX: 구름 그림자 오버레이 (main.py에서 실제 렌더)
         self.cloud_shadow_control = None  # dict: enabled, dir, speed, freq
+        # FX: 화면 전체 번쩍·흔들림 (main.py 렌더 말미)
+        self.screen_fx_flash = None
+        self.screen_fx_shake = None
+        self.screen_fx_rain = None
+        self.screen_fx_vignette = None
+        self.screen_fx_tone = None
         self.pending_camera_command = None  # dict → main이 cam에 적용 후 소비
         # 이벤트 중 CAMERA 스텝(save_camera)으로 저장한 월드 중심 좌표 (슬롯명 → [x,y])
         self._camera_saved_slots = {}
@@ -4836,6 +6819,8 @@ class EventManager:
         self.pending_sync_queue = []
         self._is_sync_event = False
         self._active_minigame = None  # {"session", "step"}
+        self._entity_visual_event_snaps = {}  # id(ent) -> 이벤트 시작 전(첫 변경 시) 스냅샷
+        self._entity_visual_event_persist = set()  # id(ent) — 종료 후에도 유지
 
     def is_minigame_active(self) -> bool:
         mg = self._active_minigame
@@ -4971,6 +6956,10 @@ class EventManager:
         self._camera_saved_slots = {}
         self._say_bubble = None
         self._emote_overlay = None
+        self._ui_overlay_pending = []
+        self._overlay_track_free_at = {}
+        self._entity_visual_event_snaps = {}
+        self._entity_visual_event_persist = set()
 
     def _restore_all_move_speed_overrides(self):
         if not self._restore_speed_after_move:
@@ -5062,6 +7051,172 @@ class EventManager:
         except Exception:
             self._pending_fade_in_after_fadeout_sec = 0.5
 
+    @staticmethod
+    def _parse_overlay_delay_sec(step) -> float:
+        raw = step.get("delay")
+        if raw is None:
+            raw = step.get("delay_sec")
+        if raw is None or raw == "":
+            return 0.0
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _clear_overlay_pending(self, *, keep_persist_scheduled=False):
+        if not keep_persist_scheduled:
+            self._ui_overlay_pending = []
+            self._overlay_track_free_at = {}
+            return
+        kept = []
+        for item in list(self._ui_overlay_pending or []):
+            st = item.get("step") if isinstance(item, dict) else None
+            if not isinstance(st, dict):
+                continue
+            act = (st.get("action") or "show").strip().lower()
+            if act != "remove" and bool(st.get("persist")):
+                kept.append(item)
+        self._ui_overlay_pending = kept
+        if kept:
+            free = {}
+            now = pygame.time.get_ticks()
+            for item in kept:
+                st = item.get("step") or {}
+                oid = self._overlay_step_track_id(st)
+                if not oid:
+                    continue
+                try:
+                    end = int(item.get("execute_at_ms") or now)
+                except (TypeError, ValueError):
+                    end = now
+                end = self._overlay_step_track_end_ms(st, end)
+                free[oid] = max(int(free.get(oid, 0)), int(end))
+            self._overlay_track_free_at = free
+        else:
+            self._overlay_track_free_at = {}
+
+    @staticmethod
+    def _overlay_step_track_id(step) -> str:
+        if not isinstance(step, dict):
+            return ""
+        return str(step.get("overlay_id") or step.get("id") or "").strip()
+
+    def _overlay_step_timing_ms(self, step):
+        """show/remove 스텝의 appear·hold·disappear 길이(ms). hold=표시 유지 시간."""
+        act = (step.get("action") or "show").strip().lower()
+        if act == "remove":
+            try:
+                diss_raw = step.get("disappear")
+                if diss_raw is None:
+                    diss_raw = step.get("disappear_sec")
+                if diss_raw is None or diss_raw == "":
+                    diss = 0.0
+                else:
+                    diss = float(diss_raw)
+            except (TypeError, ValueError):
+                diss = 0.0
+            out_ms = max(0, int(diss * 1000))
+            return 0, 0, out_ms
+
+        try:
+            appear = float(
+                step.get("appear")
+                if step.get("appear") is not None
+                else step.get("appear_sec", 0.5)
+            )
+        except (TypeError, ValueError):
+            appear = 0.5
+        try:
+            disappear = float(
+                step.get("disappear")
+                if step.get("disappear") is not None
+                else step.get("disappear_sec", 0.5)
+            )
+        except (TypeError, ValueError):
+            disappear = 0.5
+        hold_forever = bool(step.get("hold_forever") or step.get("infinite_hold"))
+        hold_ms = 0
+        if not hold_forever:
+            hold_raw = step.get("hold") if "hold" in step else step.get("hold_sec")
+            try:
+                hs = float(hold_raw if hold_raw is not None and hold_raw != "" else 2.0)
+            except (TypeError, ValueError):
+                hs = 2.0
+            hold_ms = max(0, int(hs * 1000))
+        in_ms = max(0, int(appear * 1000))
+        out_ms = 0 if hold_forever else max(0, int(disappear * 1000))
+        return in_ms, hold_ms, out_ms
+
+    def _overlay_step_track_end_ms(self, step, execute_at_ms: int) -> int:
+        """이 스텝이 끝난 뒤 같은 overlay_id 트랙이 비는 시각."""
+        act = (step.get("action") or "show").strip().lower()
+        in_ms, hold_ms, out_ms = self._overlay_step_timing_ms(step)
+        if act == "remove":
+            return int(execute_at_ms) + int(out_ms)
+        hold_forever = bool(step.get("hold_forever") or step.get("infinite_hold"))
+        if hold_forever:
+            return int(execute_at_ms) + int(in_ms)
+        return int(execute_at_ms) + int(in_ms) + int(hold_ms) + int(out_ms)
+
+    def _dispatch_overlay_ui_step(self, step):
+        """overlay_id 트랙: 이전 연출 종료 + delay 후 실행. 다른 id는 병렬."""
+        if not isinstance(step, dict):
+            return
+        step = dict(step)
+        act = (step.get("action") or "show").strip().lower()
+        oid = self._overlay_step_track_id(step)
+        if not oid:
+            if act == "remove":
+                self._apply_overlay_ui_step(step)
+                return
+            oid = "ov_" + uuid.uuid4().hex[:10]
+            step["overlay_id"] = oid
+
+        delay_sec = self._parse_overlay_delay_sec(step)
+        now = pygame.time.get_ticks()
+        if oid in self._overlay_track_free_at:
+            base_ms = int(self._overlay_track_free_at[oid])
+        else:
+            base_ms = int(now)
+
+        execute_at = int(base_ms + delay_sec * 1000.0)
+        if execute_at < now:
+            execute_at = int(now)
+
+        end_at = self._overlay_step_track_end_ms(step, execute_at)
+        self._overlay_track_free_at[oid] = int(end_at)
+
+        if execute_at <= now:
+            self._apply_overlay_ui_step(step)
+        else:
+            self._ui_overlay_pending.append(
+                {
+                    "execute_at_ms": int(execute_at),
+                    "step": step,
+                }
+            )
+
+    def _tick_pending_overlay_ui_steps(self):
+        if not self._ui_overlay_pending:
+            return
+        now = pygame.time.get_ticks()
+        ready = []
+        remain = []
+        for item in list(self._ui_overlay_pending):
+            try:
+                at = int(item.get("execute_at_ms") or 0)
+            except (TypeError, ValueError):
+                at = 0
+            if now >= at:
+                ready.append(item)
+            else:
+                remain.append(item)
+        self._ui_overlay_pending = remain
+        for item in ready:
+            st = item.get("step")
+            if isinstance(st, dict):
+                self._apply_overlay_ui_step(st)
+
     def _apply_overlay_ui_step(self, step):
         """OVERLAY_UI: 화면 고정 로고/텍스트 (논리 해상도).
         action remove: overlay_id로 제거. disappear(초)>0 이면 즉시 삭제 대신
@@ -5116,7 +7271,8 @@ class EventManager:
                     except Exception:
                         ov["draw_alpha"] = 255
                 ov["phase"] = "out"
-                ov["t_phase0_ms"] = now_ms
+                ov["phase_elapsed_sec"] = 0.0
+                ov["t_out_sec"] = max(0.0, float(diss))
                 ov["t_out_ms"] = t_out_rem
                 ov["hold_forever"] = False
                 break
@@ -5131,14 +7287,8 @@ class EventManager:
         sh = int(CONFIG.get("HEIGHT", 240))
         w, h = surf.get_size()
         anchor = step.get("anchor") or "center"
-        try:
-            mx = int(float(step.get("margin_x") or 0))
-        except Exception:
-            mx = 0
-        try:
-            my = int(float(step.get("margin_y") or 0))
-        except Exception:
-            my = 0
+        mx = _overlay_ui_px(float(step.get("margin_x") or 0), screen_w=sw, step=step)
+        my = _overlay_ui_px(float(step.get("margin_y") or 0), screen_w=sw, step=step)
         rx, ry = _overlay_anchor_xy(anchor, w, h, mx, my, sw, sh)
         mode = (step.get("mode") or "fade").strip().lower()
         if mode not in ("fade", "scroll"):
@@ -5164,6 +7314,16 @@ class EventManager:
             t_hold_ms = max(0, int(hs * 1000))
         t_in_ms = max(0, int(appear * 1000))
         t_out_ms = max(0, int(disappear * 1000))
+        t_in_sec = max(0.0, float(appear))
+        t_out_sec = max(0.0, float(disappear))
+        if hold_forever:
+            t_hold_sec = None
+        else:
+            try:
+                hs = float(hold_raw if hold_raw is not None and hold_raw != "" else 2.0)
+            except Exception:
+                hs = 2.0
+            t_hold_sec = max(0.0, float(hs))
 
         oid = (step.get("overlay_id") or step.get("id") or "").strip()
         if not oid:
@@ -5195,6 +7355,10 @@ class EventManager:
             "t_in_ms": t_in_ms,
             "t_hold_ms": t_hold_ms,
             "t_out_ms": t_out_ms,
+            "t_in_sec": t_in_sec,
+            "t_hold_sec": t_hold_sec,
+            "t_out_sec": t_out_sec,
+            "phase_elapsed_sec": 0.0,
             "hold_forever": hold_forever,
             "persist": persist,
             "draw_alpha": 0,
@@ -5212,22 +7376,33 @@ class EventManager:
         self._ui_overlays = [o for o in (self._ui_overlays or []) if o.get("id") != oid]
         self._ui_overlays.append(ov)
 
-    def _tick_ui_overlays(self):
-        now = pygame.time.get_ticks()
+    def _tick_ui_overlays(self, dt_sec=1.0 / 60.0):
+        """OVERLAY_UI 페이드/스크롤 — 실제 경과 초(dt_sec) 기준."""
+        self._tick_pending_overlay_ui_steps()
+        dt = max(0.0, float(dt_sec))
         alive = []
         for ov in list(self._ui_overlays or []):
             ph = ov.get("phase")
             if ph == "done":
                 continue
             mode = (ov.get("mode") or "fade").strip().lower()
-            t0 = int(ov.get("t_phase0_ms") or now)
 
             if ph == "in":
-                dur = max(0, int(ov.get("t_in_ms") or 0))
-                if dur <= 0:
+                try:
+                    dur_sec = float(ov.get("t_in_sec", 0) or 0)
+                except Exception:
+                    dur_sec = 0.0
+                if dur_sec <= 0:
+                    try:
+                        dur_sec = max(0.0, float(int(ov.get("t_in_ms") or 0)) / 1000.0)
+                    except Exception:
+                        dur_sec = 0.0
+                el = float(ov.get("phase_elapsed_sec", 0.0) or 0.0) + dt
+                ov["phase_elapsed_sec"] = el
+                if dur_sec <= 0:
                     p = 1.0
                 else:
-                    p = min(1.0, max(0.0, (now - t0) / float(dur)))
+                    p = min(1.0, max(0.0, el / dur_sec))
                 if mode == "fade":
                     ov["draw_alpha"] = int(round(255 * p))
                     ov["draw_dx"] = 0.0
@@ -5239,7 +7414,7 @@ class EventManager:
                     ov["draw_alpha"] = 255
                 if p >= 1.0:
                     ov["phase"] = "hold"
-                    ov["t_phase0_ms"] = now
+                    ov["phase_elapsed_sec"] = 0.0
                 alive.append(ov)
                 continue
 
@@ -5250,18 +7425,38 @@ class EventManager:
                 if ov.get("hold_forever"):
                     alive.append(ov)
                     continue
-                hm = int(ov.get("t_hold_ms") or 0)
-                if now - t0 >= hm:
+                try:
+                    hm_sec = float(ov.get("t_hold_sec", 0) or 0)
+                except Exception:
+                    hm_sec = 0.0
+                if hm_sec <= 0:
+                    try:
+                        hm_sec = max(0.0, float(int(ov.get("t_hold_ms") or 0)) / 1000.0)
+                    except Exception:
+                        hm_sec = 0.0
+                el = float(ov.get("phase_elapsed_sec", 0.0) or 0.0) + dt
+                ov["phase_elapsed_sec"] = el
+                if el >= hm_sec:
                     ov["phase"] = "out"
-                    ov["t_phase0_ms"] = now
+                    ov["phase_elapsed_sec"] = 0.0
                 alive.append(ov)
                 continue
 
             if ph == "out":
-                dur = max(0, int(ov.get("t_out_ms") or 0))
-                if dur <= 0:
+                try:
+                    dur_sec = float(ov.get("t_out_sec", 0) or 0)
+                except Exception:
+                    dur_sec = 0.0
+                if dur_sec <= 0:
+                    try:
+                        dur_sec = max(0.0, float(int(ov.get("t_out_ms") or 0)) / 1000.0)
+                    except Exception:
+                        dur_sec = 0.0
+                if dur_sec <= 0:
                     continue
-                p = min(1.0, max(0.0, (now - t0) / float(max(1, dur))))
+                el = float(ov.get("phase_elapsed_sec", 0.0) or 0.0) + dt
+                ov["phase_elapsed_sec"] = el
+                p = min(1.0, max(0.0, el / dur_sec))
                 if mode == "fade":
                     ov["draw_alpha"] = int(round(255 * (1.0 - p)))
                     ov["draw_dx"] = 0.0
@@ -5371,18 +7566,14 @@ class EventManager:
             "frame_ms": fm,
         }
 
-    def _tick_say_bubble_frame(self):
+    def _tick_say_bubble_frame(self, dt_sec=1.0 / 60.0):
         bb = getattr(self, "_say_bubble", None)
         if not bb or not bool(getattr(self, "is_talking", False)) or not bb.get("frames"):
             return
-        try:
-            now = int(pygame.time.get_ticks())
-        except Exception:
+        dt_ms = int(max(0.0, float(dt_sec)) * 1000.0)
+        if dt_ms <= 0:
             return
-        last = int(bb.get("_last_ms", now) or now)
-        bb["_last_ms"] = now
-        dt = max(0, now - last)
-        bb["acc_ms"] = int(bb.get("acc_ms", 0) or 0) + dt
+        bb["acc_ms"] = int(bb.get("acc_ms", 0) or 0) + dt_ms
         fm = max(16, int(bb.get("frame_ms", 140) or 140))
         n = len(bb["frames"])
         fi = int(bb.get("frame_idx", 0) or 0)
@@ -5391,19 +7582,15 @@ class EventManager:
             fi += 1
         bb["frame_idx"] = max(0, min(n - 1, fi))
 
-    def _tick_emote_overlay(self):
+    def _tick_emote_overlay(self, dt_sec=1.0 / 60.0):
         em = getattr(self, "_emote_overlay", None)
         if not em or not em.get("frames") or em.get("_advanced_step"):
             return
         if (em.get("phase") or "play") == "static":
             return
-        try:
-            now = int(pygame.time.get_ticks())
-        except Exception:
+        dt_ms = int(max(0.0, float(dt_sec)) * 1000.0)
+        if dt_ms <= 0:
             return
-        last = int(em.get("_last_ms", now) or now)
-        em["_last_ms"] = now
-        dt = max(0, now - last)
         frames = em["frames"]
         n = len(frames)
         if n <= 0:
@@ -5411,7 +7598,7 @@ class EventManager:
         fm = max(16, int(em.get("frame_ms", 120) or 120))
         phase = em.get("phase") or "play"
         if phase == "play":
-            acc = int(em.get("acc_ms", 0) or 0) + dt
+            acc = int(em.get("acc_ms", 0) or 0) + dt_ms
             fi = int(em.get("frame_idx", 0) or 0)
             while acc >= fm:
                 if fi < n - 1:
@@ -5428,7 +7615,7 @@ class EventManager:
             return
         if phase == "post":
             hr = max(0, int(em.get("hold_remaining_ms", 0) or 0))
-            pa = int(em.get("post_acc", 0) or 0) + dt
+            pa = int(em.get("post_acc", 0) or 0) + dt_ms
             if pa < hr:
                 em["post_acc"] = pa
                 return
@@ -6070,8 +8257,21 @@ class EventManager:
     def update(self, player, camera, objs, npcs, mask_img=None, dt_sec=1.0 / 60.0):
         if mask_img is not None:
             self._event_mask_img = mask_img
-        # escape에서 속도 복구용 (가장 최근 프레임 엔티티 풀)
-        self._active_entities = [player] + list(npcs) + list(objs)
+        # escape에서 속도 복구용 (가장 최근 프레임 엔티티 풀) — 리스트 재사용
+        ents = getattr(self, "_active_entities", None)
+        if ents is None:
+            ents = []
+            self._active_entities = ents
+        ents.clear()
+        ents.append(player)
+        try:
+            ents.extend(npcs)
+        except Exception:
+            pass
+        try:
+            ents.extend(objs)
+        except Exception:
+            pass
         self._last_camera = camera
         # 0. 화면 전체 페이드 (검은 화면) — FADEIN/FADEOUT의 val은 초(duration), dt_sec 기준
         if self.is_fading and float(getattr(self, "fade_duration_sec", 0.0) or 0.0) > 0.0:
@@ -6100,7 +8300,24 @@ class EventManager:
                 ft = float(self.fade_target)
                 self.fade_alpha = int(round(fs + (ft - fs) * u))
 
-        self._tick_ui_overlays()
+        self._tick_ui_overlays(dt_sec)
+        try:
+            self._tick_entity_fx_on_entities(player, npcs, objs, dt_sec)
+        except Exception:
+            pass
+        # 이벤트 개체 줌 보간 — 이벤트 종료 후에도 진행 중인 배율 연출 유지
+        try:
+            self._tick_entity_event_zoom(player, npcs, objs, dt_sec)
+        except Exception:
+            pass
+        try:
+            self._tick_screen_fx(dt_sec)
+        except Exception:
+            pass
+        try:
+            self._tick_active_screen(dt_sec)
+        except Exception:
+            pass
         # SAY typewriter는 busy 중에도 진행돼야 함
         try:
             self._tick_say_typewriter()
@@ -6111,19 +8328,16 @@ class EventManager:
         except Exception:
             pass
         try:
-            self._tick_say_bubble_frame()
+            self._tick_say_bubble_frame(dt_sec)
         except Exception:
             pass
         try:
-            self._tick_emote_overlay()
+            self._tick_emote_overlay(dt_sec)
         except Exception:
             pass
 
         if not self.active_event:
             return
-
-        # 이벤트 개체 줌 보간 (카메라 줌과 별도; busy 여부와 무관하게 매 프레임)
-        self._tick_entity_event_zoom(player, npcs, objs, dt_sec)
 
         # FOLLOW 처리 (루프/스텝 진행과 무관하게 매 프레임 추종 갱신)
         if self._followers:
@@ -6265,6 +8479,63 @@ class EventManager:
                 ent.event_entity_zoom_timed = None
             except Exception:
                 pass
+
+    def _track_event_entity_visual(self, ent, step) -> None:
+        """이벤트 중 시각효과 변경 — persist 옵션·종료 시 복구용 스냅샷."""
+        if ent is None:
+            return
+        from field_runtime import parse_step_persist
+
+        eid = id(ent)
+        if eid not in self._entity_visual_event_snaps:
+            self._entity_visual_event_snaps[eid] = _entity_visual_snapshot(ent)
+        if parse_step_persist(step):
+            self._entity_visual_event_persist.add(eid)
+        else:
+            self._entity_visual_event_persist.discard(eid)
+
+    def _commit_persisted_entity_event_zooms(self) -> None:
+        """persist ZOOM — event_entity_zoom을 entity_def_zoom에 합쳐 이벤트 종료 후에도 유지."""
+        persist = getattr(self, "_entity_visual_event_persist", None) or set()
+        for ent in getattr(self, "_active_entities", []) or []:
+            try:
+                eid = id(ent)
+            except Exception:
+                continue
+            if eid not in persist:
+                continue
+            try:
+                ez = float(getattr(ent, "event_entity_zoom", 1.0) or 1.0)
+            except Exception:
+                ez = 1.0
+            if abs(ez - 1.0) <= 1e-6:
+                continue
+            try:
+                dz = float(getattr(ent, "entity_def_zoom", 1.0) or 1.0)
+            except Exception:
+                dz = 1.0
+            try:
+                ent.entity_def_zoom = clamp_entity_def_zoom(dz * ez)
+                ent.event_entity_zoom = 1.0
+                ent.event_entity_zoom_target = 1.0
+                ent.event_entity_zoom_timed = None
+            except Exception:
+                pass
+
+    def _restore_entity_event_visuals(self) -> None:
+        """이벤트 종료 — persist 가 아닌 엔티티 시각효과를 이벤트 전 상태로 복구."""
+        for ent in getattr(self, "_active_entities", []) or []:
+            try:
+                eid = id(ent)
+            except Exception:
+                continue
+            if eid in self._entity_visual_event_persist:
+                continue
+            snap = self._entity_visual_event_snaps.get(eid)
+            if snap is not None:
+                _entity_visual_restore(ent, snap)
+        self._entity_visual_event_snaps.clear()
+        self._entity_visual_event_persist.clear()
 
     def _run_char_anim_step(self, step, player, npcs, objs):
         """ANIM(레거시) + ACTION_ANIM(모드·방향·점프 높이·release)."""
@@ -6620,6 +8891,30 @@ class EventManager:
                 self.next_step()
                 return
 
+        # fade(초)가 주어지면 즉시 교체 대신 디졸브: 현재 외형이 사라진 뒤(alpha→0)
+        # 새 외형으로 교체하고 다시 나타난다(alpha→255). 한 인스턴스라 위치/정렬은 유지됨.
+        try:
+            fade_sec = float(step.get("fade", step.get("fade_sec", 0)) or 0)
+        except (TypeError, ValueError):
+            fade_sec = 0.0
+
+        if fade_sec > 0.0 and isinstance(item, (BaseCharacter, FieldItem)):
+            self._change_fade = {
+                "item": item,
+                "new_name": new_name,
+                "phase": "out",          # out(사라짐) -> in(나타남)
+                "half_sec": max(0.05, fade_sec / 2.0),
+                "start_alpha": int(getattr(item, "alpha", 255)),
+                "applied": False,        # 교체 적용 여부
+            }
+            self.is_busy = True
+            return
+
+        self._apply_change_retarget(item, new_name)
+        self.next_step()
+
+    def _apply_change_retarget(self, item, new_name):
+        """CHANGE 외형 교체 실제 적용 (즉시/디졸브 공통)."""
         old = getattr(item, "name", "?")
         if isinstance(item, BaseCharacter):
             if item.retarget_char_def(new_name):
@@ -6633,7 +8928,6 @@ class EventManager:
                 print(f"[CHANGE] 실패: to='{new_name}' 없음(object_defs)")
         else:
             print("[CHANGE] 대상이 FieldItem/캐릭터 가 아님")
-        self.next_step()
 
     def _execute_step(self, step, player, camera, npcs, objs):
         s_type = step["type"]
@@ -6870,22 +9164,34 @@ class EventManager:
                 self.pending_world_zoom = wz_cmd
                 self.next_step()
             else:
+                from field_runtime import find_entity_by_name, parse_step_persist
+
                 ent = (
                     player
                     if lt == "player"
-                    else next(
-                        (x for x in (npcs + objs) if getattr(x, "name", "") == raw_tgt),
-                        None,
-                    )
+                    else _event_resolve_entity(raw_tgt, player, npcs, objs)
+                    or find_entity_by_name(raw_tgt, player, npcs=npcs, objs=objs)
                 )
                 if not ent:
+                    print(f"[ZOOM] target not found: {raw_tgt!r}")
                     self.next_step()
                 else:
+                    persist_zoom = parse_step_persist(step)
+                    self._track_event_entity_visual(ent, step)
                     ent.event_entity_zoom_target = val
                     ent.event_entity_zoom_duration_sec = dur
                     ent.event_entity_zoom_timed = None
                     if instant:
-                        ent.event_entity_zoom = val
+                        if persist_zoom:
+                            try:
+                                dz = float(getattr(ent, "entity_def_zoom", 1.0) or 1.0)
+                            except Exception:
+                                dz = 1.0
+                            ent.entity_def_zoom = clamp_entity_def_zoom(dz * val)
+                            ent.event_entity_zoom = 1.0
+                            ent.event_entity_zoom_target = 1.0
+                        else:
+                            ent.event_entity_zoom = val
                         self.next_step()
                     else:
                         zc = float(getattr(ent, "event_entity_zoom", 1.0))
@@ -6893,7 +9199,7 @@ class EventManager:
                         timed_effect_init(
                             ent.event_entity_zoom_timed, zc, val, dur, now_ms=t0
                         )
-                        self.next_step()
+                        # duration_sec 동안 busy 유지 → _check_completion에서 완료 후 next_step
 
         elif s_type == "TILT":
             pt = parse_tilt_step(step)
@@ -6933,49 +9239,55 @@ class EventManager:
             self.shear_control = d
             self.next_step()
 
+        elif s_type == "ENTITY_FX":
+            self._execute_entity_fx_step(step, player, npcs, objs)
+            return
+
+        elif s_type == "SCREEN_FX":
+            self._execute_screen_fx_step(step)
+            return
+
+        elif s_type == "SCREEN_FLASH":
+            self._execute_screen_fx_step({**step, "kind": "flash"})
+            return
+
+        elif s_type == "SCREEN_SHAKE":
+            self._execute_screen_fx_step({**step, "kind": "shake"})
+            return
+
         elif s_type == "FX":
-            # FX: 비주얼 효과 제어 (현재: cloud_shadow)
+            # FX: 구름 그림자(cloud_shadow). 구형 kind=entity_fx/screen_* 도 하위 호환.
             kind = (step.get("kind") or step.get("name") or "").strip().lower()
-            if kind in ("cloud", "cloudshadow", "cloud_shadow", "cloud-shadow"):
-                on_raw = step.get("on", True)
-                if isinstance(on_raw, str):
-                    on_b = on_raw.strip().lower() in ("1", "true", "t", "yes", "y", "on")
-                else:
-                    on_b = bool(on_raw)
-                if not on_b:
-                    self.cloud_shadow_control = {"enabled": False}
-                    self.next_step()
-                    return
-                d = {"enabled": True}
-                d["dir"] = (step.get("dir") or step.get("direction") or "RANDOM")
-                sp = step.get("speed", None)
-                if sp is not None and sp != "":
-                    try:
-                        d["speed"] = float(sp)
-                    except (TypeError, ValueError):
-                        pass
-                fr = step.get("freq", step.get("frequency", None))
-                if fr is not None and fr != "":
-                    try:
-                        d["freq"] = float(fr)
-                    except (TypeError, ValueError):
-                        pass
-                for gk, sk in (
-                    ("grid_cell", "grid_cell"),
-                    ("grid_jitter", "grid_jitter"),
-                    ("grid_max", "grid_max"),
-                ):
-                    gv = step.get(sk)
-                    if gv is not None and str(gv).strip() != "":
-                        try:
-                            d[gk] = float(gv) if gk != "grid_max" else int(float(gv))
-                        except (TypeError, ValueError):
-                            pass
-                self.cloud_shadow_control = d
-                self.next_step()
-            else:
-                # 알 수 없는 FX는 무시
-                self.next_step()
+            if kind in (
+                "entity_fx",
+                "entity_glow",
+                "entity_tint",
+                "entity_pulse",
+                "entity_shimmer",
+                "entity",
+            ):
+                self._execute_entity_fx_step(step, player, npcs, objs)
+                return
+            if kind in ("screen_flash", "flash", "fullscreen_flash", "screen_glow"):
+                self._execute_screen_fx_step({**step, "kind": "flash"})
+                return
+            if kind in ("screen_shake", "shake", "screen_quake", "quake"):
+                self._execute_screen_fx_step({**step, "kind": "shake"})
+                return
+            if kind in ("rain", "screen_rain"):
+                self._execute_screen_fx_step({**step, "kind": "rain"})
+                return
+            if kind in ("vignette", "screen_vignette"):
+                self._execute_screen_fx_step({**step, "kind": "vignette"})
+                return
+            if kind in ("tone", "screen_tone", "white_balance", "whitebalance", "wb"):
+                self._execute_screen_fx_step({**step, "kind": "tone"})
+                return
+            if kind in ("cloud", "cloudshadow", "cloud_shadow", "cloud-shadow", ""):
+                self._execute_screen_fx_step({**step, "kind": "cloud"})
+                return
+            # 알 수 없는 FX는 무시
+            self.next_step()
 
         elif s_type == "CAMERA":
             pcam = parse_camera_step(step)
@@ -7412,9 +9724,16 @@ class EventManager:
                 if self.active_screen:
                     self.active_screen["mode"] = "removing"
                     self.active_screen["transition"] = transition or self.active_screen.get("transition", "fade")
-                    self.active_screen["t0"] = pygame.time.get_ticks()
-                    self.active_screen["duration_ms"] = int(float(step.get("val", 0) or 0) * 1000) if step.get("val") else self.active_screen.get("duration_ms", 400)
-                    self.active_screen["duration_ms"] = max(120, int(self.active_screen["duration_ms"] or 400))
+                    self.active_screen["phase_elapsed_sec"] = 0.0
+                    try:
+                        if step.get("val") is not None:
+                            diss = float(step.get("val") or 0)
+                        else:
+                            diss = float(self.active_screen.get("duration_sec", 0.4) or 0.4)
+                    except Exception:
+                        diss = 0.4
+                    self.active_screen["duration_sec"] = max(0.12, float(diss))
+                    self.active_screen["duration_ms"] = int(self.active_screen["duration_sec"] * 1000.0)
                 else:
                     self.next_step()
                 return
@@ -7437,6 +9756,7 @@ class EventManager:
                     trans_ms = max(120, int(float(step.get("val")) * 1000))
                 except:
                     trans_ms = 400
+            trans_sec = max(0.12, float(trans_ms) / 1000.0)
 
             # 이미지 로드
             img = None
@@ -7461,6 +9781,8 @@ class EventManager:
                     "mode": "crossing",
                     "t0": now_t,
                     "duration_ms": trans_ms,
+                    "duration_sec": trans_sec,
+                    "phase_elapsed_sec": 0.0,
                     "text": text if text is not None else "",
                     "auto": bool(step.get("auto", False)),
                     "auto_ms": int(float(step.get("val", 0) or 0) * 1000) if step.get("auto") and step.get("val") is not None else None,
@@ -7476,6 +9798,8 @@ class EventManager:
                     "mode": "showing",
                     "t0": now_t,
                     "duration_ms": trans_ms,
+                    "duration_sec": trans_sec,
+                    "phase_elapsed_sec": 0.0,
                     "text": text if text is not None else "",
                     "auto": bool(step.get("auto", False)),
                     "auto_ms": int(float(step.get("val", 0) or 0) * 1000) if step.get("auto") and step.get("val") is not None else None,
@@ -7505,7 +9829,7 @@ class EventManager:
             self.next_step()
 
         elif s_type == "OVERLAY_UI":
-            self._apply_overlay_ui_step(step)
+            self._dispatch_overlay_ui_step(step)
             self.next_step()
 
         elif s_type == "MUSIC_PLAY":
@@ -7586,7 +9910,7 @@ class EventManager:
                 except Exception:
                     appear_sec = 0.85
                 appear_sec = max(0.05, float(appear_sec))
-                delta = (255.0 / appear_sec) * max(0.0, float(dt_sec))
+                delta = fade_alpha_delta(255.0, appear_sec, dt_sec)
                 # 1. 알파값 업데이트 (실시간 기준)
                 if is_remove:
                     target.alpha = max(0, int(target.alpha) - int(round(delta)))
@@ -7603,6 +9927,29 @@ class EventManager:
             else:
                 self.is_waiting_for_appear = False
                 self.next_step()
+            return
+
+        if s_type == "CHANGE":
+            cf = getattr(self, "_change_fade", None)
+            if not cf:
+                self.next_step()
+                return
+            item = cf["item"]
+            delta = fade_alpha_delta(255.0, float(cf["half_sec"]), dt_sec)
+            if cf["phase"] == "out":
+                item.alpha = max(0, int(getattr(item, "alpha", 255)) - int(round(delta)))
+                if item.alpha <= 0:
+                    item.alpha = 0
+                    if not cf["applied"]:
+                        self._apply_change_retarget(item, cf["new_name"])
+                        cf["applied"] = True
+                    cf["phase"] = "in"
+            else:  # in
+                item.alpha = min(255, int(getattr(item, "alpha", 0)) + int(round(delta)))
+                if item.alpha >= 255:
+                    item.alpha = 255
+                    self._change_fade = None
+                    self.next_step()
             return
 
         if s_type in ("EFFECT", "ANIM_ONCE"):
@@ -7779,24 +10126,17 @@ class EventManager:
                 self.next_step()
 
         elif s_type == "ZOOM":
-            raw_tgt = (step.get("target") or "").strip()
+            pz = parse_zoom_step(step)
+            if bool(pz.get("is_camera")):
+                return
+            if bool(pz.get("instant")):
+                return
+            raw_tgt = (pz.get("target") or "").strip()
             lt = raw_tgt.lower()
-            cam_aliases = ("", "camera", "cam", "screen", "global", "__global__")
-            if lt in cam_aliases:
-                return
-            ins = step.get("instant")
-            instant = ins is True or (
-                isinstance(ins, str) and ins.strip().lower() in ("1", "true", "yes", "on")
-            )
-            if instant:
-                return
             ent = (
                 player
                 if lt == "player"
-                else next(
-                    (x for x in (npcs + objs) if getattr(x, "name", "") == raw_tgt),
-                    None,
-                )
+                else _event_resolve_entity(raw_tgt, player, npcs, objs)
             )
             if not ent:
                 self.next_step()
@@ -7807,9 +10147,13 @@ class EventManager:
             except Exception:
                 self.next_step()
                 return
+            ztimed = getattr(ent, "event_entity_zoom_timed", None)
+            if isinstance(ztimed, dict) and not timed_effect_finished(ztimed):
+                return
             eps = max(0.008, abs(zt) * 0.02)
             if abs(zc - zt) <= eps:
                 ent.event_entity_zoom = zt
+                ent.event_entity_zoom_timed = None
                 self.next_step()
 
         # SAY는 main.py에서 클릭 시 next_step()을 직접 호출해줌
@@ -7817,9 +10161,13 @@ class EventManager:
 
         # SCREEN remove가 진행 중이면 여기서 완료 처리(오버레이 제거)
         if self.active_screen and self.active_screen.get("mode") == "removing":
-            now = pygame.time.get_ticks()
-            dur = max(120, int(self.active_screen.get("duration_ms") or 400))
-            if now - int(self.active_screen.get("t0") or now) >= dur:
+            try:
+                dur = float(self.active_screen.get("duration_sec", 0.4) or 0.4)
+            except Exception:
+                dur = 0.4
+            dur = max(0.12, dur)
+            el = float(self.active_screen.get("phase_elapsed_sec", 0.0) or 0.0)
+            if el >= dur:
                 # SCREEN 스텝이 자체 음악을 재생한 경우에만 정리.
                 # (이벤트의 MUSIC_PLAY로 재생 중인 BGM까지 꺼지지 않도록)
                 if self.active_screen.get("music"):
@@ -7977,12 +10325,6 @@ class EventManager:
         ended_id = self.active_event_id
         for ent in getattr(self, "_active_entities", []) or []:
             try:
-                ent.event_entity_zoom = 1.0
-                ent.event_entity_zoom_target = 1.0
-                ent.event_entity_zoom_timed = None
-            except Exception:
-                pass
-            try:
                 ent.event_waypoints = None
             except Exception:
                 pass
@@ -8002,6 +10344,7 @@ class EventManager:
             self._ui_overlays = [o for o in (self._ui_overlays or []) if o.get("persist")]
         except Exception:
             self._ui_overlays = []
+        self._clear_overlay_pending(keep_persist_scheduled=True)
         # 2. 상태 초기화
         self.active_event = None
         self.active_event_id = None
@@ -8013,6 +10356,16 @@ class EventManager:
         self._say_bubble = None
         self._emote_overlay = None
         self._effect_wait_ref = None
+        # CHANGE 디졸브가 끝나기 전에 이벤트가 종료되면 외형 교체를 마저 적용하고 alpha 복구
+        cf_end = getattr(self, "_change_fade", None)
+        if cf_end:
+            try:
+                if not cf_end.get("applied"):
+                    self._apply_change_retarget(cf_end["item"], cf_end["new_name"])
+                cf_end["item"].alpha = 255
+            except Exception:
+                pass
+            self._change_fade = None
         self.active_effects = []
         self._carry_wait_item = None
         snap = getattr(self, "field_tilt_snapshot", None)
@@ -8032,6 +10385,154 @@ class EventManager:
         # 단, CURSOR_VISIBLE에 persist:true가 지정되면 상태를 유지한다.
         if not bool(getattr(self, "_cursor_visible_persist", False)):
             self.cursor_visible = True
+        self._commit_persisted_entity_event_zooms()
+        self._restore_entity_event_visuals()
+
+    def _tick_entity_fx_on_entities(self, player, npcs, objs, dt_sec):
+        """entity_fx pulse phase 갱신 (필드·이벤트 공통)."""
+        pools = []
+        if player is not None:
+            pools.append(player)
+        pools.extend(list(npcs or []))
+        pools.extend(list(objs or []))
+        for ent in pools:
+            fx = getattr(ent, "entity_fx", None)
+            if fx:
+                tick_entity_fx_state(fx, dt_sec)
+
+    def _execute_entity_fx_step(self, step, player, npcs, objs):
+        """ENTITY_FX — 대상 캐릭터/오브젝트 반짝임·틴트·zoom."""
+        from field_runtime import find_entity_by_name
+
+        action = (step.get("action") or step.get("cmd") or "start").strip().lower()
+        if action in ("stop", "clear", "off", "remove", "end"):
+            tgt_name = (step.get("target") or step.get("who") or "").strip()
+            if tgt_name:
+                ent = find_entity_by_name(tgt_name, player, npcs=npcs, objs=objs)
+                if ent is not None:
+                    clear_entity_visual(ent)
+            else:
+                for pool in (npcs or []), (objs or []):
+                    for ent in pool:
+                        clear_entity_visual(ent)
+                if player is not None:
+                    clear_entity_visual(player)
+            self.next_step()
+            return
+        on_raw = step.get("on", True)
+        if isinstance(on_raw, str) and on_raw.strip().lower() in ("0", "false", "f", "no", "n", "off"):
+            self._execute_entity_fx_step({**step, "action": "stop"}, player, npcs, objs)
+            return
+        tgt = (step.get("target") or step.get("who") or "player").strip()
+        ent = find_entity_by_name(tgt, player, npcs=npcs, objs=objs)
+        if ent is None:
+            print(f"[FX entity_fx] 대상 없음: {tgt}")
+            self.next_step()
+            return
+        self._track_event_entity_visual(ent, step)
+        apply_entity_visual_patch(ent, step)
+        self.next_step()
+
+    def _parse_fx_on_flag(self, step) -> bool:
+        on_raw = step.get("on", True)
+        if isinstance(on_raw, str):
+            return on_raw.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+        return bool(on_raw)
+
+    def clear_all_screen_fx(self) -> None:
+        """SCREEN_FX kind=all on:false — 구름·비·톤 등 화면 FX 전부 끔."""
+        self.cloud_shadow_control = {"enabled": False}
+        self.screen_fx_flash = {"enabled": False}
+        self.screen_fx_shake = {"enabled": False}
+        self.screen_fx_rain = {"enabled": False}
+        self.screen_fx_vignette = {"enabled": False}
+        self.screen_fx_tone = {"enabled": False}
+
+    def _execute_screen_fx_step(self, step):
+        """SCREEN_FX — kind 별 cloud / flash / shake / rain / vignette / tone / all (on:false 로 해당 효과만 끔)."""
+        kind = resolve_screen_fx_kind(step)
+        if kind == "all":
+            if not self._parse_fx_on_flag(step):
+                self.clear_all_screen_fx()
+            self.next_step()
+            return
+        if not self._parse_fx_on_flag(step):
+            if kind == "flash":
+                self.screen_fx_flash = {"enabled": False}
+            elif kind == "shake":
+                self.screen_fx_shake = {"enabled": False}
+            elif kind == "rain":
+                self.screen_fx_rain = {"enabled": False}
+            elif kind == "vignette":
+                self.screen_fx_vignette = {"enabled": False}
+            elif kind == "tone":
+                self.screen_fx_tone = {"enabled": False}
+            elif kind == "cloud":
+                self.cloud_shadow_control = {"enabled": False}
+            self.next_step()
+            return
+        if kind == "cloud":
+            self.cloud_shadow_control = build_cloud_shadow_control_from_step(step)
+        elif kind == "shake":
+            self.screen_fx_shake = build_screen_shake_from_step(step)
+        elif kind == "rain":
+            self.screen_fx_rain = build_screen_rain_from_step(step)
+        elif kind == "vignette":
+            self.screen_fx_vignette = build_screen_vignette_from_step(step)
+        elif kind == "tone":
+            self.screen_fx_tone = build_screen_tone_from_step(step)
+        else:
+            self.screen_fx_flash = build_screen_flash_from_step(step)
+        self.next_step()
+
+    def _tick_screen_fx(self, dt_sec):
+        flash = self.screen_fx_flash
+        if isinstance(flash, dict) and flash.get("enabled"):
+            tick_screen_fx_flash(flash, dt_sec)
+        shake = self.screen_fx_shake
+        if isinstance(shake, dict) and shake.get("enabled"):
+            tick_screen_fx_shake(shake, dt_sec)
+        rain = self.screen_fx_rain
+        if isinstance(rain, dict) and rain.get("enabled"):
+            tick_screen_fx_rain(rain, dt_sec)
+
+    def _tick_active_screen(self, dt_sec=1.0 / 60.0):
+        """SCREEN 오버레이 전환 진행 — 실제 경과 초 기준."""
+        info = self.active_screen
+        if not info:
+            return
+        mode = (info.get("mode") or "showing").strip().lower()
+        if mode not in ("showing", "crossing", "removing"):
+            return
+        dt = max(0.0, float(dt_sec))
+        el = float(info.get("phase_elapsed_sec", 0.0) or 0.0) + dt
+        info["phase_elapsed_sec"] = el
+        try:
+            dur = float(info.get("duration_sec", 0.4) or 0.4)
+        except Exception:
+            dur = 0.4
+        dur = max(0.12, dur)
+        if el < dur:
+            return
+        if mode == "crossing":
+            next_img = info.get("next_img") or info.get("img")
+            self.active_screen = {
+                "img": next_img,
+                "picture": info.get("picture"),
+                "music": info.get("music"),
+                "transition": info.get("transition", "fade"),
+                "bg": info.get("bg", "black"),
+                "mode": "holding",
+                "duration_sec": dur,
+                "duration_ms": int(dur * 1000.0),
+                "phase_elapsed_sec": dur,
+                "text": info.get("text") or "",
+                "auto": info.get("auto", False),
+                "auto_ms": info.get("auto_ms"),
+            }
+        elif mode == "showing":
+            info["mode"] = "holding"
+            info["phase_elapsed_sec"] = dur
 
     def draw_screen_overlay(self, screen: pygame.Surface):
         """SCREEN 스텝 오버레이를 게임 화면 위에 렌더링."""
@@ -8042,12 +10543,22 @@ class EventManager:
         transition = (info.get("transition") or "fade").strip().lower()
         bg = (info.get("bg") or "black").strip().lower()
         mode = info.get("mode") or "showing"
-        t0 = int(info.get("t0") or pygame.time.get_ticks())
-        dur = max(120, int(info.get("duration_ms") or 400))
-        now = pygame.time.get_ticks()
-        p = min(1.0, max(0.0, (now - t0) / dur))
+        try:
+            dur = float(info.get("duration_sec", 0.4) or 0.4)
+        except Exception:
+            dur = 0.4
+        if dur <= 0 and info.get("duration_ms"):
+            try:
+                dur = max(0.12, float(int(info.get("duration_ms") or 400)) / 1000.0)
+            except Exception:
+                dur = 0.4
+        dur = max(0.12, float(dur))
+        el = float(info.get("phase_elapsed_sec", 0.0) or 0.0)
+        p = min(1.0, max(0.0, el / dur))
         if mode == "removing":
             p = 1.0 - p
+        if mode == "holding":
+            p = 1.0
 
         # 배경 처리
         # - bg="black"(기본): 기존처럼 검은 배경으로 화면을 덮은 뒤 이미지를 표시
@@ -8102,24 +10613,6 @@ class EventManager:
             else:
                 blit_scaled_center(prev_img, alpha=255 * (1.0 - p))
                 blit_scaled_center(next_img, alpha=255 * p)
-
-            # 전환 완료 시 다음 스크린으로 확정
-            if (now - t0) >= dur:
-                self.active_screen = {
-                    "img": next_img,
-                    "picture": info.get("picture"),
-                    "music": info.get("music"),
-                    "transition": transition,
-                    "bg": bg,
-                    "mode": "holding",  # 완전히 켜진 상태
-                    "t0": now,
-                    "duration_ms": dur,
-                    "text": info.get("text") or "",
-                    "auto": info.get("auto", False),
-                    "auto_ms": info.get("auto_ms"),
-                }
-                info = self.active_screen
-                img = info.get("img")
 
         elif mode in ("showing", "holding"):
             # 켜질 때는 이미지가 검은 바탕 위에서 서서히 나타남(showing), holding은 완전히 표시된 상태

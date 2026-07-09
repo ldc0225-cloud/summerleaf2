@@ -8,6 +8,7 @@ import math
 import os
 import random
 import sys
+from collections import OrderedDict
 
 import pygame
 
@@ -101,7 +102,7 @@ class FieldRuntimeUI:
         self.shear_debug_on = False
         # TILT_SHEAR_ENABLED=True일 때 핫키(R)로 필드 쉬어 끄기
         self.shear_suppressed = False
-        self.zoom_idx = 2
+        self.zoom_idx = 1
 
 
 FIELD_RUNTIME_UI = FieldRuntimeUI()
@@ -201,6 +202,28 @@ def parse_step_bool(val, default=None):
     return bool(val)
 
 
+def parse_step_persist(step, *, default=None) -> bool:
+    """이벤트 ENTITY_FX·엔티티 ZOOM — 종료 후에도 유지할지."""
+    if not isinstance(step, dict):
+        if default is not None:
+            return bool(default)
+        try:
+            return bool(CONFIG.get("ENTITY_FX_DEFAULT_PERSIST", False))
+        except Exception:
+            return False
+    raw = step.get("persist")
+    if raw is None:
+        raw = step.get("keep_after_event", step.get("hold_after_event"))
+    if raw is None:
+        if default is not None:
+            return bool(default)
+        try:
+            return bool(CONFIG.get("ENTITY_FX_DEFAULT_PERSIST", False))
+        except Exception:
+            return False
+    return bool(parse_step_bool(raw, False))
+
+
 def parse_strength_01(val, default=1.0):
     if val is None or str(val).strip() == "":
         return max(0.0, min(1.0, float(default)))
@@ -234,6 +257,34 @@ PARALLEL_EFFECT_STEP_TYPES = frozenset(
 
 def effect_now_ms():
     return int(pygame.time.get_ticks())
+
+
+# =============================================================================
+# 시각 연출 시간 통일 (프레임 수가 아닌 실제 경과 초)
+# 페이드·오버레이·틸트/쉬어/카메라 보간이 FPS·fixed timestep과 무관하게 동일 체감.
+# =============================================================================
+
+def visual_dt_ref_sec() -> float:
+    """지수 보간 기준 프레임 길이(초). 60fps 1프레임 ≈ 0.0167."""
+    try:
+        v = float(CONFIG.get("VISUAL_DT_REF_SEC", 1.0 / 60.0) or (1.0 / 60.0))
+    except Exception:
+        v = 1.0 / 60.0
+    return max(1e-6, v)
+
+
+def visual_smooth_step(speed_01: float, dt_sec: float) -> float:
+    """프레임율 무관 지수 보간 계수 (0~1). legacy step_ms/16.666 exponential과 60fps에서 동일."""
+    dt = max(0.0, float(dt_sec))
+    spd = max(0.0, min(1.0, float(speed_01)))
+    k = dt / visual_dt_ref_sec()
+    return 1.0 - pow(max(0.0, 1.0 - spd), k)
+
+
+def fade_alpha_delta(span: float, duration_sec: float, dt_sec: float) -> float:
+    """선형 알파 페이드 한 틱 변화량."""
+    dur = max(1e-6, float(duration_sec))
+    return (float(span) / dur) * max(0.0, float(dt_sec))
 
 
 def timed_effect_init(ctrl, start_value, target_value, duration_sec, *, now_ms=None):
@@ -345,6 +396,41 @@ def _tilt_factor_min():
     return max(0.02, min(0.99, v))
 
 
+def apply_map_field_defaults(map_id, ui, ev_mgr=None):
+    """맵 진입 시 ui.tilt_target·쉬어 플래그를 MAP_FIELD_DEFAULTS 에 맞게 설정."""
+    from data import resolve_map_field_defaults
+
+    cfg = resolve_map_field_defaults(map_id)
+    tilt_on = bool(cfg.get("tilt_on", False))
+    shear_on = bool(cfg.get("shear_on", False))
+
+    ui.tilt_bg_demo = False
+    if tilt_on:
+        try:
+            fac = float(CONFIG.get("TILT_BG_ON_FACTOR", 0.72))
+        except (TypeError, ValueError):
+            fac = 0.72
+        ui.tilt_target = max(_tilt_factor_min(), min(1.0, fac))
+    else:
+        ui.tilt_target = 1.0
+
+    if bool(CONFIG.get("TILT_SHEAR_ENABLED", False)):
+        ui.shear_suppressed = not shear_on
+        ui.shear_debug_on = False
+    else:
+        ui.shear_suppressed = False
+        ui.shear_debug_on = bool(shear_on)
+
+    if ev_mgr is not None:
+        try:
+            if not ev_mgr.active_event:
+                ev_mgr.shear_control = None
+                ev_mgr.tilt_control = None
+        except Exception:
+            pass
+    return float(ui.tilt_target)
+
+
 def tilt_factor_from_strength(strength_01, on=True):
     tf_lo = _tilt_factor_min()
     if not on:
@@ -425,12 +511,51 @@ def parse_shear_step(step):
 
 
 def parse_zoom_step(step):
-    """ZOOM: on, strength(0~1), duration_sec(초)만 사용. val은 구형 호환 읽기만."""
+    """ZOOM: 카메라는 strength(0~1)→WORLD_ZOOM_MIN~MAX, 엔티티는 val/strength=직접 배율."""
     on = parse_step_bool(step.get("on"), True)
     raw_tgt = (step.get("target") or "").strip()
     lt = raw_tgt.lower()
     cam_aliases = ("", "camera", "cam", "screen", "global", "__global__")
     is_cam = lt in cam_aliases
+
+    default_d = float(CONFIG.get("WORLD_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
+    if not is_cam:
+        default_d = float(CONFIG.get("ENTITY_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
+    dur = parse_duration_sec(step, default_sec=default_d)
+
+    if not is_cam:
+        if not on:
+            zoom_val = 1.0
+        else:
+            val_raw = step.get("val")
+            str_raw = step.get("strength")
+            if val_raw is not None and str(val_raw).strip() != "":
+                picked = val_raw
+            elif str_raw is not None and str(str_raw).strip() != "":
+                picked = str_raw
+            else:
+                picked = 1.0
+            try:
+                zmin = float(CONFIG.get("ENTITY_ZOOM_MIN", 0.5))
+                zmax = float(CONFIG.get("ENTITY_ZOOM_MAX", 2.0))
+            except (TypeError, ValueError):
+                zmin, zmax = 0.5, 2.0
+            zmin = max(0.05, min(8.0, zmin))
+            zmax = max(zmin, min(8.0, zmax))
+            try:
+                zoom_val = float(picked)
+            except (TypeError, ValueError):
+                zoom_val = 1.0
+            zoom_val = max(zmin, min(zmax, zoom_val))
+        return {
+            "on": bool(on),
+            "strength": float(zoom_val),
+            "val": float(zoom_val),
+            "target": raw_tgt,
+            "is_camera": False,
+            "duration_sec": float(dur),
+            "instant": float(dur) <= 0.0,
+        }
 
     strength = step.get("strength")
     if strength is None or str(strength).strip() == "":
@@ -438,12 +563,8 @@ def parse_zoom_step(step):
         if val is not None and str(val).strip() != "":
             try:
                 v = float(val)
-                if is_cam:
-                    zmin = float(CONFIG.get("WORLD_ZOOM_MIN", 1.0))
-                    zmax = float(CONFIG.get("WORLD_ZOOM_MAX", 2.0))
-                else:
-                    zmin = float(CONFIG.get("ENTITY_ZOOM_MIN", 1.0))
-                    zmax = float(CONFIG.get("ENTITY_ZOOM_MAX", 2.0))
+                zmin = float(CONFIG.get("WORLD_ZOOM_MIN", 1.0))
+                zmax = float(CONFIG.get("WORLD_ZOOM_MAX", 2.0))
                 span = max(1e-6, zmax - zmin)
                 strength = max(0.0, min(1.0, (v - zmin) / span)) if on else 0.0
             except (TypeError, ValueError):
@@ -451,19 +572,14 @@ def parse_zoom_step(step):
         else:
             strength = 1.0 if on else 0.0
     strength = parse_strength_01(strength, 1.0 if on else 0.0)
-    zoom_val = zoom_val_from_strength(strength, on=on, is_camera=is_cam)
-
-    default_d = float(CONFIG.get("WORLD_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
-    if not is_cam:
-        default_d = float(CONFIG.get("ENTITY_ZOOM_DEFAULT_DURATION_SEC", 1.0) or 1.0)
-    dur = parse_duration_sec(step, default_sec=default_d)
+    zoom_val = zoom_val_from_strength(strength, on=on, is_camera=True)
 
     return {
         "on": bool(on),
         "strength": float(strength),
         "val": float(zoom_val),
         "target": raw_tgt,
-        "is_camera": bool(is_cam),
+        "is_camera": True,
         "duration_sec": float(dur),
         "instant": float(dur) <= 0.0,
     }
@@ -523,6 +639,8 @@ def _canonical_zoom_json(parsed):
     tgt = (parsed.get("target") or "").strip()
     if tgt:
         j["target"] = tgt
+    if parsed.get("persist"):
+        j["persist"] = True
     return j
 
 
@@ -545,6 +663,7 @@ def fill_editor_fields_from_step(step_fields, step, step_type):
         step_fields["zoom_strength"] = str(round(p["strength"], 4))
         step_fields["zoom_duration_sec"] = str(round(p["duration_sec"], 4))
         step_fields["target"] = (p.get("target") or "").strip()
+        step_fields["zoom_persist"] = "true" if parse_step_persist(step) else "false"
     elif t == "CAMERA":
         p = parse_camera_step(step)
         step_fields["cam_mode"] = str(p["mode"])
@@ -583,6 +702,8 @@ def build_step_from_editor_fields(step_fields, step_type):
             "duration_sec": step_fields.get("zoom_duration_sec"),
             "target": step_fields.get("target"),
         }
+        if parse_step_bool(step_fields.get("zoom_persist"), False):
+            stub["persist"] = True
         return _canonical_zoom_json(parse_zoom_step(stub))
     return None
 
@@ -702,6 +823,223 @@ def build_global_hotkey_event_map():
     return out
 
 
+# =============================================================================
+# 게임 종료 버튼 (OVERLAY_UI)
+# events.json의 fishing_exit·낚시 그만두기와 동일한 EventManager 파이프라인 사용.
+# - install_game_exit_button: 필드 진입 시 오른쪽 위 persist 버튼 등록
+# - show/hide_game_exit_confirm: 확인 문구 + 응/아니 버튼
+# - handle_overlay_ui_click_action: try_overlay_ui_click 반환값 일괄 처리
+# =============================================================================
+
+GAME_EXIT_BTN_ID = "game_exit_btn"
+GAME_EXIT_CONFIRM_IDS = (
+    "game_exit_confirm_msg",
+    "game_exit_confirm_yes",
+    "game_exit_confirm_no",
+)
+
+
+def _game_exit_overlay_enabled() -> bool:
+    try:
+        return bool(CONFIG.get("GAME_EXIT_OVERLAY_ENABLED", True))
+    except Exception:
+        return True
+
+
+def _apply_overlay_ui_step_dict(ev_mgr, step: dict) -> None:
+    """EventManager._apply_overlay_ui_step 래퍼 (OVERLAY_UI 스텝 dict 그대로 전달)."""
+    fn = getattr(ev_mgr, "_apply_overlay_ui_step", None)
+    if callable(fn):
+        fn(step)
+
+
+def _persist_overlay_ui_step(**fields) -> dict:
+    """hold_forever persist OVERLAY_UI 공통 필드 (events.json OVERLAY_UI 스텝과 동일 키)."""
+    step = {
+        "type": "OVERLAY_UI",
+        "action": "show",
+        "persist": True,
+        "hold_forever": True,
+        "mode": "fade",
+        "appear": 0.12,
+        "disappear": 0.15,
+    }
+    step.update(fields)
+    return step
+
+
+def game_exit_confirm_open(ev_mgr) -> bool:
+    """종료 확인창(문구 오버레이)이 떠 있는지."""
+    try:
+        for ov in list(getattr(ev_mgr, "_ui_overlays", None) or []):
+            if ov.get("id") == GAME_EXIT_CONFIRM_IDS[0] and ov.get("phase") != "done":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def install_game_exit_button(ev_mgr) -> None:
+    """오른쪽 위 작은 exit 버튼 — 필드 플레이 내내 표시 (임시 플레이스홀더, 추후 이미지 교체)."""
+    if not _game_exit_overlay_enabled():
+        return
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="exit",
+            font="default",
+            size=10,
+            pad_x=6,
+            pad_y=3,
+            color="235,220,210",
+            bg_color="48,42,42",
+            overlay_id=GAME_EXIT_BTN_ID,
+            anchor="top_right",
+            margin_x=6,
+            margin_y=6,
+            clickable=True,
+            click_action="game_exit_open",
+        ),
+    )
+
+
+def show_game_exit_confirm(ev_mgr) -> None:
+    """'게임을 끝낼까요?' + 응/아니 (기존 OVERLAY_UI 버튼·텍스트 빌더 재사용)."""
+    if not _game_exit_overlay_enabled():
+        return
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="text",
+            text="게임을 끝낼까요?",
+            font="default",
+            size=13,
+            color="245,245,250",
+            overlay_id=GAME_EXIT_CONFIRM_IDS[0],
+            anchor="center",
+            margin_y=-22,
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="응",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="52,110,72",
+            overlay_id=GAME_EXIT_CONFIRM_IDS[1],
+            anchor="center",
+            margin_x=-36,
+            margin_y=18,
+            clickable=True,
+            click_action="game_exit_yes",
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="아니",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="90,58,58",
+            overlay_id=GAME_EXIT_CONFIRM_IDS[2],
+            anchor="center",
+            margin_x=36,
+            margin_y=18,
+            clickable=True,
+            click_action="game_exit_no",
+        ),
+    )
+
+
+def hide_game_exit_confirm(ev_mgr) -> None:
+    """종료 확인 오버레이 제거 (exit 버튼은 유지)."""
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if not callable(rm):
+        return
+    for oid in GAME_EXIT_CONFIRM_IDS:
+        try:
+            rm(oid)
+        except Exception:
+            pass
+
+
+def handle_overlay_ui_click_action(
+    ov_act,
+    *,
+    ev_mgr,
+    field_activities=None,
+    cam=None,
+):
+    """try_overlay_ui_click 결과 처리 — 낚시 나가기·게임 종료 등 persist OVERLAY_UI.
+
+    Returns:
+        "quit"    — 메인 루프 종료
+        "consumed" — 클릭 소비(필드 이동·이벤트 입력으로 내리지 않음)
+        None      — 이 핸들러와 무관
+    """
+    act = (ov_act or "").strip()
+
+    # --- 종료 확인창 열림: 응/아니/바깥 클릭 ---
+    if game_exit_confirm_open(ev_mgr):
+        if act == "game_exit_yes":
+            hide_game_exit_confirm(ev_mgr)
+            return "quit"
+        hide_game_exit_confirm(ev_mgr)
+        return "consumed"
+
+    if act == "game_exit_open":
+        show_game_exit_confirm(ev_mgr)
+        return "consumed"
+
+    if act == "stop_fishing":
+        try:
+            if field_activities is not None:
+                field_activities.cancel()
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("fishing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+        return "consumed"
+
+    if act == "stop_baseball":
+        try:
+            if field_activities is not None:
+                field_activities.cancel()
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("baseball_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+        return "consumed"
+
+    return None
+
+
 def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=None):
     """DEV_CMD / 핫키용: 필드에서 즉시 실행되는 디버그·시스템 동작.
 
@@ -808,6 +1146,86 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
             }
         except Exception:
             pass
+    elif n == "start_baseball":
+        from activities import request_field_activity
+
+        params = {"save_data": dict(flow.save_data) if flow else {}}
+        if isinstance(step, dict):
+            if step.get("map") or step.get("map_id"):
+                params["map"] = step.get("map") or step.get("map_id")
+            if step.get("mode"):
+                params["mode"] = step.get("mode")
+            if step.get("return_map"):
+                params["return_map"] = step.get("return_map")
+            if step.get("return_pos"):
+                params["return_pos"] = step.get("return_pos")
+        request_field_activity(ev_mgr, "baseball", **params)
+    elif n == "stop_baseball":
+        try:
+            ev_mgr.field_activity_stop_request = True
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("baseball_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+    elif n == "return_from_baseball":
+        target_map = ""
+        target_pos = None
+        try:
+            sd = flow.save_data if flow else {}
+            target_map = str(sd.pop("baseball_exit_map", "") or "").strip()
+            target_pos = sd.pop("baseball_exit_pos", None)
+        except Exception:
+            target_map = ""
+            target_pos = None
+        if not target_map:
+            try:
+                bb = (flow.world_data or {}).get("bg_baseball1", {}).get("baseball", {})
+                target_map = str(bb.get("exit_map") or "bg_jjangpu").strip()
+                ep = bb.get("exit_pos")
+                if isinstance(ep, (list, tuple)) and len(ep) >= 2:
+                    target_pos = [float(ep[0]), float(ep[1])]
+            except Exception:
+                target_map = "bg_jjangpu"
+                target_pos = [853.0, 2304.0]
+        if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
+            target_pos = [853.0, 2304.0]
+        try:
+            ev_mgr.pending_map_change = {
+                "map_id": target_map,
+                "pos": [float(target_pos[0]), float(target_pos[1])],
+            }
+            if flow is not None:
+                flow.save_data["current_map"] = target_map
+                flow.save_data["player_pos"] = [
+                    float(target_pos[0]),
+                    float(target_pos[1]),
+                ]
+                try:
+                    flow.save_game(
+                        target_map,
+                        [float(target_pos[0]), float(target_pos[1])],
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": False,
+            }
+        except Exception:
+            pass
     elif n.startswith("start_activity_"):
         # 범용: start_activity_fishing, start_activity_swing (추후)
         from activities import request_field_activity
@@ -815,9 +1233,11 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
         act_id = n[len("start_activity_") :].strip()
         params = {}
         if isinstance(step, dict):
-            for k in ("pond", "pond_id", "win_flag"):
+            for k in ("pond", "pond_id", "win_flag", "map", "map_id", "mode", "return_map", "return_pos"):
                 if k in step and step.get(k) is not None:
                     params[k] = step.get(k)
+        if act_id == "baseball":
+            params["save_data"] = dict(flow.save_data) if flow else {}
         if act_id:
             request_field_activity(ev_mgr, act_id, **params)
     elif n == "restart_delete_save":
@@ -863,7 +1283,7 @@ class CloudShadowSystem:
         self._last_enabled = None
         self._active_dir_setting = None
         self._active_dir_vec = None
-        self._render_cache = {}
+        self._render_cache = OrderedDict()
 
     def _cell_size(self, settings):
         g = settings.get("grid_cell") if isinstance(settings, dict) else None
@@ -951,6 +1371,10 @@ class CloudShadowSystem:
         key = (int(img_i), qscale, qzoom, qfq, a, qsof)
         surf = self._render_cache.get(key)
         if surf is not None:
+            try:
+                self._render_cache.move_to_end(key)
+            except Exception:
+                pass
             return surf
         base = self._base_imgs[int(img_i)]
         w0, h0 = base.get_size()
@@ -969,8 +1393,15 @@ class CloudShadowSystem:
                 except Exception:
                     pass
         self._render_cache[key] = s
-        if len(self._render_cache) > 160:
-            self._render_cache.clear()
+        try:
+            self._render_cache.move_to_end(key)
+        except Exception:
+            pass
+        while len(self._render_cache) > 160:
+            try:
+                self._render_cache.popitem(last=False)
+            except Exception:
+                break
         return s
 
     def _wind_velocity(self, speed):
@@ -999,82 +1430,130 @@ class CloudShadowSystem:
             {"img_i": int(img_i), "scale": float(sc), "wx": float(wx), "wy": float(wy), "vx": float(vx), "vy": float(vy)}
         )
 
-    def _iter_fill_cells(self, vx0, vy0, vx1, vy1, margin, cell):
-        ix0 = int(math.ceil((vx0 - margin) / cell - 0.5))
-        ix1 = int(math.floor((vx1 + margin) / cell - 0.5))
-        iy0 = int(math.ceil((vy0 - margin) / cell - 0.5))
-        iy1 = int(math.floor((vy1 + margin) / cell - 0.5))
-        if ix1 < ix0 or iy1 < iy0:
-            return
-        for ix in range(ix0, ix1 + 1):
-            for iy in range(iy0, iy1 + 1):
-                yield ix, iy
+    def _max_cloud_extent(self, scale_max, zoom, f_q=1.0):
+        """가장 큰 구름 스프라이트의 월드(뷰) 크기 — 화면 밖 여백 계산용."""
+        self._load_images()
+        if not self._base_imgs:
+            return 160.0
+        try:
+            zm = max(1e-6, float(zoom))
+            sc = max(0.2, float(scale_max))
+            fq = max(0.5, float(f_q))
+        except Exception:
+            zm, sc, fq = 1.0, 1.4, 1.0
+        ext = 64.0
+        for base in self._base_imgs:
+            w0, h0 = base.get_size()
+            ext = max(ext, float(w0) * sc * zm, float(h0) * sc * zm * fq)
+        return ext
 
-    def _fill_view_grid(self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin):
-        if not self._active_dir_vec or not view_rect or len(view_rect) < 4:
-            return
+    def _spawn_margin_px(self, settings, scale_max, zoom, f_q=1.0):
+        """구름이 화면 안에서 '뿅' 나타나지 않도록 하는 월드 여백."""
+        try:
+            base = float(CONFIG.get("CLOUD_SHADOW_SPAWN_MARGIN_PX", 96) or 96)
+        except Exception:
+            base = 96.0
+        cell = self._cell_size(settings)
+        return max(base, self._max_cloud_extent(scale_max, zoom, f_q) + cell * 0.35)
+
+    def _spawn_at_cell(self, ix, iy, settings, map_w, map_h, speed, scale_min, scale_max, margin, age_sec=0.0):
         cell = self._cell_size(settings)
         jh = self._jitter_half(settings, cell)
-        vx0, vy0, vw, vh = float(view_rect[0]), float(view_rect[1]), float(view_rect[2]), float(view_rect[3])
-        vx1, vy1 = vx0 + vw, vy0 + vh
-        cells = list(self._iter_fill_cells(vx0, vy0, vx1, vy1, margin, cell))
-        cap = self._grid_max_clouds(settings)
-        if len(cells) > cap:
-            cells = random.sample(cells, cap)
-        spd = max(1e-3, float(speed))
-        t_max = (cell * 2.0) / spd
-        for ix, iy in cells:
-            cx = (ix + 0.5) * cell
-            cy = (iy + 0.5) * cell
-            wx = cx + random.uniform(-jh, jh)
-            wy = cy + random.uniform(-jh, jh)
-            wx = max(-margin, min(float(map_w) + margin, wx))
-            wy = max(-margin, min(float(map_h) + margin, wy))
-            self._append_cloud(wx, wy, speed, scale_min, scale_max, age_sec=random.uniform(0.0, t_max))
-
-    def _spawn_edge_grid(self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin):
-        if not self._active_dir_vec or not view_rect or len(view_rect) < 4:
-            return
-        dx, dy = self._active_dir_vec
-        cell = self._cell_size(settings)
-        jh = self._jitter_half(settings, cell)
-        vx0, vy0, vw, vh = float(view_rect[0]), float(view_rect[1]), float(view_rect[2]), float(view_rect[3])
-        vx1, vy1 = vx0 + vw, vy0 + vh
-        ix_v0 = int(math.ceil(vx0 / cell - 0.5))
-        ix_v1 = int(math.floor(vx1 / cell - 0.5))
-        iy_v0 = int(math.ceil(vy0 / cell - 0.5))
-        iy_v1 = int(math.floor(vy1 / cell - 0.5))
-        iy_e0 = int(math.ceil((vy0 - margin) / cell - 0.5))
-        iy_e1 = int(math.floor((vy1 + margin) / cell - 0.5))
-        ix_e0 = int(math.ceil((vx0 - margin) / cell - 0.5))
-        ix_e1 = int(math.floor((vx1 + margin) / cell - 0.5))
-        strips = 2
-        boundary = []
-        if dx > 0:
-            for k in range(1, strips + 1):
-                ix = ix_v0 - k
-                for iy in range(iy_e0, iy_e1 + 1):
-                    boundary.append((ix, iy))
-        elif dx < 0:
-            for k in range(1, strips + 1):
-                ix = ix_v1 + k
-                for iy in range(iy_e0, iy_e1 + 1):
-                    boundary.append((ix, iy))
-        if dy > 0:
-            for k in range(1, strips + 1):
-                iy = iy_v0 - k
-                for ix in range(ix_e0, ix_e1 + 1):
-                    boundary.append((ix, iy))
-        elif dy < 0:
-            for k in range(1, strips + 1):
-                iy = iy_v1 + k
-                for ix in range(ix_e0, ix_e1 + 1):
-                    boundary.append((ix, iy))
-        if not boundary:
-            return
-        ix, iy = random.choice(boundary)
         wx = (ix + 0.5) * cell + random.uniform(-jh, jh)
         wy = (iy + 0.5) * cell + random.uniform(-jh, jh)
+        wx = max(-margin, min(float(map_w) + margin, wx))
+        wy = max(-margin, min(float(map_h) + margin, wy))
+        self._append_cloud(wx, wy, speed, scale_min, scale_max, age_sec=age_sec)
+
+    def _collect_view_cells(self, view_rect, margin, cell):
+        """현재 뷰(여백 포함)를 덮는 격자 셀 — 최초 켤 때 화면 채우기용."""
+        if not view_rect or len(view_rect) < 4:
+            return []
+        vx0, vy0, vw, vh = float(view_rect[0]), float(view_rect[1]), float(view_rect[2]), float(view_rect[3])
+        vx1, vy1 = vx0 + vw, vy0 + vh
+        ix0 = int(math.floor((vx0 - margin) / cell - 0.5))
+        ix1 = int(math.ceil((vx1 + margin) / cell - 0.5))
+        iy0 = int(math.floor((vy0 - margin) / cell - 0.5))
+        iy1 = int(math.ceil((vy1 + margin) / cell - 0.5))
+        return [(ix, iy) for ix in range(ix0, ix1 + 1) for iy in range(iy0, iy1 + 1)]
+
+    def _random_offscreen_spawn_xy(self, view_rect, margin, extent, cell):
+        """바람이 불어오는 쪽 화면 밖 좌표 — 스트리밍 스폰용."""
+        if not self._active_dir_vec or not view_rect or len(view_rect) < 4:
+            return None, None
+        vx0, vy0, vw, vh = float(view_rect[0]), float(view_rect[1]), float(view_rect[2]), float(view_rect[3])
+        vx1, vy1 = vx0 + vw, vy0 + vh
+        dx, dy = self._active_dir_vec
+        pad = float(margin) + float(extent) * 1.2
+        jitter = float(cell) * 0.5
+        edges = []
+        if dx > 0:
+            edges.append("left")
+        if dx < 0:
+            edges.append("right")
+        if dy > 0:
+            edges.append("top")
+        if dy < 0:
+            edges.append("bottom")
+        if not edges:
+            return None, None
+        edge = random.choice(edges)
+        span_x = (vx1 - vx0) + pad * 0.5
+        span_y = (vy1 - vy0) + pad * 0.5
+        if edge == "left":
+            wx = vx0 - pad - random.uniform(0.0, jitter)
+            wy = vy0 + random.uniform(-pad * 0.2, span_y + pad * 0.2)
+        elif edge == "right":
+            wx = vx1 + pad + random.uniform(0.0, jitter)
+            wy = vy0 + random.uniform(-pad * 0.2, span_y + pad * 0.2)
+        elif edge == "top":
+            wy = vy0 - pad - random.uniform(0.0, jitter)
+            wx = vx0 + random.uniform(-pad * 0.2, span_x + pad * 0.2)
+        else:
+            wy = vy1 + pad + random.uniform(0.0, jitter)
+            wx = vx0 + random.uniform(-pad * 0.2, span_x + pad * 0.2)
+        return float(wx), float(wy)
+
+    def _seed_on_enable(
+        self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin, zoom, f_q=1.0
+    ):
+        """FX를 켠 직후 — 화면 안에 구름을 뿌려 자연스럽게 시작."""
+        cell = self._cell_size(settings)
+        cells = self._collect_view_cells(view_rect, margin * 0.35, cell)
+        if not cells:
+            return
+        cap = self._grid_max_clouds(settings)
+        target = min(cap, max(12, int(len(cells) * 0.55)))
+        target = min(target, len(cells))
+        chosen = random.sample(cells, target)
+        spd = max(1.0, float(speed))
+        for ix, iy in chosen:
+            max_age = (cell / spd) * random.uniform(0.15, 1.8)
+            self._spawn_at_cell(
+                ix,
+                iy,
+                settings,
+                map_w,
+                map_h,
+                speed,
+                scale_min,
+                scale_max,
+                margin,
+                age_sec=max_age,
+            )
+
+    def _spawn_streaming_cloud(
+        self, settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin, zoom, f_q=1.0
+    ):
+        """주기 스폰 — 항상 화면 밖(바람 상류)에서 유입."""
+        if not self._active_dir_vec or not view_rect or len(view_rect) < 4:
+            return
+        cell = self._cell_size(settings)
+        extent = self._max_cloud_extent(scale_max, zoom, f_q)
+        pos = self._random_offscreen_spawn_xy(view_rect, margin, extent, cell)
+        if pos[0] is None:
+            return
+        wx, wy = pos
         wx = max(-margin, min(float(map_w) + margin, wx))
         wy = max(-margin, min(float(map_h) + margin, wy))
         self._append_cloud(wx, wy, speed, scale_min, scale_max, age_sec=0.0)
@@ -1094,18 +1573,21 @@ class CloudShadowSystem:
             return
 
         dir_setting = str(settings.get("dir", "RANDOM") or "RANDOM").strip().upper()
+        just_enabled = False
         if not self._last_enabled:
             self._clouds.clear()
             self._spawn_acc = 0.0
             self._render_cache.clear()
             self._active_dir_setting = dir_setting
             self._active_dir_vec = self._pick_dir_once(dir_setting)
+            just_enabled = True
         elif self._active_dir_setting != dir_setting:
             self._clouds.clear()
             self._spawn_acc = 0.0
             self._render_cache.clear()
             self._active_dir_setting = dir_setting
             self._active_dir_vec = self._pick_dir_once(dir_setting)
+            just_enabled = True
 
         self._last_enabled = True
         self._load_images()
@@ -1137,23 +1619,28 @@ class CloudShadowSystem:
         view_w = float(CONFIG["WIDTH"]) / max(1e-6, float(zoom))
         view_h = float(CONFIG["HEIGHT"]) / max(1e-6, float(zoom))
         view_rect = (float(cam_x), float(cam_y), float(view_w), float(view_h))
+        spawn_margin = self._spawn_margin_px(settings, scale_max, zoom, f_q)
 
-        if not self._clouds and freq > 0.0:
-            self._fill_view_grid(settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin=220)
+        if just_enabled:
+            self._seed_on_enable(
+                settings, map_w, map_h, speed, scale_min, scale_max, view_rect, spawn_margin, zoom, f_q
+            )
 
         self._spawn_acc += freq * max(0.0, float(dt_sec))
         while self._spawn_acc >= 1.0:
             self._spawn_acc -= 1.0
-            self._spawn_edge_grid(settings, map_w, map_h, speed, scale_min, scale_max, view_rect, margin=220)
+            self._spawn_streaming_cloud(
+                settings, map_w, map_h, speed, scale_min, scale_max, view_rect, spawn_margin, zoom, f_q
+            )
 
         dt = max(0.0, float(dt_sec))
         keep = []
-        margin = 220
+        cull_margin = spawn_margin
         for c in self._clouds:
             c["wx"] += c["vx"] * dt
             c["wy"] += c["vy"] * dt
             wx, wy = float(c["wx"]), float(c["wy"])
-            if wx < -margin or wx > map_w + margin or wy < -margin or wy > map_h + margin:
+            if wx < -cull_margin or wx > map_w + cull_margin or wy < -cull_margin or wy > map_h + cull_margin:
                 continue
             keep.append(c)
             # main.py 배경 blit과 동일: int(round((0-cam)*zoom)) 원점 + 월드*줌 (스프라이트/배경과 픽셀 정렬)
