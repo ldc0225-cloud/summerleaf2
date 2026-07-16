@@ -1884,6 +1884,7 @@ def apply_rotate3d_mode7(
         except Exception:
             pass
 
+    # PC: numpy+surfarray 고속 경로. Android APK 는 numpy 미포함(p4a/py3.10 충돌) → get_at 폴백.
     try:
         import numpy as np
 
@@ -1906,26 +1907,33 @@ def apply_rotate3d_mode7(
                     out[sx_arr[m].astype(np.int32), sy] = map_arr[mx[m], my[m]]
         finally:
             del out
+        return ctx
     except Exception:
-        try:
-            map_arr = pygame.surfarray.array3d(map_surf)
-            out = pygame.surfarray.pixels3d(dst)
-            for sy in range(horizon, h):
-                row = float(sy - horizon)
-                p_row = cam_h / (row + near)
-                depth = p_row * depth_mul
-                lat_scale = p_row * lateral_mul
-                row_cx = cx + fwd_x * depth
-                row_cy = cy + fwd_y * depth
-                for sx in range(w):
-                    lat = (float(sx) - view_cx) * lat_scale
-                    mx = int(row_cx + lat * lat_x)
-                    my = int(row_cy + lat * lat_y)
-                    if 0 <= mx < mw and 0 <= my < mh:
-                        out[sx, sy] = map_arr[mx, my]
-            del out
-        except Exception:
-            return None
+        pass
+
+    # numpy/surfarray 없음: Surface 픽셀 폴백 (가로 2px 스텝으로 모바일 부하↓)
+    try:
+        x_step = 2
+        for sy in range(horizon, h):
+            row = float(sy - horizon)
+            p_row = cam_h / (row + near)
+            depth = p_row * depth_mul
+            lat_scale = p_row * lateral_mul
+            row_cx = cx + fwd_x * depth
+            row_cy = cy + fwd_y * depth
+            sx = 0
+            while sx < w:
+                lat = (float(sx) - view_cx) * lat_scale
+                mx = int(row_cx + lat * lat_x)
+                my = int(row_cy + lat * lat_y)
+                if 0 <= mx < mw and 0 <= my < mh:
+                    c = map_surf.get_at((mx, my))
+                    dst.set_at((sx, sy), c)
+                    if x_step > 1 and sx + 1 < w:
+                        dst.set_at((sx + 1, sy), c)
+                sx += x_step
+    except Exception:
+        return None
     return ctx
 
 
