@@ -25,6 +25,7 @@ from .base import BaseFieldActivity, FieldDrawContext
 
 ST_ARMED = "armed"
 ST_CHARGING = "charging"
+ST_CAST_WINDUP = "cast_windup"
 ST_CASTING = "casting"
 ST_FLOAT = "float"
 ST_BITE_SHAKE = "bite_shake"
@@ -39,6 +40,14 @@ ST_QUIT = "quit"
 SH_HIDDEN = "hidden"
 SH_ACTIVE = "active"
 SH_LEAVING = "leaving"
+
+_FISHING_OVERLAY_IDLE_FPS = 6.0
+_FISHING_OVERLAY_ACTION_FPS = 8.0
+_FISHING_ROD_TIP_OFFSETS = {
+    "idle2_fishing": [(21.0, 30.0)],
+    "pull_fishing": [(15.0, 40.0), (2.0, 44.0)],
+    "tension_fishing": [(26.0, 19.0), (22.0, 20.0)],
+}
 
 
 def _lerp(a: float, b: float, t: float) -> float:
@@ -77,6 +86,78 @@ def _world_to_screen(ctx: FieldDrawContext, wx: float, wy: float) -> Tuple[int, 
         except Exception:
             pass
     return int(round(dx)), int(round(dy))
+
+
+def _body_type_for_char(char_id: str) -> str:
+    from char_behavior import char_body_type, get_char_type_def
+
+    return char_body_type(get_char_type_def(char_id))
+
+
+def _load_fishing_overlay_frames(body_type: str, anim_set: str) -> List:
+    from engine import load_fishing_overlay_frames
+
+    return list(load_fishing_overlay_frames(body_type, anim_set) or [])
+
+
+def _fishing_overlay_anim_set(state: str) -> str:
+    if state == ST_CAST_WINDUP:
+        return "draw_fishing"
+    if state in (ST_CASTING, ST_FLOAT):
+        return "idle2_fishing"
+    if state in (ST_BITE_SHAKE, ST_STRUGGLE):
+        return "tension_fishing"
+    if state in (ST_RETRIEVE, ST_REELING):
+        return "pull_fishing"
+    return "idle_fishing"
+
+
+def _sync_fishing_overlay_for_state(player, char_id: str, state: str, *, force: bool = False) -> None:
+    if player is None or not bool(getattr(player, "playing_fishing", False)):
+        return
+    cid = str(char_id or getattr(player, "name", "") or "").strip()
+    bt = _body_type_for_char(cid)
+    tag = _fishing_overlay_anim_set(state)
+    clr = getattr(player, "clear_sprite_overlay", None)
+    if bt == "animal":
+        if callable(clr):
+            clr()
+        player._fishing_overlay_tag = ""
+        return
+    prev = str(getattr(player, "_fishing_overlay_tag", "") or "")
+    if not force and prev == tag:
+        return
+    frames = _load_fishing_overlay_frames(bt, tag)
+    if tag == "draw_fishing":
+        play = getattr(player, "play_sprite_overlay_once", None)
+        idle = _load_fishing_overlay_frames(bt, "idle2_fishing")
+        if not idle:
+            idle = _load_fishing_overlay_frames(bt, "idle_fishing")
+        if frames and callable(play):
+            play(frames, fps=_FISHING_OVERLAY_ACTION_FPS, hold_sec=0.0, release_frames=idle or None)
+        elif callable(clr):
+            clr()
+    else:
+        setter = getattr(player, "set_sprite_overlay", None)
+        fps = _FISHING_OVERLAY_IDLE_FPS if tag in ("idle_fishing", "idle2_fishing") else _FISHING_OVERLAY_ACTION_FPS
+        if frames and callable(setter):
+            setter(frames, loop=True, fps=fps)
+        elif callable(clr):
+            clr()
+    player._fishing_overlay_tag = tag
+
+
+def _set_player_playing_fishing(player, on: bool, *, char_id: str = "", state: str = ST_ARMED) -> None:
+    if player is None:
+        return
+    player.playing_fishing = bool(on)
+    if on:
+        _sync_fishing_overlay_for_state(player, char_id, state, force=True)
+        return
+    player._fishing_overlay_tag = ""
+    clr = getattr(player, "clear_sprite_overlay", None)
+    if callable(clr):
+        clr()
 
 
 class _FishShadow:
@@ -209,6 +290,7 @@ class FishingActivity(BaseFieldActivity):
         self.stand_xy = (0.0, 0.0)
         self.rod_tip = (0.0, 0.0)
         self.bobber_xy = (0.0, 0.0)
+        self.face = "down"
         self.fish_xy = (0.0, 0.0)
         self._shadows: List[_FishShadow] = []
         self._biting_shadow: Optional[_FishShadow] = None
@@ -216,6 +298,7 @@ class FishingActivity(BaseFieldActivity):
         self._cast_from = (0.0, 0.0)
         self._cast_to = (0.0, 0.0)
         self._cast_t = 0.0
+        self._cast_windup_left = 0.0
         self._cast_dur = 0.42
         self._retrieve_t = 0.0
         self._retrieve_dur = 0.32
@@ -239,6 +322,8 @@ class FishingActivity(BaseFieldActivity):
         self._struggle_cooldown = 0.0
         self._last_tap_ms = 0
         self._msg = ""
+        self._player_ref = None
+        self._player_char = ""
         self._win_flag = "progress_fishing_win"
         self._won = False
         self._fail_reason = ""
@@ -255,11 +340,56 @@ class FishingActivity(BaseFieldActivity):
         except Exception:
             return default
 
+    def _cast_axis_sign(self) -> Tuple[str, float]:
+        """face 설정 기준으로 던지는 주축(x/y)과 진행 부호를 돌려준다."""
+        face = str(getattr(self, "face", "down") or "down").strip().lower()
+        if face == "left":
+            return "x", -1.0
+        if face == "right":
+            return "x", 1.0
+        if face == "up":
+            return "y", -1.0
+        return "y", 1.0
+
+    def _fishing_overlay_frame_idx(self) -> int:
+        ov = getattr(self._player_ref, "_sprite_overlay", None)
+        if not isinstance(ov, dict):
+            return 0
+        try:
+            return max(0, int(ov.get("idx") or 0))
+        except Exception:
+            return 0
+
+    def _rod_tip_offset_for_state(self, state: Optional[str] = None) -> Optional[Tuple[float, float]]:
+        tag = _fishing_overlay_anim_set(state or self.state)
+        frames = _FISHING_ROD_TIP_OFFSETS.get(tag)
+        if not frames:
+            return None
+        idx = min(len(frames) - 1, self._fishing_overlay_frame_idx())
+        ox, oy = frames[idx]
+        if _body_type_for_char(self._player_char) == "adult":
+            oy += 5.0
+        return ox, oy
+
+    def _rod_tip_from_stand(self, *, state: Optional[str] = None) -> Tuple[float, float]:
+        """상태별 낚시 오버레이 기준 낚싯대 끝 좌표. 좌표가 없으면 기본 오프셋 사용."""
+        sx, sy = self.stand_xy
+        axis, sign = self._cast_axis_sign()
+        off = self._rod_tip_offset_for_state(state)
+        if off is not None and axis == "x":
+            ox, oy = off
+            return sx + ox * sign, sy - oy
+        if axis == "x":
+            return sx + 16.0 * sign, sy - 6.0
+        return sx + 6.0, sy - 16.0 * sign
+
     def _near_shore_factor(self, wx: float, wy: float) -> float:
         """0=먼 물, 1=물가 가까이(짧은 캐스트·캐릭터 쪽). 입질 난이도(반항 빈도)에 사용."""
         sx, sy = self.stand_xy
         cast_far = max(1.0, float(self._pond_f("cast_far", 116.0)))
-        depth = max(0.0, float(wy) - float(sy))
+        axis, sign = self._cast_axis_sign()
+        depth = (float(wx) - float(sx)) if axis == "x" else (float(wy) - float(sy))
+        depth = max(0.0, depth * sign)
         ratio = depth / cast_far
         shore_cut = float(self._pond_f("near_shore_cast_ratio", 0.45))
         if ratio >= shore_cut:
@@ -340,12 +470,15 @@ class FishingActivity(BaseFieldActivity):
 
         sx, sy = float(spot["stand"][0]), float(spot["stand"][1])
         self.stand_xy = (sx, sy)
-        self.rod_tip = (sx + 6.0, sy - 16.0)
+        self.face = str(spot.get("face") or "down").strip().lower()
+        self.rod_tip = self._rod_tip_from_stand()
         self.bobber_xy = (sx, sy)
         self._init_shadow_pool()
         self._biting_shadow = None
 
-        face = str(spot.get("face") or "down")
+        face = self.face
+        self._player_ref = player
+        self._player_char = str(getattr(player, "name", "") or "").strip()
         try:
             player.stop_moving()
             player.pos[0], player.pos[1] = sx, sy
@@ -372,30 +505,32 @@ class FishingActivity(BaseFieldActivity):
         self._fail_reason = ""
         self._finish_hold = 0.0
         self._elapsed = 0.0
+        self._cast_windup_left = 0.0
         self._msg = "화면을 눌러 낚시를 시작" if await_tap else "짧게: 가까이 · 길게: 멀리"
+        _set_player_playing_fishing(player, True, char_id=self._player_char, state=self.state)
         return True
 
     def cancel(self) -> None:
-        if self.state in (ST_SUCCESS, ST_FAIL, ST_QUIT):
+        if self.state == ST_QUIT:
             return
         self.state = ST_QUIT
-        self._won = False
         self._finish_hold = 0.05
         self._msg = ""
+        _set_player_playing_fishing(self._player_ref, False, char_id=self._player_char)
 
     @property
     def is_active(self) -> bool:
-        return self.state not in (ST_SUCCESS, ST_FAIL, ST_QUIT)
+        return self.state != ST_QUIT
 
     @property
     def is_finished(self) -> bool:
-        return self.state in (ST_SUCCESS, ST_FAIL, ST_QUIT) and self._finish_hold <= 0.0
+        return self.state == ST_QUIT and self._finish_hold <= 0.0
 
     def blocks_field_move(self) -> bool:
-        return self.is_active
+        return self.state != ST_QUIT
 
     def blocks_zone_confirm(self) -> bool:
-        return self.is_active
+        return self.state != ST_QUIT
 
     def _charge_power_from_ms(self, held_ms: int) -> float:
         return max(0.0, min(1.0, (float(held_ms) - 70.0) / 780.0))
@@ -438,7 +573,7 @@ class FishingActivity(BaseFieldActivity):
         if self.state == ST_CHARGING:
             held = max(0, int(now_ms) - int(self._charge_start_ms))
             self._charge_power = self._charge_power_from_ms(held)
-            self._start_cast()
+            self._start_cast_windup()
             return True
         return self.is_active
 
@@ -447,23 +582,54 @@ class FishingActivity(BaseFieldActivity):
         near = float(self.pond.get("cast_near", 36))
         far = float(self.pond.get("cast_far", 116))
         sx, sy = self.stand_xy
-        ty = sy + _lerp(near, far, power)
+        axis, sign = self._cast_axis_sign()
+        cast_dist = _lerp(near, far, power)
+        if axis == "x":
+            tx = sx + cast_dist * sign
+            tx = max(wx + 6.0, min(wx + ww - 6.0, tx))
+            # 가로 낚시에서는 찌 높이가 캐릭터 발(sy)보다 위로 올라가면 줄이 낚싯대 위로 보여 어색하다.
+            ty = sy + self._rng.uniform(-wh * 0.32, wh * 0.32)
+            ty_min = max(wy + 8.0, sy)
+            ty_max = max(ty_min, wy + wh - 8.0)
+            ty = max(ty_min, min(ty_max, ty))
+            return tx, ty
+        ty = sy + cast_dist * sign
         ty = max(wy + 6.0, min(wy + wh - 6.0, ty))
         tx = sx + self._rng.uniform(-ww * 0.32, ww * 0.32)
         tx = max(wx + 8.0, min(wx + ww - 8.0, tx))
         return tx, ty
 
+    def _start_cast_windup(self) -> None:
+        bt = _body_type_for_char(self._player_char)
+        frames = _load_fishing_overlay_frames(bt, "draw_fishing")
+        if not frames:
+            self._start_cast()
+            return
+        self.state = ST_CAST_WINDUP
+        self._cast_windup_left = max(0.05, float(len(frames)) / _FISHING_OVERLAY_ACTION_FPS)
+        self._msg = "찌를 던지는 중…"
+        _sync_fishing_overlay_for_state(self._player_ref, self._player_char, self.state, force=True)
+
     def _start_cast(self) -> None:
         tx, ty = self._cast_point(self._charge_power)
+        self.rod_tip = self._rod_tip_from_stand(state=ST_CASTING)
         self._cast_from = self.rod_tip
         self._cast_to = (tx, ty)
         self.bobber_xy = self._cast_from
         self._cast_t = 0.0
+        self._cast_windup_left = 0.0
         self._biting_shadow = None
         self.state = ST_CASTING
         self._msg = "찌를 던지는 중…"
+        _sync_fishing_overlay_for_state(
+            self._player_ref,
+            self._player_char,
+            self.state,
+            force=True,
+        )
 
     def _start_retrieve(self) -> None:
+        self.rod_tip = self._rod_tip_from_stand(state=ST_RETRIEVE)
         self._retrieve_from = (float(self.bobber_xy[0]), float(self.bobber_xy[1]))
         self._retrieve_to = self.rod_tip
         self._retrieve_t = 0.0
@@ -553,6 +719,12 @@ class FishingActivity(BaseFieldActivity):
     def tick(self, dt_sec: float, player, now_ms: int) -> None:
         dt = max(0.0, min(0.1, float(dt_sec)))
         self._elapsed += dt
+        if player is not None:
+            self._player_ref = player
+            self._player_char = str(getattr(player, "name", "") or self._player_char).strip()
+        _sync_fishing_overlay_for_state(self._player_ref, self._player_char, self.state)
+        self.rod_tip = self._rod_tip_from_stand()
+        self.rod_tip = self._rod_tip_from_stand()
 
         if self._finish_hold > 0.0:
             self._finish_hold -= dt
@@ -567,6 +739,11 @@ class FishingActivity(BaseFieldActivity):
         if self.state == ST_ARMED:
             return
 
+        if self.state == ST_CAST_WINDUP:
+            self._cast_windup_left -= dt
+            if self._cast_windup_left <= 0.0:
+                self._start_cast()
+
         if self.state == ST_CASTING:
             self._cast_t += dt
             t = min(1.0, self._cast_t / float(self._cast_dur))
@@ -578,6 +755,12 @@ class FishingActivity(BaseFieldActivity):
             if t >= 1.0:
                 self.state = ST_FLOAT
                 self._msg = "물고기를 기다려… (탭: 찌 회수)"
+                _sync_fishing_overlay_for_state(
+                    self._player_ref,
+                    self._player_char,
+                    self.state,
+                    force=True,
+                )
 
         elif self.state == ST_RETRIEVE:
             self._retrieve_t += dt
@@ -661,10 +844,11 @@ class FishingActivity(BaseFieldActivity):
                 self._set_fail("물고기가 도망갔다…")
 
     def result(self) -> Dict[str, Any]:
+        resolved = bool(self._won) or bool(str(self._fail_reason).strip())
         return {
             "activity": self.activity_id,
             "won": bool(self._won),
-            "quit": self.state == ST_QUIT,
+            "quit": self.state == ST_QUIT and not resolved,
             "pond": self.pond_id,
             "win_flag": self._win_flag,
             "win_value": 1,
@@ -770,7 +954,7 @@ class FishingActivity(BaseFieldActivity):
             sox, soy = self._shadow_draw_offset(sh)
             self._draw_shadow(ctx, sh, highlight=hl, off_x=sox, off_y=soy)
 
-        show_line = self.state not in (ST_ARMED, ST_CHARGING)
+        show_line = self.state not in (ST_ARMED, ST_CHARGING, ST_CAST_WINDUP)
         if show_line:
             bx_w, by_w = self.bobber_xy
             bdx, bdy = self._bobber_draw_offset()

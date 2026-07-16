@@ -19,6 +19,7 @@ class FieldDrawContext:
     y_transform: Optional[Callable[[float], float]]
     x_offset_fn: Optional[Callable[[float], float]]
     font_fn: Callable[[int], pygame.font.Font]
+    mode7_ctx: Any = None  # rotate3d Mode7 ctx (레이스 아이템 등)
 
 
 class BaseFieldActivity:

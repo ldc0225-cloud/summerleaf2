@@ -32,57 +32,23 @@ import pygame
 _LOGO_FONT_CACHE: Dict[int, pygame.font.Font] = {}
 
 def _get_logo_font(size: int) -> pygame.font.Font:
-    """Logo 폰트를 가져옵니다. 없으면 기본 폰트로 폴백."""
+    """로고 슬롯(UI_FONT_PROFILES.logo) 폰트 — 에디터 FONT 설정 반영."""
     try:
         size_i = int(size)
     except Exception:
         size_i = 32
-    size_i = max(16, min(64, size_i))
+    size_i = max(16, min(128, size_i))
     key = size_i
     if key in _LOGO_FONT_CACHE:
         return _LOGO_FONT_CACHE[key]
-    
-    # Logo 폰트 파일 찾기
-    logo_fp = None
     try:
-        from data import UI_FONT_FILES
-        logo_path = UI_FONT_FILES.get("logo")
-        if logo_path and os.path.isfile(logo_path):
-            logo_fp = logo_path
+        from engine import resolve_font_profile
+
+        f = resolve_font_profile("logo", size_px=size_i)
+        _LOGO_FONT_CACHE[key] = f
+        return f
     except Exception:
         pass
-    
-    if not logo_fp:
-        # assets/fonts 폴더에서 찾기
-        dirs = [
-            os.path.join("assets", "fonts"),
-            os.path.join("assets", "font"),
-            os.path.join("fonts"),
-        ]
-        preferred = ["Pinkfong Baby Shark Font_ Bold.ttf", "BabyShark.ttf"]
-        for d in dirs:
-            try:
-                if not os.path.isdir(d):
-                    continue
-                for fn in preferred:
-                    fp = os.path.join(d, fn)
-                    if os.path.isfile(fp):
-                        logo_fp = fp
-                        break
-                if logo_fp:
-                    break
-            except Exception:
-                continue
-    
-    if logo_fp:
-        try:
-            f = pygame.font.Font(logo_fp, size_i)
-            _LOGO_FONT_CACHE[key] = f
-            return f
-        except Exception:
-            pass
-    
-    # 폴백: 기본 UI 폰트
     try:
         f = pygame.font.SysFont("malgungothic", size_i)
     except Exception:
@@ -102,7 +68,8 @@ from activities.baseball_zones import (
     resolve_flight_landing,
     resolve_landing_zone,
     scale_mask_to_background,
-    scoreboard_default_zoom,
+    scoreboard_style_from_object,
+    scoreboard_zoom_from_object,
     zone_footprint_rect,
     zone_uses_ellipse_fallback,
     _last_infield_before_fence,
@@ -123,6 +90,8 @@ ST_PICK_CHAR = "pick_char"
 ST_BAT_DIR = "bat_dir"
 ST_BAT_PWR = "bat_pwr"
 ST_PWR_CONFIRM = "pwr_confirm"
+ST_SWING_PAUSE = "swing_pause"
+ST_POWER_SWING_PAUSE = "power_swing_pause"
 ST_SWING = "swing"
 ST_FLIGHT = "flight"
 ST_TURN_WAIT = "turn_wait"
@@ -210,6 +179,9 @@ _CHAR_PICK_IDLE_FULL_H = 64
 _CHAR_PICK_IDLE_GRID_H = int(round(_CHAR_PICK_IDLE_FULL_H * 0.75))
 # "선택 하시겠습니까?" 팝업은 2배
 _CHAR_PICK_IDLE_CONFIRM_H = _CHAR_PICK_IDLE_FULL_H * 2
+# 경기 결과 화면 캐릭터 — 원본 스프라이트 대비 정배수 줌 (idle 48px → 192px)
+_MATCH_RESULT_CHAR_ZOOM = 4
+_MATCH_RESULT_CHAR_FPS = 6.0
 _CHAR_PICK_GRID_COLS = 4
 _CHAR_PICK_GRID_ROWS = 2
 
@@ -249,6 +221,46 @@ def _sync_baseball_overlay_idle(player, char_id: str = "") -> None:
         clr = getattr(player, "clear_sprite_overlay", None)
         if callable(clr):
             clr()
+
+
+def _sync_baseball_overlay_idle_frozen(player, char_id: str = "") -> None:
+    if player is None or not bool(getattr(player, "playing_baseball", False)):
+        return
+    cid = str(char_id or getattr(player, "name", "") or "").strip()
+    bt = _body_type_for_char(cid)
+    if bt == "animal":
+        return
+    idle = _load_bb_overlay_frames(bt, "idle_baseball")
+    setter = getattr(player, "set_sprite_overlay", None)
+    if idle and callable(setter):
+        setter(idle[:1], loop=True, fps=1.0)
+    else:
+        _sync_baseball_overlay_idle(player, cid)
+
+
+def _freeze_baseball_batter_pose(player, char_id: str = "") -> None:
+    _sync_baseball_overlay_idle_frozen(player, char_id)
+    if player is None:
+        return
+    try:
+        player.clear_anim_override()
+    except Exception:
+        pass
+    try:
+        player.stop_moving()
+    except Exception:
+        pass
+    try:
+        player.state = "idle"
+        player.frame_idx = 0
+        player.last_anim_time = pygame.time.get_ticks()
+        dr = "right" if str(getattr(player, "direction", "right")) == "right" else "left"
+        anims = getattr(player, "anims_r", None) if dr == "right" else getattr(player, "anims_l", None)
+        frames = (anims or {}).get("idle") or []
+        if frames:
+            player.image = frames[0]
+    except Exception:
+        pass
 
 
 def _sync_baseball_overlay_swing(player, char_id: str = "") -> None:
@@ -320,8 +332,10 @@ class BaseballActivity(BaseFieldActivity):
         self._pwr_confirm_hold_sec = float(_cfg("pwr_confirm_hold_sec", 0.5))
         self._swing_speed_mul = float(_cfg("swing_speed_mul", 1.3))
         self._pwr_confirm_hold_t = 0.0
+        self._power_swing_pause_t = 0.0
         self._is_power_swing = False
         self._power_swing_fx_left = 0.0
+        self._power_swing_zoom_active = False
 
         self._menu_rects: List[Tuple[pygame.Rect, str]] = []
         self._p2_char_opts: List[str] = []
@@ -330,6 +344,7 @@ class BaseballActivity(BaseFieldActivity):
         self._char_opts: List[str] = []
         self._char_pick_rects: List[Tuple[pygame.Rect, int]] = []
         self._char_idle_cache: Dict[str, Dict[str, List]] = {}
+        self._char_anim_cache: Dict[str, List] = {}
         self._char_pending_ix: Optional[int] = None
         self._char_pick_phase = "solo"  # solo | 1p | 2p
         self._p1_char = ""
@@ -360,6 +375,7 @@ class BaseballActivity(BaseFieldActivity):
         self._pwr_phase = 0.0
         self._pwr_speed = float(_cfg("pwr_sweep_hz", 0.95))
         self._locked_pwr = 0.0
+        self._locked_pwr_marker_t = 0.5
         self._ball_touch_r = float(_cfg("ball_touch_radius_px", 36.0))
         self._batter_face_default = "right"
 
@@ -399,10 +415,12 @@ class BaseballActivity(BaseFieldActivity):
         self._announce_steps: List[AnnounceStep] = []
         self._announce_on_done: Optional[Callable[[], None]] = None
         self._gauge_time_left = 0.0
+        self._gauge_time_limit = float(_cfg("gauge_time_limit_sec", 5.0))
         self._scene_frozen = False
         self._scene_ball_xy = (0.0, 0.0)
         self._scene_cam_xy = (0.0, 0.0)
         self._won = False
+        self._match_win_side = 0  # 1=P1, -1=P2, 0=무승부 (2P 결과 화면)
         self._finish_hold = 0.0
         self._elapsed = 0.0
         self._save_patch: Dict[str, Any] = {}
@@ -417,6 +435,10 @@ class BaseballActivity(BaseFieldActivity):
         self._pending_world_zoom: Optional[Dict[str, Any]] = None
         self._intro_phase = ""
         self._intro_t = 0.0
+        self._p2_switch_fade_phase = ""
+        self._p2_switch_fade_t = 0.0
+        self._p2_switch_fade_dur = 0.0
+        self._p2_switch_fade_alpha = 0
         self._intro_elapsed = 0.0
         self._intro_on_done: Optional[Callable[[], None]] = None
         self._intro_pan_points: List[Tuple[float, float]] = []
@@ -440,6 +462,7 @@ class BaseballActivity(BaseFieldActivity):
 
     def begin(self, player, **params) -> bool:
         self._player_ref = player
+        self._ev_mgr = params.get("ev_mgr")
         self.map_id = str(
             params.get("map")
             or params.get("map_id")
@@ -479,6 +502,9 @@ class BaseballActivity(BaseFieldActivity):
         self._bind_field_npcs(params.get("npcs"), params.get("mask"), params.get("objs"))
         self._npc_name = str(self.field.get("npc_name") or "야구친구")
         self._swings_per_side = int(self.field.get("swings", _cfg("swings", 5)))
+        self._pwr_power_sweet_spot_bonus_mul = float(self.field.get("pwr_power_sweet_spot_bonus_mul", _cfg("pwr_power_sweet_spot_bonus_mul", 1.2)))
+        self._pwr_confirm_hold_sec = float(self.field.get("pwr_confirm_hold_sec", _cfg("pwr_confirm_hold_sec", 0.5)))
+        self._swing_speed_mul = max(0.01, float(self.field.get("swing_speed_mul", _cfg("swing_speed_mul", 1.3))))
         self._apply_fan_half_deg()
         self._max_carry = float(self.field.get("max_carry_px", _cfg("max_carry_px", 720.0)))
         self._px_per_meter = float(
@@ -681,16 +707,15 @@ class BaseballActivity(BaseFieldActivity):
         self.field_tilt_target = None
 
     def save_location_override(self) -> Optional[Tuple[str, List[float]]]:
-        """세이브/종료 시 야구장 좌표 대신 복귀 맵·좌표 사용."""
-        if self.state == ST_QUIT or bool(self._should_return):
+        """세이브/종료 시 야구장 좌표 대신 복귀·exit 맵·좌표 사용 (강제 종료 포함)."""
+        if self._return_map:
+            pos = self._return_pos
+            if pos is not None and len(pos) >= 2:
+                return (str(self._return_map), [float(pos[0]), float(pos[1])])
             em, pos = self._configured_exit()
-            return (str(em), [float(pos[0]), float(pos[1])])
-        if not self._return_map:
-            return None
-        pos = self._return_pos
-        if pos is not None and len(pos) >= 2:
             return (str(self._return_map), [float(pos[0]), float(pos[1])])
-        return (str(self._return_map), None)
+        em, pos = self._configured_exit()
+        return (str(em), [float(pos[0]), float(pos[1])])
 
     @property
     def is_active(self) -> bool:
@@ -1162,6 +1187,8 @@ class BaseballActivity(BaseFieldActivity):
         if bool(getattr(pl, "playing_baseball", False)) and self.state in (
             ST_BAT_DIR,
             ST_BAT_PWR,
+            ST_SWING_PAUSE,
+            ST_POWER_SWING_PAUSE,
             ST_TURN_WAIT,
             ST_SWING,
         ):
@@ -1234,6 +1261,8 @@ class BaseballActivity(BaseFieldActivity):
             pl.direction = "right"
         except Exception:
             pass
+        if self.state in (ST_PWR_CONFIRM, ST_SWING_PAUSE, ST_POWER_SWING_PAUSE):
+            _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
 
     @staticmethod
     def _parse_optional_xy(v) -> Optional[Tuple[float, float]]:
@@ -1351,20 +1380,15 @@ class BaseballActivity(BaseFieldActivity):
         self._draw_char_idle_world(ctx, cid, pos[0], pos[1], face="right")
 
     def _scoreboard_text_lines(self) -> List[str]:
-        if self.mode == MODE_RECORD_2P:
-            p1 = int(round(self._total_score_m(self._p1_dists)))
-            p2 = int(round(self._total_score_m(self._p2_dists)))
-            turn = "2P" if self._batting_as_p2 else "1P"
-            return [
-                f"1P HR{int(self._p1_hr)} {p1}m",
-                f"2P HR{int(self._p2_hr)} {p2}m",
-                f"{self._swing_ix}/{self._swings_per_side} {turn}",
-            ]
-        total_m = int(round(self._total_score_m(self._p1_dists)))
+        p1 = int(round(self._total_score_m(self._p1_dists)))
+        p2 = int(round(self._total_score_m(self._p2_dists))) if self.mode == MODE_RECORD_2P else 0
+        active = self.state not in (ST_MENU, ST_DIFFICULTY, ST_PICK_CHAR, ST_PICK_P2, ST_RECORDS, ST_LEADERBOARD, ST_MATCH_END, ST_DEMO_RESULT, ST_QUIT)
+        live1 = active and (self.mode != MODE_RECORD_2P or not self._batting_as_p2)
+        live2 = active and self.mode == MODE_RECORD_2P and self._batting_as_p2
         return [
-            f"HR {int(self._p1_hr)}",
-            f"합 {total_m}m",
-            f"{self._swing_ix}/{self._swings_per_side}",
+            f"세트 {self._swing_ix}/{self._swings_per_side}",
+            f"1P 홈런 {int(self._p1_hr)} 합계{p1}m" + (" 경기중" if live1 else ""),
+            f"2P 홈런 {int(self._p2_hr)} 합계{p2}m" + (" 경기중" if live2 else ""),
         ]
 
     def _field_item_screen_rect(self, ctx: FieldDrawContext, o) -> Optional[pygame.Rect]:
@@ -1375,8 +1399,7 @@ class BaseballActivity(BaseFieldActivity):
 
                 ez = float(entity_combined_zoom_mul(o) or 1.0)
             except Exception:
-                od = getattr(o, "obj_def", None) or {}
-                ez = scoreboard_default_zoom(od if isinstance(od, dict) else None)
+                ez = scoreboard_zoom_from_object(o)
             eff_z = z * ez
             try:
                 iw, ih = o.image.get_size()
@@ -1414,10 +1437,30 @@ class BaseballActivity(BaseFieldActivity):
         if not lines:
             return
         font = self._ui_font(ctx, 9)
+        corner_font = self._ui_font(ctx, 7)
         for board in self._scoreboard_objs:
             rect = self._field_item_screen_rect(ctx, board)
             if rect is None or rect.w < 4 or rect.h < 4:
                 continue
+            style = scoreboard_style_from_object(board)
+            alpha = int(style.get("alpha", 200) or 200)
+            if style.get("use_image", True):
+                try:
+                    board.alpha = alpha
+                except Exception:
+                    pass
+            else:
+                fill = tuple((style.get("fill_color") or [24, 48, 40])[:3])
+                border = tuple((style.get("border_color") or [210, 255, 220])[:3])
+                box = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+                box.fill((*fill, alpha))
+                pygame.draw.rect(box, (*border, alpha), box.get_rect(), max(1, rect.w // 24))
+                ctx.surf.blit(box, rect.topleft)
+                if style.get("show_corner_label", True):
+                    tag_text = str(style.get("corner_label") or "").strip()
+                    if tag_text:
+                        tag = corner_font.render(tag_text, True, border)
+                        ctx.surf.blit(tag, (rect.x + 4, rect.y + 2))
             pad = max(2, rect.w // 16)
             y = rect.y + pad
             line_h = max(10, (rect.h - pad * 2) // max(1, len(lines)))
@@ -1453,7 +1496,7 @@ class BaseballActivity(BaseFieldActivity):
         ox, oy = float(self.ball_rest_xy[0]), float(self.ball_rest_xy[1])
         rest_h = float(self._ball_rest_h)
         if self.state != ST_FLIGHT or float(self._carry_px) <= 0.0:
-            if self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_SWING, ST_TURN_WAIT, ST_ANNOUNCE):
+            if self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_SWING_PAUSE, ST_POWER_SWING_PAUSE, ST_SWING, ST_TURN_WAIT, ST_ANNOUNCE):
                 return ox, oy, rest_h
             return ox, oy, 0.0
         rad = math.radians(float(self._flight_angle_deg))
@@ -1579,7 +1622,7 @@ class BaseballActivity(BaseFieldActivity):
                 },
             )
             return
-        if self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_SWING, ST_TURN_WAIT):
+        if self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_SWING_PAUSE, ST_POWER_SWING_PAUSE, ST_SWING, ST_TURN_WAIT):
             bat_dur = float(_cfg("bat_cam_return_sec", 0.12))
             self._push_camera_command(
                 ("bat",),
@@ -1768,32 +1811,53 @@ class BaseballActivity(BaseFieldActivity):
 
     def _clear_power_swing_fx(self, *, restore_zoom: bool = False) -> None:
         self._power_swing_fx_left = 0.0
+        self._power_swing_pause_t = 0.0
+        self._power_swing_zoom_active = False
         ev_mgr = getattr(self, "_ev_mgr", None)
         if ev_mgr is not None and hasattr(ev_mgr, "screen_fx_shake"):
             ev_mgr.screen_fx_shake = {"enabled": False}
         if restore_zoom:
             self._pending_world_zoom = {
                 "val": self._play_world_zoom_value(),
-                "duration_sec": 1.0,
+                "duration_sec": _field_num(self.field, "power_swing_zoom_restore_sec", 0.12),
             }
 
     def _start_power_swing_fx(self) -> None:
+        self._power_swing_zoom_active = True
+        self._pending_world_zoom = {
+            "val": _field_num(self.field, "power_swing_zoom_value", 4.0),
+            "duration_sec": _field_num(self.field, "power_swing_zoom_in_sec", 0.12),
+        }
+
+    def _start_power_swing_release_fx(self) -> None:
         from engine import build_screen_shake_from_step
 
-        self._power_swing_fx_left = 1.0
+        self._power_swing_zoom_active = False
+        self._power_swing_fx_left = max(0.0, _field_num(self.field, "power_swing_shake_sec", 1.0))
         ev_mgr = getattr(self, "_ev_mgr", None)
         if ev_mgr is not None and hasattr(ev_mgr, "screen_fx_shake"):
-            ev_mgr.screen_fx_shake = build_screen_shake_from_step(
-                {
-                    "amp_px": 50,
-                    "freq_hz": 16,
-                }
-            )
-        # main.py는 val/target 키만 소비한다. target_zoom을 보내면 1.0으로 오해된다.
+            ev_mgr.screen_fx_shake = build_screen_shake_from_step({
+                "amp_px": _field_num(self.field, "power_swing_shake_amp_px", 50.0),
+                "freq_hz": _field_num(self.field, "power_swing_shake_freq_hz", 16.0),
+            })
         self._pending_world_zoom = {
-            "val": 4.0,
-            "duration_sec": 0.3,
+            "val": self._play_world_zoom_value(),
+            "duration_sec": _field_num(self.field, "power_swing_zoom_restore_sec", 0.12),
         }
+
+    def _ball_motion_speed_mul(self) -> float:
+        """타구 비행·튕김·굴러감 체감 속도 (1.0=기본, 0.9=10% 느림)."""
+        try:
+            v = float(
+                _field_num(
+                    self.field,
+                    "ball_motion_speed_mul",
+                    _cfg("ball_motion_speed_mul", 0.9),
+                )
+            )
+        except (TypeError, ValueError):
+            v = 0.9
+        return max(0.05, min(4.0, v))
 
     def _setup_ground_motion(self, carry: float, *, fence_hit: bool) -> None:
         """착지 후 튕김·굴러감 거리·속도 — field/world_data 또는 data.py 기본값."""
@@ -1839,15 +1903,18 @@ class BaseballActivity(BaseFieldActivity):
         self._bounce_ix = 0
         self._bounce_t = 0.0
         base_dur = max(0.30, min(0.46, 0.26 + carry / max_c * 0.11))
-        self._bounce_dur = max(0.24, min(0.72, base_dur * bounce_mul))
+        speed_mul = self._ball_motion_speed_mul()
+        self._bounce_dur = max(0.24, min(0.72, base_dur * bounce_mul)) / max(
+            0.05, speed_mul
+        )
         self._roll_speed_max = max(
             20.0,
             _field_num(field, "roll_speed_max", 108.0),
-        )
+        ) * speed_mul
         self._roll_speed_min = max(
             8.0,
             _field_num(field, "roll_speed_min", 52.0),
-        )
+        ) * speed_mul
         if self._roll_speed_min > self._roll_speed_max:
             self._roll_speed_min = self._roll_speed_max * 0.45
         self._roll_speed_exp = max(
@@ -1989,11 +2056,67 @@ class BaseballActivity(BaseFieldActivity):
             self._intro_phase = "hold"
             self._intro_t = hold
 
+    def _start_2p_switch_fade(self) -> None:
+        self._clear_scene_freeze(reset_camera=True)
+        self._clear_power_swing_fx()
+        self._show_rest_ball()
+        self._reset_fielders()
+        self._return_to_plate_camera(smooth=False)
+        self.field_tilt_target = float(_cfg("tilt_compressed", 0.68))
+        self.state = ST_TURN_WAIT
+        self._msg = ""
+        self._p2_switch_fade_phase = "out"
+        self._p2_switch_fade_dur = max(0.01, _field_num(self.field, "p2_switch_fade_out_sec", 0.25))
+        self._p2_switch_fade_t = self._p2_switch_fade_dur
+        self._p2_switch_fade_alpha = 0
+
+    def _tick_2p_switch_fade(self, dt_sec: float) -> None:
+        if not self._p2_switch_fade_phase:
+            return
+        self._p2_switch_fade_t = max(0.0, self._p2_switch_fade_t - float(dt_sec))
+        dur = max(0.01, float(self._p2_switch_fade_dur))
+        left = float(self._p2_switch_fade_t)
+        if self._p2_switch_fade_phase == "out":
+            self._p2_switch_fade_alpha = int(round(255.0 * (1.0 - left / dur)))
+            if left <= 0.0:
+                self._batting_as_p2 = True
+                self._swing_ix = 0
+                self._apply_batter_char(self._p2_char)
+                hold = max(0.0, _field_num(self.field, "p2_switch_fade_hold_sec", 0.08))
+                if hold > 0.0:
+                    self._p2_switch_fade_phase = "hold"
+                    self._p2_switch_fade_dur = hold
+                    self._p2_switch_fade_t = hold
+                    self._p2_switch_fade_alpha = 255
+                else:
+                    self._p2_switch_fade_phase = "in"
+                    self._p2_switch_fade_dur = max(0.01, _field_num(self.field, "p2_switch_fade_in_sec", 0.25))
+                    self._p2_switch_fade_t = self._p2_switch_fade_dur
+        elif self._p2_switch_fade_phase == "hold":
+            self._p2_switch_fade_alpha = 255
+            if left <= 0.0:
+                self._p2_switch_fade_phase = "in"
+                self._p2_switch_fade_dur = max(0.01, _field_num(self.field, "p2_switch_fade_in_sec", 0.25))
+                self._p2_switch_fade_t = self._p2_switch_fade_dur
+        else:
+            self._p2_switch_fade_alpha = int(round(255.0 * (left / dur)))
+            if left <= 0.0:
+                self._p2_switch_fade_phase = ""
+                self._p2_switch_fade_alpha = 0
+                self._run_2p_turn_announce_after_switch()
+
+    def _run_2p_turn_announce_after_switch(self) -> None:
+        swing_sec = float(_cfg("announce_swing_sec", 1.0))
+        self._start_announce(
+            [
+                self._turn_announce_step(self._p2_char, as_p2=True),
+                _ann_step(self._swing_announce_text(0), swing_sec),
+            ],
+            self._begin_player_swing,
+        )
+
     def _switch_to_2p_batting(self) -> None:
-        self._batting_as_p2 = True
-        self._swing_ix = 0
-        self._apply_batter_char(self._p2_char)
-        self._begin_player_swing()
+        self._start_2p_switch_fade()
 
     def _schedule_after_swing(
         self,
@@ -2076,8 +2199,6 @@ class BaseballActivity(BaseFieldActivity):
                         [
                             _ann_step("", self._bat_cam_return_sec()),
                             _ann_step("", pause_sec),
-                            self._turn_announce_step(self._p2_char, as_p2=True),
-                            _ann_step(self._swing_announce_text(0), swing_sec),
                         ],
                         self._switch_to_2p_batting,
                     )
@@ -2158,8 +2279,42 @@ class BaseballActivity(BaseFieldActivity):
     def _start_match(self) -> None:
         self._start_match_2p()
 
+    def _gauge_time_limit_sec(self) -> float:
+        return max(
+            0.1,
+            float(
+                _field_num(
+                    self.field,
+                    "gauge_time_limit_sec",
+                    _cfg("gauge_time_limit_sec", 5.0),
+                )
+            ),
+        )
+
+    def _gauge_sweep_speed_mul(self) -> float:
+        """제한시간 경과에 따라 게이지 스윕 속도 선형 가속 (시작 1.0 → 종료 end_mul)."""
+        lim = max(0.1, float(getattr(self, "_gauge_time_limit", 0.0) or 0.0))
+        if lim <= 0.0:
+            lim = self._gauge_time_limit_sec()
+        left = max(0.0, float(self._gauge_time_left))
+        progress = max(0.0, min(1.0, 1.0 - left / lim))
+        try:
+            end_mul = float(
+                _field_num(
+                    self.field,
+                    "gauge_sweep_end_speed_mul",
+                    _cfg("gauge_sweep_end_speed_mul", 1.5),
+                )
+            )
+        except (TypeError, ValueError):
+            end_mul = 1.5
+        end_mul = max(1.0, min(3.0, end_mul))
+        return 1.0 + (end_mul - 1.0) * progress
+
     def _reset_gauge_timer(self) -> None:
-        self._gauge_time_left = max(0.1, float(_cfg("gauge_time_limit_sec", 5.0)))
+        lim = self._gauge_time_limit_sec()
+        self._gauge_time_limit = lim
+        self._gauge_time_left = lim
 
     def _begin_player_swing(self, *, reset_camera: bool = False) -> None:
         self._clear_scene_freeze(reset_camera=reset_camera)
@@ -2191,35 +2346,42 @@ class BaseballActivity(BaseFieldActivity):
 
     def _resolve_player_swing(self) -> None:
         # 파워 확인 상태로 넘어가기
+        self._locked_pwr_marker_t = self._pwr_marker_t()
         self._pwr_confirm_hold_t = self._pwr_confirm_hold_sec
-        self._is_power_swing = self._pwr_in_power_sweet_spot(self._pwr_marker_t())
+        self._is_power_swing = self._pwr_in_power_sweet_spot(self._locked_pwr_marker_t)
         self.state = ST_PWR_CONFIRM
         
-    def _actual_swing_after_confirm(self) -> None:
-        if self._pwr_in_trap_zone(self._pwr_marker_t()):
-            self._resolve_pop_foul_swing()
-            return
+    def _start_locked_swing_animation(self) -> None:
         pl = self._player_ref
         if pl is not None:
             _sync_baseball_overlay_swing(pl, self._p1_char or self._player_char)
+        self.state = ST_SWING
+        self._swing_t = max(0.05, _field_num(self.field, "swing_anim_base_sec", 0.45)) / max(0.01, float(self._swing_speed_mul))
+        self.field_tilt_target = 1.0
+
+    def _actual_swing_after_confirm(self) -> None:
+        if self._pwr_in_trap_zone(self._locked_pwr_marker_t):
+            self._resolve_pop_foul_swing()
+            return
         locked_dir = float(self._locked_dir_deg)
         locked_pwr = max(0.0, min(1.0, float(self._locked_pwr)))
-        actual = self._resolve_swing_angle(locked_dir, locked_pwr)
-        self._flight_angle_deg = actual
+        self._flight_angle_deg = self._resolve_swing_angle(locked_dir, locked_pwr)
         self._carry_px = self._carry_from_locked_swing(locked_dir, locked_pwr)
         self._is_foul = False
         self._is_pop_foul = False
         self._fence_hit = False
         self._ground_fence_bounced = False
         self._planned_home_run = False
-        
-        # 파워장타 효과 적용
+        pl = self._player_ref
+        if pl is not None:
+            _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
         if self._is_power_swing:
             self._start_power_swing_fx()
-        
-        self.state = ST_SWING
-        self._swing_t = 0.45 / self._swing_speed_mul  # 타격 애니메이션 속도 조절
-        self.field_tilt_target = 1.0
+            self._power_swing_pause_t = max(0.0, _field_num(self.field, "power_swing_pause_sec", 1.5))
+            self.state = ST_POWER_SWING_PAUSE
+            return
+        self._power_swing_pause_t = max(0.0, _field_num(self.field, "normal_swing_pause_sec", 0.5))
+        self.state = ST_SWING_PAUSE
 
     def _resolve_pop_foul_swing(self) -> None:
         """파워 게이지 1/3·2/3 함정 — 빗맞아 머리 뒤로 짧게 뜨는 파울."""
@@ -2272,6 +2434,7 @@ class BaseballActivity(BaseFieldActivity):
                 0.78,
                 min(1.18, 0.56 + carry / 125.0 + math.sqrt(self._ball_h_max) / 28.0),
             )
+        self._flight_dur /= max(0.05, self._ball_motion_speed_mul())
         self._roll_xy = [float(self._land_xy[0]), float(self._land_xy[1])]
         self._roll_left = 0.0
         self._bounce_travel_total = 0.0
@@ -2289,9 +2452,8 @@ class BaseballActivity(BaseFieldActivity):
         self._flight_sub = "arc"
         self._hide_rest_ball()
 
-        # 타격 연출(줌 4.0, 흔들림)이 진행 중이었다면 종료하고 2.0으로 복구
-        if self._power_swing_fx_left > 0.0:
-            self._clear_power_swing_fx(restore_zoom=True)
+        if self._power_swing_zoom_active:
+            self._start_power_swing_release_fx()
 
         if self._is_pop_foul:
             self._start_pop_foul_flight()
@@ -2324,6 +2486,7 @@ class BaseballActivity(BaseFieldActivity):
             0.9,
             min(2.8, 0.7 + float(self._carry_px) / max(80.0, self._max_carry) * 1.6),
         )
+        self._flight_dur /= max(0.05, self._ball_motion_speed_mul())
         self._ball_h_max = fair_h
         self._roll_xy = [float(self._land_xy[0]), float(self._land_xy[1])]
         self._roll_left = 0.0
@@ -2350,15 +2513,16 @@ class BaseballActivity(BaseFieldActivity):
                 except Exception:
                     pass
             self._active_chasers = set()
-        # 비거리·구역은 첫 착지(_land_xy), 연출은 굴러 멈춘 뒤 결과 표시
+        # 비거리는 첫 착지(_land_xy) 직선거리 — 굴러간 뒤가 아님
         land_x, land_y = float(self._land_xy[0]), float(self._land_xy[1])
         carry_px = 0.0 if was_foul else self._scored_carry_px()
         self._capture_scene_freeze()
         zone_label = ""
         if self._zone_objs and carry_px > 0.0:
+            zone_x, zone_y = self._ball_ground_pos()
             carry_px, was_foul, zone_label = resolve_landing_zone(
-                land_x,
-                land_y,
+                zone_x,
+                zone_y,
                 self._zone_objs,
                 carry_px,
                 was_foul,
@@ -2654,6 +2818,7 @@ class BaseballActivity(BaseFieldActivity):
             int(self._p1_hr), float(p_tot), int(self._p2_hr), float(o_tot)
         )
         self._won = win_side >= 0
+        self._match_win_side = int(win_side)
         if win_side > 0:
             win_line = f"1P({self._p1_char}) 승리!"
         elif win_side < 0:
@@ -2676,11 +2841,14 @@ class BaseballActivity(BaseFieldActivity):
         del now_ms
         self._elapsed += max(0.0, float(dt_sec))
         self._pin_batter()
-        if self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_TURN_WAIT):
+        if self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_SWING_PAUSE, ST_POWER_SWING_PAUSE, ST_TURN_WAIT):
             self._sync_rest_ball_object()
         elif self.state == ST_ANNOUNCE and not self._scene_frozen:
             self._sync_rest_ball_object()
         self._sync_camera()
+        if self._p2_switch_fade_phase:
+            self._tick_2p_switch_fade(float(dt_sec))
+            return
         if self.state == ST_FIELD_INTRO:
             self._tick_field_intro(float(dt_sec))
             return
@@ -2701,10 +2869,13 @@ class BaseballActivity(BaseFieldActivity):
                 float(self._power_swing_fx_left) - float(dt_sec),
             )
             if self._power_swing_fx_left <= 0.0:
-                self._clear_power_swing_fx(restore_zoom=True)
+                self._clear_power_swing_fx()
 
         if self.state == ST_BAT_DIR:
-            self._dir_phase += float(dt_sec) * float(self._dir_speed) * math.pi * 2.0
+            sweep_mul = self._gauge_sweep_speed_mul()
+            self._dir_phase += (
+                float(dt_sec) * float(self._dir_speed) * sweep_mul * math.pi * 2.0
+            )
             self._update_batter_facing_from_gauge()
             self._gauge_time_left -= float(dt_sec)
             if self._gauge_time_left <= 0.0:
@@ -2713,15 +2884,28 @@ class BaseballActivity(BaseFieldActivity):
                 self._update_batter_facing_from_gauge(self._locked_dir_deg)
                 self._begin_pwr_phase()
         elif self.state == ST_BAT_PWR:
-            self._pwr_phase += float(dt_sec) * float(self._pwr_speed) * math.pi * 2.0
+            sweep_mul = self._gauge_sweep_speed_mul()
+            self._pwr_phase += (
+                float(dt_sec) * float(self._pwr_speed) * sweep_mul * math.pi * 2.0
+            )
             self._gauge_time_left -= float(dt_sec)
             if self._gauge_time_left <= 0.0:
                 # 파워 시간 제한: 빗맞춤 효과
                 self._resolve_pop_foul_swing()
         elif self.state == ST_PWR_CONFIRM:
+            pl = self._player_ref
+            if pl is not None:
+                _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
             self._pwr_confirm_hold_t -= float(dt_sec)
             if self._pwr_confirm_hold_t <= 0.0:
                 self._actual_swing_after_confirm()
+        elif self.state in (ST_SWING_PAUSE, ST_POWER_SWING_PAUSE):
+            pl = self._player_ref
+            if pl is not None:
+                _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
+            self._power_swing_pause_t -= float(dt_sec)
+            if self._power_swing_pause_t <= 0.0:
+                self._start_locked_swing_animation()
         elif self.state == ST_SWING:
             self._swing_t -= float(dt_sec)
             if self._swing_t <= 0.0:
@@ -2918,6 +3102,53 @@ class BaseballActivity(BaseFieldActivity):
         bucket[face] = frames
         return frames
 
+    def _load_char_anim_frames(self, char_id: str, anim_name: str, direction: str) -> List:
+        cid = str(char_id or "").strip()
+        an = str(anim_name or "").strip().lower()
+        if not cid or not an:
+            return []
+        face = "right" if str(direction) == "right" else "left"
+        cache_key = f"{cid}:{an}:{face}"
+        if cache_key in self._char_anim_cache:
+            return self._char_anim_cache[cache_key]
+        frames: List = []
+        overlay_map = {
+            "idle": "idle_baseball",
+            "cheer": "cheer_baseball",
+            "swing": "swing_baseball",
+        }
+        overlay_name = overlay_map.get(an)
+        if overlay_name:
+            bt = _body_type_for_char(cid)
+            if bt not in ("animal", "pet"):
+                raw = _load_bb_overlay_frames(bt, overlay_name)
+                if raw:
+                    if face == "right":
+                        frames = [pygame.transform.flip(f, True, False) for f in raw]
+                    else:
+                        frames = list(raw)
+        if not frames or self._idle_frames_are_placeholder(frames):
+            from engine import load_anim_auto
+
+            frames = load_anim_auto(cid, an, face) or []
+            if not frames or self._idle_frames_are_placeholder(frames):
+                alt = "left" if face == "right" else "right"
+                alt_frames = load_anim_auto(cid, an, alt) or []
+                if alt_frames and not self._idle_frames_are_placeholder(alt_frames):
+                    frames = [pygame.transform.flip(f, True, False) for f in alt_frames]
+                else:
+                    frames = []
+        self._char_anim_cache[cache_key] = frames
+        return frames
+
+    def _result_char_frames(self, char_id: str, *, face: str, cheer: bool) -> List:
+        direction = "right" if str(face) == "right" else "left"
+        if cheer:
+            frames = self._load_char_anim_frames(char_id, "cheer", direction)
+            if frames and not self._idle_frames_are_placeholder(frames):
+                return frames
+        return self._idle_frames_for_direction(char_id, direction)
+
     def _ensure_char_idle(self, char_id: str, direction: str = "right") -> None:
         self._idle_frames_for_direction(char_id, direction)
 
@@ -3022,6 +3253,108 @@ class BaseballActivity(BaseFieldActivity):
             img = pygame.transform.scale(img, (dw, dh))
         cx, cy = center_xy
         surf.blit(img, (cx - dw // 2, cy - dh // 2))
+
+    def _blit_char_anim_frame(
+        self,
+        surf: pygame.Surface,
+        frames: List,
+        foot_xy: Tuple[int, int],
+        *,
+        zoom_mul: int = _MATCH_RESULT_CHAR_ZOOM,
+        fps: float = _MATCH_RESULT_CHAR_FPS,
+    ) -> None:
+        if not frames:
+            return
+        fi = int(self._elapsed * float(fps)) % len(frames)
+        img = frames[fi]
+        iw, ih = img.get_size()
+        if ih <= 0 or iw <= 0:
+            return
+        zm = max(1, int(zoom_mul))
+        dw, dh = iw * zm, ih * zm
+        if (dw, dh) != (iw, ih):
+            img = pygame.transform.scale(img, (dw, dh))
+        fx, fy = foot_xy
+        dx, dy = blit_topleft_bottom_center(int(fx), int(fy), dw, dh)
+        surf.blit(img, (int(dx), int(dy)))
+
+    def _draw_match_result(self, ctx: FieldDrawContext) -> None:
+        surf = ctx.surf
+        w, h = surf.get_width(), surf.get_height()
+        overlay = pygame.Surface((w, h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 140))
+        surf.blit(overlay, (0, 0))
+        if self.mode == MODE_RECORD_2P:
+            self._draw_match_result_2p(ctx)
+            return
+        big = self._ui_font(ctx, 20)
+        head = big.render("경기 결과!!", True, (255, 248, 210))
+        surf.blit(head, (w // 2 - head.get_width() // 2, int(h * 0.18)))
+        detail = self._ui_font(ctx, 13)
+        y = int(h * 0.30)
+        for ln in self._hud_lines:
+            t = detail.render(ln, True, (240, 248, 255))
+            surf.blit(t, (w // 2 - t.get_width() // 2, y))
+            y += 22
+        hint = self._ui_font(ctx, 11).render("화면을 탭하세요", True, (200, 210, 230))
+        surf.blit(hint, (w // 2 - hint.get_width() // 2, y + 12))
+
+    def _draw_match_result_2p(self, ctx: FieldDrawContext) -> None:
+        surf = ctx.surf
+        w, h = surf.get_width(), surf.get_height()
+        foot_y = int(h * 0.86)
+        win_side = int(getattr(self, "_match_win_side", 0) or 0)
+        p1_cheer = win_side > 0
+        p2_cheer = win_side < 0
+        p1_frames = self._result_char_frames(self._p1_char, face="right", cheer=p1_cheer)
+        p2_frames = self._result_char_frames(self._p2_char, face="left", cheer=p2_cheer)
+        self._blit_char_anim_frame(
+            surf, p1_frames, (int(w * 0.20), foot_y)
+        )
+        self._blit_char_anim_frame(
+            surf, p2_frames, (int(w * 0.80), foot_y)
+        )
+        title_font = self._ui_font(ctx, 20)
+        head = title_font.render("경기 결과!!", True, (255, 248, 210))
+        surf.blit(head, (w // 2 - head.get_width() // 2, int(h * 0.08)))
+        score_font = self._ui_font(ctx, 13)
+        small = self._ui_font(ctx, 11)
+        p_tot = int(round(self._total_score_m(self._p1_dists)))
+        o_tot = int(round(self._total_score_m(self._p2_dists)))
+        p1_nm = self._char_label(self._p1_char)
+        p2_nm = self._char_label(self._p2_char)
+        p1_hr = int(self._p1_hr)
+        p2_hr = int(self._p2_hr)
+        win_col = (255, 230, 120)
+        lose_col = (200, 215, 235)
+        p1_col = win_col if win_side > 0 else lose_col
+        p2_col = win_col if win_side < 0 else lose_col
+        tie_col = (220, 235, 255)
+        if win_side == 0:
+            p1_col = p2_col = tie_col
+        cy = int(h * 0.34)
+        p1_line1 = score_font.render(f"1P {p1_nm}", True, p1_col)
+        p2_line1 = score_font.render(f"2P {p2_nm}", True, p2_col)
+        gap = max(12, int(w * 0.06))
+        mid = w // 2
+        surf.blit(p1_line1, (mid - gap - p1_line1.get_width(), cy))
+        surf.blit(p2_line1, (mid + gap, cy))
+        cy += 20
+        p1_line2 = small.render(f"HR {p1_hr}  /  {p_tot}m", True, p1_col)
+        p2_line2 = small.render(f"HR {p2_hr}  /  {o_tot}m", True, p2_col)
+        surf.blit(p1_line2, (mid - gap - p1_line2.get_width(), cy))
+        surf.blit(p2_line2, (mid + gap, cy))
+        cy += 28
+        win_line = ""
+        for ln in self._hud_lines:
+            if "승리" in ln or "무승부" in ln:
+                win_line = str(ln)
+                break
+        if win_line:
+            wt = score_font.render(win_line, True, (255, 248, 180))
+            surf.blit(wt, (w // 2 - wt.get_width() // 2, cy))
+        hint = small.render("화면을 탭하세요", True, (200, 210, 230))
+        surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.92)))
 
     def _confirm_char_pick(self, ix: int) -> bool:
         opts = list(self._char_opts or [])
@@ -3281,10 +3614,13 @@ class BaseballActivity(BaseFieldActivity):
             self._locked_pwr = self._pwr_now()
             self._resolve_player_swing()
             return True
+        if self.state == ST_PWR_CONFIRM:
+            return True
         return self.state in (
             ST_ANNOUNCE,
             ST_BAT_DIR,
             ST_BAT_PWR,
+            ST_PWR_CONFIRM,
             ST_MENU,
             ST_DIFFICULTY,
             ST_RECORDS,
@@ -3324,18 +3660,22 @@ class BaseballActivity(BaseFieldActivity):
         
         if self._announce_is_home_run:
             # 홈런일 때 logo 폰트로 크게 표시
-            logo_font = _get_logo_font(36)
+            logo_font = _get_logo_font(72)
             title = logo_font.render(text, True, (255, 210, 0))
             shadow = logo_font.render(text, True, (80, 40, 0))
-            ty = int(h * 0.35)
         else:
             # 일반 텍스트
             big = self._ui_font(ctx, 24)
             title = big.render(text, True, (255, 248, 210))
             shadow = big.render(text, True, (20, 24, 40))
-            ty = int(h * 0.38)
-        
-        tx = w // 2 - title.get_width() // 2
+
+        vis = title.get_bounding_rect()
+        if vis.width > 0 and vis.height > 0:
+            tx = w // 2 - (vis.x + vis.width // 2)
+            ty = h // 2 - (vis.y + vis.height // 2)
+        else:
+            tx = w // 2 - title.get_width() // 2
+            ty = h // 2 - title.get_height() // 2
         surf.blit(shadow, (tx + 2, ty + 2))
         surf.blit(title, (tx, ty))
         if self._announce_tap_wait:
@@ -3629,13 +3969,17 @@ class BaseballActivity(BaseFieldActivity):
         pygame.draw.rect(surf, trap_col_new, (right_trap_x0, gy, right_trap_x1 - right_trap_x0, gh), border_radius=4)
 
         # 마커 그리기
-        t = self._pwr_marker_t()
+        t = self._locked_pwr_marker_t if self.state == ST_PWR_CONFIRM else self._pwr_marker_t()
         lx = gx + int(t * gw)
         pygame.draw.line(surf, (255, 200, 90), (lx, gy - 4), (lx, gy + gh + 4), 3)
         font = self._ui_font(ctx, 11)
-        tip = font.render("파워 — 화면 터치! (빨강=빗맞음)", True, (240, 248, 255))
+        if self.state == ST_PWR_CONFIRM:
+            tip = font.render("파워 확정!", True, (255, 235, 140))
+        else:
+            tip = font.render("파워 — 화면 터치! (빨강=빗맞음)", True, (240, 248, 255))
         surf.blit(tip, (w // 2 - tip.get_width() // 2, gy - 22))
-        self._draw_gauge_timer(ctx, gy - 38)
+        if self.state != ST_PWR_CONFIRM:
+            self._draw_gauge_timer(ctx, gy - 38)
 
     def _draw_ball_world(
         self, ctx: FieldDrawContext, gx: float, gy: float, h: float
@@ -3694,9 +4038,10 @@ class BaseballActivity(BaseFieldActivity):
         self._draw_waiting_opponent(ctx)
         if self.state == ST_ANNOUNCE and self._scene_frozen:
             self._draw_ball_frozen(ctx)
-        elif self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_TURN_WAIT, ST_ANNOUNCE, ST_FIELD_INTRO):
+        elif self.state in (ST_BAT_DIR, ST_BAT_PWR, ST_SWING_PAUSE, ST_POWER_SWING_PAUSE, ST_TURN_WAIT, ST_ANNOUNCE, ST_FIELD_INTRO):
             self._draw_ball_at_rest(ctx)
-        if self.state in (ST_BAT_DIR, ST_BAT_PWR):
+        show_fan_guide = bool(self.field.get("fan_half_guide_visible", _cfg("fan_half_guide_visible", True)))
+        if show_fan_guide and self.state in (ST_BAT_DIR, ST_BAT_PWR):
             self._draw_fan_half_debug_world(ctx)
         if self.state == ST_FLIGHT:
             self._draw_ball_flight(ctx)
@@ -3760,20 +4105,17 @@ class BaseballActivity(BaseFieldActivity):
             )
             surf.blit(t, (surf.get_width() // 2 - t.get_width() // 2, 24))
         elif self.state in (ST_MATCH_END, ST_DEMO_RESULT):
-            overlay = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 140))
-            surf.blit(overlay, (0, 0))
-            big = self._ui_font(ctx, 20)
-            head = big.render("경기 결과!!", True, (255, 248, 210))
-            surf.blit(head, (surf.get_width() // 2 - head.get_width() // 2, int(surf.get_height() * 0.18)))
-            detail = self._ui_font(ctx, 13)
-            y = int(surf.get_height() * 0.30)
-            for ln in self._hud_lines:
-                t = detail.render(ln, True, (240, 248, 255))
-                surf.blit(t, (surf.get_width() // 2 - t.get_width() // 2, y))
-                y += 22
-            hint = font.render("화면을 탭하세요", True, (200, 210, 230))
-            surf.blit(hint, (surf.get_width() // 2 - hint.get_width() // 2, y + 12))
+            self._draw_match_result(ctx)
+
+        self._draw_2p_switch_fade(ctx)
+
+    def _draw_2p_switch_fade(self, ctx: FieldDrawContext) -> None:
+        a = max(0, min(255, int(self._p2_switch_fade_alpha or 0)))
+        if a <= 0:
+            return
+        overlay = pygame.Surface(ctx.surf.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, a))
+        ctx.surf.blit(overlay, (0, 0))
 
     def draw(self, ctx: FieldDrawContext) -> None:
         self.draw_world(ctx)

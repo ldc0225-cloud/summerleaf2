@@ -29,7 +29,7 @@ from flow import (
     progress_value_key,
 )
 from field_runtime import build_step_from_editor_fields, fill_editor_fields_from_step
-from engine import FieldItem, BaseCharacter, MaskWalkingCharacter
+from engine import FieldItem, BaseCharacter, MaskWalkingCharacter, draw_object_text_label
 from render_align import (
     bg_anchor,
     blit_topleft_bottom_center,
@@ -39,6 +39,8 @@ from render_align import (
     world_to_map_surface_xy,
 )
 import editor_baseball as bb_ed
+import editor_racing as rc_ed
+import editor_font as font_ed
 from entity_defs import reload_entity_defs
 
 # events.json 섹션 (에디터 목록·저장 공통)
@@ -185,40 +187,6 @@ def _editor_entity_alpha_hit_rect(o, sel_rect, *, alpha_min=None):
     return False
 
 
-def _editor_pick_top_node(objs, npcs, wx, wy):
-    """화면상 위에 가까운 것 우선(레이어·y 정렬)으로 한 개만."""
-    def _ysort_y(ent):
-        try:
-            y = float(ent.pos[1])
-        except Exception:
-            return 0.0
-        mode = str(getattr(ent, "ysort_mode", "ground") or "ground").strip().lower()
-        if mode == "visual":
-            try:
-                h = float(getattr(ent, "height", 0) or 0)
-            except Exception:
-                h = 0.0
-            return y - h
-        return y
-
-    objs_to_check = sorted(objs + npcs, key=lambda x: (getattr(x, "layer", 0), _ysort_y(x)), reverse=True)
-    for o in objs_to_check:
-        if _editor_entity_alpha_hit(o, wx, wy):
-            return o
-    return None
-
-
-def editor_snap_pick_world_xy(wx, wy, grid_px, fine_shift_held):
-    """
-    스텝 좌표 픽 / 존 사각형 지정 등: 기본은 월드 격자(바닥)에 스냅.
-    Shift 누르면 1픽셀 단위(반올림) 미세 — 오브젝트 배치(swx)와 동일 정책.
-    """
-    if fine_shift_held:
-        return int(round(float(wx))), int(round(float(wy)))
-    g = max(1, int(grid_px))
-    return (int(float(wx)) // g) * g, (int(float(wy)) // g) * g
-
-
 def _editor_draw_height_span_on_map(
     surf,
     start_x,
@@ -285,30 +253,202 @@ def _editor_draw_hidden_entity_ghost(surf, s_img, x, y, *, selected=False):
     ghost.set_alpha(72 if selected else 48)
     surf.blit(ghost, (int(x), int(y)))
     outline = (255, 210, 90) if selected else (110, 210, 255)
-    pygame.draw.rect(surf, outline, (int(x), int(y), w, h), 3 if selected else 2)
-    # 모서리 꺾쇠 — 숨김 상태임을 한눈에 구분
-    corner = max(4, min(14, w // 5, h // 5))
+    # 모서리 브라켓 (전체 rect 테두리 대신 — 덜 방해)
+    corner = max(4, min(14, min(w, h) // 6))
     cx, cy = int(x), int(y)
     for ox, oy, dx, dy in (
         (0, 0, 1, 1),
-        (w, 0, -1, 1),
-        (0, h, 1, -1),
-        (w, h, -1, -1),
+        (w - 1, 0, -1, 1),
+        (0, h - 1, 1, -1),
+        (w - 1, h - 1, -1, -1),
     ):
         px, py = cx + ox, cy + oy
         pygame.draw.line(surf, outline, (px, py), (px + dx * corner, py), 2)
         pygame.draw.line(surf, outline, (px, py), (px, py + dy * corner), 2)
 
 
-def _editor_nodes_in_world_rect(objs, npcs, x1, y1, x2, y2):
-    """월드 좌표 사각형과 스프라이트 AABB가 겹치는 오브젝트·NPC 전부."""
+def _editor_entity_view_key(o):
+    """에디터 전용 뷰 숨김 집합 키 (맵 리로드 후에도 name+좌표로 유지)."""
+    try:
+        nm = str(getattr(o, "name", "") or "")
+        px = int(round(float(o.pos[0])))
+        py = int(round(float(o.pos[1])))
+        kind = type(o).__name__
+        return (nm, px, py, kind)
+    except Exception:
+        return ("?", id(o))
+
+
+def _editor_hide_large_min_px():
+    """큰 스프라이트 숨김 기준(원본 이미지 긴 변 px)."""
+    try:
+        return max(32, int(CONFIG.get("EDITOR_HIDE_LARGE_MIN_PX", 160) or 160))
+    except Exception:
+        return 160
+
+
+def _editor_entity_is_view_hidden(o, *, hide_large, hidden_keys, is_player=False):
+    """
+    에디터 뷰 전용 숨김(스프라이트 대신 이름 칩).
+    world_data / is_visible 과 무관 — 편집 편의용.
+    선택 숨김은 o._editor_view_hidden (드래그해도 유지) + hidden_keys(재로드 복원).
+    """
+    if o is None or is_player:
+        return False
+    try:
+        if bool(getattr(o, "_editor_view_hidden", False)):
+            return True
+    except Exception:
+        pass
+    try:
+        if _editor_entity_view_key(o) in (hidden_keys or set()):
+            return True
+    except Exception:
+        pass
+    if hide_large:
+        try:
+            img = getattr(o, "image", None)
+            if img is not None:
+                iw, ih = img.get_size()
+                if max(int(iw), int(ih)) >= _editor_hide_large_min_px():
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _editor_entity_chip_world_rect(o, half=20):
+    """뷰 숨김 시 선택용 작은 박스(발 앵커 기준, 월드 px)."""
+    try:
+        frx = int(round(float(o.pos[0])))
+        fry = int(round(float(o.pos[1])))
+    except Exception:
+        return pygame.Rect(0, 0, 1, 1)
+    h = max(10, int(half))
+    w = max(28, int(half) * 2)
+    # 발 위에 붙는 작은 라벨 영역
+    return pygame.Rect(frx - w // 2, fry - h - 4, w, h + 8)
+
+
+def _editor_entity_chip_hit(o, wx, wy):
+    return bool(_editor_entity_chip_world_rect(o).collidepoint(float(wx), float(wy)))
+
+
+def _editor_draw_object_name_chip(
+    surf,
+    o,
+    foot_px_x,
+    foot_px_y,
+    zoom_level,
+    *,
+    selected=False,
+    label=None,
+    font=None,
+):
+    """
+    뷰 숨김 오브젝트: 스프라이트 대신 발 위치에 작은 이름 칩.
+    선택·드래그는 칩(월드 chip rect)으로 가능.
+    """
+    try:
+        text = str(label if label is not None else getattr(o, "name", "?") or "?")
+    except Exception:
+        text = "?"
+    if len(text) > 18:
+        text = text[:16] + "…"
+    try:
+        z = max(0.35, float(zoom_level))
+    except Exception:
+        z = 1.0
+    if font is None:
+        try:
+            font = pygame.font.SysFont("malgungothic", max(10, int(11 * min(1.5, z))))
+        except Exception:
+            font = pygame.font.Font(None, max(12, int(14 * min(1.5, z))))
+    try:
+        ts = font.render(text, True, (20, 24, 30) if not selected else (20, 20, 10))
+    except Exception:
+        return
+    pad_x = max(4, int(5 * z))
+    pad_y = max(2, int(3 * z))
+    tw, th = ts.get_width(), ts.get_height()
+    bw = tw + pad_x * 2
+    bh = th + pad_y * 2
+    cx = int(round(float(foot_px_x)))
+    cy = int(round(float(foot_px_y)))
+    rect = pygame.Rect(cx - bw // 2, cy - bh - max(2, int(3 * z)), bw, bh)
+    fill = (255, 230, 120) if selected else (210, 225, 240)
+    border = (255, 200, 40) if selected else (80, 110, 150)
+    try:
+        chip = pygame.Surface((bw, bh), pygame.SRCALPHA)
+        chip.fill((*fill, 230))
+        surf.blit(chip, rect.topleft)
+    except Exception:
+        pygame.draw.rect(surf, fill, rect)
+    pygame.draw.rect(surf, border, rect, max(1, int(round(z))), border_radius=3)
+    surf.blit(ts, (rect.x + pad_x, rect.y + pad_y))
+    # 발 위치 점
+    pygame.draw.circle(surf, border, (cx, cy), max(2, int(round(2.2 * z))), 0)
+
+
+def _editor_pick_top_node(objs, npcs, wx, wy, *, view_hidden_fn=None):
+    """화면상 위에 가까운 것 우선(레이어·y 정렬)으로 한 개만.
+    view_hidden_fn(o)=True 이면 전체 스프라이트 대신 작은 이름칩만 히트(뒤 오브젝트 편집용).
+    """
+    def _ysort_y(ent):
+        try:
+            y = float(ent.pos[1])
+        except Exception:
+            return 0.0
+        mode = str(getattr(ent, "ysort_mode", "ground") or "ground").strip().lower()
+        if mode == "visual":
+            try:
+                h = float(getattr(ent, "height", 0) or 0)
+            except Exception:
+                h = 0.0
+            return y - h
+        return y
+
+    objs_to_check = sorted(objs + npcs, key=lambda x: (getattr(x, "layer", 0), _ysort_y(x)), reverse=True)
+    for o in objs_to_check:
+        try:
+            vh = bool(view_hidden_fn(o)) if callable(view_hidden_fn) else False
+        except Exception:
+            vh = False
+        if vh:
+            if _editor_entity_chip_hit(o, wx, wy):
+                return o
+        elif _editor_entity_alpha_hit(o, wx, wy):
+            return o
+    return None
+
+
+def editor_snap_pick_world_xy(wx, wy, grid_px, fine_shift_held):
+    """
+    스텝 좌표 픽 / 존 사각형 지정 등: 기본은 월드 격자(바닥)에 스냅.
+    Shift 누르면 1픽셀 단위(반올림) 미세 — 오브젝트 배치(swx)와 동일 정책.
+    """
+    if fine_shift_held:
+        return int(round(float(wx))), int(round(float(wy)))
+    g = max(1, int(grid_px))
+    return (int(float(wx)) // g) * g, (int(float(wy)) // g) * g
+
+
+def _editor_nodes_in_world_rect(objs, npcs, x1, y1, x2, y2, *, view_hidden_fn=None):
+    """월드 좌표 사각형과 스프라이트(또는 뷰숨김 칩)가 겹치는 오브젝트·NPC 전부."""
     ax, bx = min(float(x1), float(x2)), max(float(x1), float(x2))
     ay, by = min(float(y1), float(y2)), max(float(y1), float(y2))
     rw, rh = max(1, int(math.ceil(bx - ax))), max(1, int(math.ceil(by - ay)))
     r = pygame.Rect(int(ax), int(ay), rw, rh)
     out = []
     for o in sorted(objs + npcs, key=lambda x: (getattr(x, "layer", 0), x.pos[1])):
-        if _editor_entity_alpha_hit_rect(o, r):
+        try:
+            vh = bool(view_hidden_fn(o)) if callable(view_hidden_fn) else False
+        except Exception:
+            vh = False
+        if vh:
+            if r.colliderect(_editor_entity_chip_world_rect(o)):
+                out.append(o)
+        elif _editor_entity_alpha_hit_rect(o, r):
             out.append(o)
     return out
 
@@ -1536,6 +1676,7 @@ def _editor_left_list_metrics(
     flow_entity_entries=None,
     flow_placed_collapsed=None,
     baseball_tool="ZONES",
+    racing_state=None,
 ):
     tops = _editor_left_list_tops(top_bar_h)
     if edit_mode == "FLOW":
@@ -1547,6 +1688,8 @@ def _editor_left_list_metrics(
         content_h = len(rows) * line_h
     elif edit_mode == "BASEBALL":
         list_top, content_h = bb_ed.sidebar_list_metrics(top_bar_h, baseball_tool, objs)
+    elif edit_mode == "RACING":
+        list_top, content_h = rc_ed.sidebar_list_metrics(top_bar_h, racing_state or {})
     elif edit_mode == "MAP":
         if map_tool == "OBJECTS":
             list_top = tops["map_objects"]
@@ -1950,9 +2093,13 @@ def _step_field_rows(step_type, step_fields=None):
             ("Picture", "picture"),
             ("Music", "music"),
             ("Transition", "transition"),
+            ("Transition sec", "transition_sec"),
             ("Text", "text"),
-            ("Auto(true/false)", "auto"),
-            ("Val(sec)", "val"),
+            ("Text delay sec", "text_delay_sec"),
+            ("Auto(true=시간 후 자동)", "auto"),
+            ("Force(true=클릭 스킵 불가)", "force"),
+            ("Hi-res 640x480 (true/false)", "hi_res"),
+            ("Hold sec (val)", "val"),
             ("Action(remove)", "action"),
         ]
     if t == "OVERLAY_UI":
@@ -2168,6 +2315,7 @@ def _dev_cmd_dropdown_options():
         "toggle_show_overlay",
         "toggle_tilt_demo",
         "toggle_shear_debug",
+        "toggle_3d_rotate",
         "cycle_zoom_debug",
         "toggle_jump_shadow",
         "toggle_fullscreen",
@@ -2179,6 +2327,9 @@ def _dev_cmd_dropdown_options():
         "stop_baseball",
         "start_baseball",
         "start_activity_baseball",
+        "stop_racing",
+        "start_racing",
+        "start_activity_racing",
         "restart_delete_save",
     ]
 
@@ -2314,9 +2465,15 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["fade", "dissolve", "wipe"]
     if fk == "action" and t == "SCREEN":
         return ["", "remove"]
+    if fk == "hi_res" and t == "SCREEN":
+        return ["false", "true"]
+    if fk in ("auto", "force") and t == "SCREEN":
+        return ["true", "false"]
     if fk in ("tilt_on", "zoom_on") and t in ("TILT", "ZOOM"):
         return ["true", "false"]
     if fk in ("shear_on",) and t == "SHEAR":
+        return ["true", "false"]
+    if fk in ("rotate3d_on",) and t == "3D_ROTATE":
         return ["true", "false"]
     if fk == "fx_on" and t in ("SCREEN_FX",):
         return ["true", "false"]
@@ -2389,6 +2546,13 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["shear_strength"] = "1.0"
         if empt("shear_duration_sec"):
             step_fields["shear_duration_sec"] = "1.0"
+    elif t == "3D_ROTATE":
+        if empt("rotate3d_on"):
+            step_fields["rotate3d_on"] = "true"
+        if empt("rotate3d_strength"):
+            step_fields["rotate3d_strength"] = "1.0"
+        if empt("rotate3d_duration_sec"):
+            step_fields["rotate3d_duration_sec"] = "1.0"
     elif t in ("FADEIN", "FADEOUT") and empt("val"):
         step_fields["val"] = "1.0"
     elif t == "FOLLOW_START":
@@ -2428,8 +2592,17 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["volume"] = "1.0"
     elif t == "MUSIC_STOP" and empt("fade_out"):
         step_fields["fade_out"] = "0.5"
-    elif t == "SCREEN" and empt("val"):
-        step_fields["val"] = "3.0"
+    elif t == "SCREEN":
+        if empt("val"):
+            step_fields["val"] = "3.0"
+        if empt("hi_res"):
+            step_fields["hi_res"] = "false"
+        if empt("transition_sec"):
+            step_fields["transition_sec"] = "1.0"
+        if empt("auto"):
+            step_fields["auto"] = "true"
+        if empt("text_delay_sec"):
+            step_fields["text_delay_sec"] = "1.0"
     elif t == "OVERLAY_UI":
         if empt("action"):
             step_fields["action"] = "show"
@@ -2871,6 +3044,8 @@ def _editor_wants_text_input(
     obj_layer_active,
     baseball_settings_active=False,
     baseball_zone_field_active=False,
+    racing_settings_active=False,
+    font_settings_active=False,
 ):
     return bool(
         (show_event_config and active_field)
@@ -2887,6 +3062,8 @@ def _editor_wants_text_input(
         or obj_layer_active
         or baseball_settings_active
         or baseball_zone_field_active
+        or racing_settings_active
+        or font_settings_active
     )
 
 
@@ -3892,8 +4069,10 @@ def editor_main():
     sidebar_right_sb_drag = False
     LINE_H = EDITOR_LINE_H
     
-    edit_mode = "MAP"  # "MAP" | "EVENT" | "FLOW" | "BASEBALL"
+    edit_mode = "MAP"  # "MAP" | "EVENT" | "FLOW" | "BASEBALL" | "RACING"
     baseball_ed = bb_ed.new_state()
+    racing_ed = rc_ed.new_state()
+    font_ed_state = font_ed.new_state()
     bb_placed_pick_node = None
     bb_placed_pick_ms = 0
     reload_entity_defs()
@@ -4050,14 +4229,18 @@ def editor_main():
     def _on_obj_def_saved(obj_name):
         from data import OBJ_ASSETS
         from flow import merge_interact_spec
+        from activities.baseball_zones import apply_scoreboard_defaults, is_scoreboard_object
 
         for o in objs:
             if getattr(o, "name", None) == obj_name:
                 inst = getattr(o, "interact_instance", None) or {}
+                o.obj_def = dict(OBJ_ASSETS.get(obj_name, {}) or {})
                 o.interact_spec = merge_interact_spec(
                     OBJ_ASSETS.get(obj_name, {}),
                     {"interact": inst} if inst else {},
                 )
+                if is_scoreboard_object(o):
+                    apply_scoreboard_defaults(o)
         _flow_refresh_entity_list()
 
     def _on_inst_saved_flow():
@@ -4314,6 +4497,7 @@ def editor_main():
     # 초기 맵 로드
     map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": map_list[cur_idx]})
     bb_ed.on_map_switch(baseball_ed, flow, map_id, objs)
+    rc_ed.on_map_switch(racing_ed, flow, map_id)
     _flow_refresh_entity_list()
 
     sidebar_w = EDITOR_SIDEBAR_W
@@ -4403,6 +4587,71 @@ def editor_main():
 
     # --- MAP 서브툴: OBJECTS / ZONES ---
     map_tool = "OBJECTS"  # "OBJECTS" | "ZONES" | "BGZONES" | "PRESENCE"
+    # OBJECTS 뷰 숨김(편집 전용): 큰 스프라이트·수동 숨김 → 이름 칩. world_data 미반영.
+    editor_hide_large = bool(editor_ui_state.get("map_hide_large", False))
+    editor_view_hidden_keys = set()
+    _raw_vhk = editor_ui_state.get("map_view_hidden_keys")
+    if isinstance(_raw_vhk, list):
+        for _row in _raw_vhk:
+            if isinstance(_row, (list, tuple)) and len(_row) >= 4:
+                try:
+                    editor_view_hidden_keys.add(
+                        (str(_row[0]), int(_row[1]), int(_row[2]), str(_row[3]))
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+    def _persist_editor_view_hide():
+        # 플래그가 있는 인스턴스 기준으로 키 갱신(이동 후에도 저장 가능)
+        keys = set()
+        for o in list(objs) + list(npcs):
+            try:
+                if bool(getattr(o, "_editor_view_hidden", False)):
+                    keys.add(_editor_entity_view_key(o))
+            except Exception:
+                pass
+        editor_view_hidden_keys.clear()
+        editor_view_hidden_keys.update(keys)
+        editor_ui_state["map_hide_large"] = bool(editor_hide_large)
+        editor_ui_state["map_view_hidden_keys"] = [
+            [k[0], int(k[1]), int(k[2]), k[3]]
+            for k in sorted(
+                editor_view_hidden_keys,
+                key=lambda x: (str(x[0]), int(x[1]), int(x[2]), str(x[3])),
+            )
+        ]
+        _save_editor_ui_state(editor_ui_state)
+
+    def _apply_view_hide_flags_to_entities():
+        """맵 로드 후 hidden_keys → 인스턴스 플래그."""
+        for o in list(objs) + list(npcs):
+            try:
+                o._editor_view_hidden = _editor_entity_view_key(o) in editor_view_hidden_keys
+            except Exception:
+                pass
+
+    def _view_hidden_fn(o):
+        return _editor_entity_is_view_hidden(
+            o,
+            hide_large=editor_hide_large,
+            hidden_keys=editor_view_hidden_keys,
+            is_player=(o is player),
+        )
+
+    def _toggle_view_hide_selected():
+        targets = [o for o in selected_nodes if o is not player]
+        if not targets:
+            return
+        all_hidden = all(bool(getattr(o, "_editor_view_hidden", False)) for o in targets)
+        for o in targets:
+            try:
+                o._editor_view_hidden = not all_hidden
+            except Exception:
+                pass
+        _persist_editor_view_hide()
+
+    _apply_view_hide_flags_to_entities()
+
     selected_zone_idx = None
     is_zone_dragging = False
     zone_drag_offset = (0, 0)  # (mouse_x - rect_x, mouse_y - rect_y) in world coords
@@ -4465,13 +4714,16 @@ def editor_main():
 
     running = True
     baseball_bb_ui = {}
+    racing_rc_ui = {}
+    font_ui = {}
     while running:
         mx, my = pygame.mouse.get_pos()
         right_panel_w = 0 if edit_mode == "FLOW" else right_sidebar_w
         map_area_w = SCREEN_W - sidebar_w - right_panel_w
         sidebar_list_tooltip = None
         export_map_btn = pygame.Rect(int(sidebar_w + map_area_w - 80), 10, 72, 38)
-        merge_obj_btn = pygame.Rect(export_map_btn.x - 84, 10, 76, 38)
+        font_settings_btn = pygame.Rect(export_map_btn.x - 84, 10, 76, 38)
+        merge_obj_btn = pygame.Rect(font_settings_btn.x - 84, 10, 76, 38)
         pygame.event.pump()
         _editor_sync_text_input(
             _editor_wants_text_input(
@@ -4495,6 +4747,14 @@ def editor_main():
                     edit_mode == "BASEBALL"
                     and baseball_ed.get("show_zone_modal")
                     and baseball_ed.get("_edit_zone_field")
+                ),
+                racing_settings_active=bool(
+                    edit_mode == "RACING"
+                    and racing_ed.get("show_settings")
+                    and racing_ed.get("_edit_field")
+                ),
+                font_settings_active=bool(
+                    font_ed_state.get("show") and font_ed_state.get("_edit_field")
                 ),
             )
         )
@@ -4609,22 +4869,48 @@ def editor_main():
                     debug_last_key = str(getattr(event, "key", ""))
                 debug_last_key_t = pygame.time.get_ticks()
 
+            if font_ed.handle_keydown(font_ed_state, event):
+                continue
             if bb_ed.handle_keydown(baseball_ed, event, flow, map_id):
+                continue
+            if rc_ed.handle_keydown(racing_ed, event, flow, map_id):
                 continue
 
             if event.type == pygame.TEXTINPUT:
+                if font_ed.handle_textinput(font_ed_state, event.text):
+                    continue
                 if edit_mode == "BASEBALL" and bb_ed.handle_textinput(
                     baseball_ed, event.text, flow, map_id
                 ):
                     continue
+                if edit_mode == "RACING" and rc_ed.handle_textinput(racing_ed, event.text):
+                    continue
 
+            if font_ed_state.get("show"):
+                if font_ed.handle_settings_modal_event(
+                    font_ed_state, event, SCREEN_W, SCREEN_H, mx, my
+                ):
+                    continue
             if baseball_ed.get("show_settings"):
                 if bb_ed.handle_settings_modal_event(
                     baseball_ed, event, SCREEN_W, SCREEN_H, mx, my
                 ):
                     continue
+            if racing_ed.get("show_settings"):
+                if rc_ed.handle_settings_modal_event(
+                    racing_ed, event, SCREEN_W, SCREEN_H, mx, my
+                ):
+                    continue
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if font_ed_state.get("show"):
+                    ui = font_ui.get("settings") or font_ed.layout_settings_modal_ui(
+                        font_ed_state, SCREEN_W, SCREEN_H
+                    )
+                    if ui:
+                        font_ui["settings"] = ui
+                        font_ed.handle_settings_modal_click(font_ed_state, mx, my, ui)
+                    continue
                 if baseball_ed.get("show_settings"):
                     ui = baseball_bb_ui.get("settings") or bb_ed.layout_settings_modal_ui(
                         baseball_ed, SCREEN_W, SCREEN_H
@@ -4633,6 +4919,16 @@ def editor_main():
                         baseball_bb_ui["settings"] = ui
                         bb_ed.handle_settings_modal_click(
                             baseball_ed, mx, my, ui, flow, map_id
+                        )
+                    continue
+                if racing_ed.get("show_settings"):
+                    ui = racing_rc_ui.get("settings") or rc_ed.layout_settings_modal_ui(
+                        racing_ed, SCREEN_W, SCREEN_H
+                    )
+                    if ui:
+                        racing_rc_ui["settings"] = ui
+                        rc_ed.handle_settings_modal_click(
+                            racing_ed, mx, my, ui, flow, map_id
                         )
                     continue
                 if baseball_ed.get("show_zone_modal"):
@@ -4748,7 +5044,7 @@ def editor_main():
 
                 in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
-                    hit = _editor_pick_top_node(objs, npcs, wx, wy)
+                    hit = _editor_pick_top_node(objs, npcs, wx, wy, view_hidden_fn=_view_hidden_fn)
                     if hit is not None:
                         fk_tp = str(picking_step_target_field_key or "target")
                         step_fields[fk_tp] = str(getattr(hit, "name", "") or "")
@@ -4772,7 +5068,7 @@ def editor_main():
 
                 in_map_area = (sidebar_w < mx < SCREEN_W - right_panel_w) and (my > TOP_BAR_H)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_map_area:
-                    hit = _editor_pick_top_node(objs, npcs, wx, wy)
+                    hit = _editor_pick_top_node(objs, npcs, wx, wy, view_hidden_fn=_view_hidden_fn)
                     if hit is not None:
                         zone_fields["target"] = str(getattr(hit, "name", "") or "")
                     is_picking_zone_target = False
@@ -6500,6 +6796,10 @@ def editor_main():
                                 built = build_step_from_editor_fields(step_fields, t)
                                 if built:
                                     new_step = built
+                            elif t == "3D_ROTATE":
+                                built = build_step_from_editor_fields(step_fields, t)
+                                if built:
+                                    new_step = built
                             elif t == "SCREEN_FX":
                                 sk = _screen_fx_tab_kind(step_fields)
                                 new_step["kind"] = sk
@@ -6828,6 +7128,7 @@ def editor_main():
                             flow_entity_entries=flow_entity_entries,
                             flow_placed_collapsed=flow_placed_collapsed,
                             baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
+                            racing_state=racing_ed,
                         )
                         scroll_y_left = _sidebar_scroll_clamp(
                             scroll_y_left + _wheel_dy, _lch, _lt, sidebar_list_bottom
@@ -6890,6 +7191,7 @@ def editor_main():
                             flow_entity_entries=flow_entity_entries,
                             flow_placed_collapsed=flow_placed_collapsed,
                             baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
+                            racing_state=racing_ed,
                         )
                         scroll_y_left = _sidebar_scroll_clamp(scroll_y_left, _lch, _lt, sidebar_list_bottom)
                         _sb = _sidebar_sb_rect(0, sidebar_w, _lt, sidebar_list_bottom)
@@ -6953,7 +7255,7 @@ def editor_main():
                                         scroll_y_steps = _ns
                                 continue
 
-                # [1-1. 상단 모드 전환 바 클릭 — MAP / EVENT / FLOW / BASEBALL]
+                # [1-1. 상단 모드 전환 바 클릭 — MAP / EVENT / FLOW / BASEBALL / RACING]
                 if event.button == 1 and 0 < my < TOP_BAR_H and 0 < mx < sidebar_w:
                     new_mode = bb_ed.mode_from_click(my, TOP_BAR_H)
                     if new_mode:
@@ -6965,6 +7267,8 @@ def editor_main():
                             _flow_refresh_entity_list()
                         if edit_mode == "BASEBALL":
                             baseball_ed["settings_fields"] = bb_ed.load_settings_fields(flow, map_id)
+                        if edit_mode == "RACING":
+                            rc_ed.on_map_switch(racing_ed, flow, map_id)
 
                 # [FLOW] 뒤로 가기·차트 노드 클릭 (좌측 변수 리스트는 아래 [2]에서 처리)
                 elif (
@@ -7046,6 +7350,9 @@ def editor_main():
                     if export_map_btn.collidepoint(mx, my):
                         trigger_map_png_export()
                         continue
+                    if font_settings_btn.collidepoint(mx, my):
+                        font_ed.open_modal(font_ed_state)
+                        continue
                     if merge_obj_btn.collidepoint(mx, my):
                         only_objs = [o for o in selected_nodes if o in objs]
                         if edit_mode == "MAP" and map_tool == "OBJECTS" and only_objs and len(only_objs) == len(selected_nodes):
@@ -7077,7 +7384,9 @@ def editor_main():
                         cur_idx = map_idx
                         map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": map_list[cur_idx]})
                         scaled_cache.clear()
+                        _apply_view_hide_flags_to_entities()
                         bb_ed.on_map_switch(baseball_ed, flow, map_id, objs)
+                        rc_ed.on_map_switch(racing_ed, flow, map_id)
                         # 맵 변경 시에도 작업창에 꽉 차도록 줌 재계산 + 카메라 중앙
                         bg_w, bg_h = bg.get_width(), bg.get_height()
                         map_area_w = SCREEN_W - sidebar_w - right_sidebar_w
@@ -7114,6 +7423,19 @@ def editor_main():
                         if list_sel is not None:
                             selected_nodes = [list_sel]
                             selected_node = list_sel
+                        continue
+                    if edit_mode == "RACING" and my > TOP_BAR_H:
+                        rc_tops = rc_ed.left_list_tops(TOP_BAR_H)
+                        rc_ed.handle_left_click(
+                            racing_ed,
+                            mx,
+                            my,
+                            rc_tops,
+                            sidebar_w,
+                            flow,
+                            map_id,
+                            list_scroll=scroll_y_left,
+                        )
                         continue
                     if edit_mode == "MAP":
                         # MAP 모드: OBJECTS / ZONES / BGZONES / PRESENCE 토글
@@ -7167,6 +7489,31 @@ def editor_main():
                             box_select_start = None
                             box_select_current = None
                             continue
+
+                        # OBJECTS: 뷰 숨김 토글 (큰것 / 선택숨김 / 칩해제)
+                        if map_tool == "OBJECTS":
+                            _vw = max(40, (sidebar_w - 24) // 3)
+                            _vy = left_list_tops["map_zone_btn"]
+                            btn_hide_big = pygame.Rect(8, _vy, _vw, 28)
+                            btn_hide_sel = pygame.Rect(btn_hide_big.right + 4, _vy, _vw, 28)
+                            btn_hide_clr = pygame.Rect(btn_hide_sel.right + 4, _vy, _vw, 28)
+                            if btn_hide_big.collidepoint(mx, my):
+                                editor_hide_large = not editor_hide_large
+                                _persist_editor_view_hide()
+                                continue
+                            if btn_hide_sel.collidepoint(mx, my):
+                                _toggle_view_hide_selected()
+                                continue
+                            if btn_hide_clr.collidepoint(mx, my):
+                                editor_view_hidden_keys.clear()
+                                editor_hide_large = False
+                                for o in list(objs) + list(npcs):
+                                    try:
+                                        o._editor_view_hidden = False
+                                    except Exception:
+                                        pass
+                                _persist_editor_view_hide()
+                                continue
 
                         # MAP 모드: Add Event Box 버튼 클릭
                         add_zone_btn = pygame.Rect(8, left_list_tops["map_zone_btn"], sidebar_w - 16, 28)
@@ -7421,6 +7768,7 @@ def editor_main():
                                                 save_data={"current_map": preview_map}
                                             )
                                             scaled_cache.clear()
+                                            _apply_view_hide_flags_to_entities()
                                             _flow_refresh_entity_list()
                                             print(f"Map Switched to: {preview_map} for Event: {eid}")
                                         print(f"Event Selected: {eid}")
@@ -7607,7 +7955,7 @@ def editor_main():
                                                 step_fields["instant"] = "true" if ins else ""
                                             else:
                                                 step_fields["instant"] = str(ins or "")
-                                            if t in ("TILT", "SHEAR", "ZOOM"):
+                                            if t in ("TILT", "SHEAR", "ZOOM", "3D_ROTATE"):
                                                 fill_editor_fields_from_step(step_fields, step, t)
                                             elif t == "SCREEN_FX":
                                                 step_fields["fx_on"] = str(step.get("on", True))
@@ -7970,6 +8318,20 @@ def editor_main():
                                 if consumed:
                                     continue
 
+                        elif edit_mode == "RACING" and in_map_area:
+                            px, py = editor_snap_pick_world_xy(
+                                wx, wy, GRID_SIZE, is_shift_pressed
+                            )
+                            if rc_ed.handle_map_click(
+                                racing_ed,
+                                px,
+                                py,
+                                flow,
+                                map_id,
+                                shift=bool(is_shift_pressed),
+                            ):
+                                continue
+
                         elif edit_mode == "MAP" and in_map_area:
                             # MAP / ZONES: 이벤트 박스 선택/드래그
                             if map_tool == "ZONES":
@@ -8070,7 +8432,7 @@ def editor_main():
                                     npcs.append(ch)
 
                             elif map_tool == "OBJECTS":
-                                hit = _editor_pick_top_node(objs, npcs, wx, wy)
+                                hit = _editor_pick_top_node(objs, npcs, wx, wy, view_hidden_fn=_view_hidden_fn)
                                 if is_shift_pressed and hit:
                                     if hit in selected_nodes:
                                         selected_nodes = [o for o in selected_nodes if o is not hit]
@@ -8119,6 +8481,8 @@ def editor_main():
 
 
             if event.type == pygame.MOUSEBUTTONUP:
+                if edit_mode == "RACING":
+                    rc_ed.handle_map_mouseup(racing_ed)
                 # [수정] 마우스를 떼도 selected_node는 유지 (ESC로 지우기 위해)
                 # 드래그/팬 상태만 해제 (우클릭 팬은 3번 버튼 기준)
                 if event.button == 1:
@@ -8130,7 +8494,9 @@ def editor_main():
                                 if box_select_current is not None
                                 else box_select_start
                             )
-                            picked = _editor_nodes_in_world_rect(objs, npcs, x1, y1, x2, y2)
+                            picked = _editor_nodes_in_world_rect(
+                                objs, npcs, x1, y1, x2, y2, view_hidden_fn=_view_hidden_fn
+                            )
                             if abs(x2 - x1) < 4 and abs(y2 - y1) < 4 and not picked:
                                 obj_sprite_tilt_active = False
                                 obj_height_active = False
@@ -8175,12 +8541,21 @@ def editor_main():
                                 baseball_ed["zone_edit_node"] = selected_node
                         box_select_start = None
                         box_select_current = None
+                    _was_obj_drag = bool(is_dragging)
                     is_dragging = False
                     is_zone_dragging = False
                     is_bgzone_dragging = False
                     multi_drag_leader = None
                     multi_drag_origins = None
                     multi_drag_anchor = None
+                    # 선택숨김 칩을 옮긴 뒤 좌표 키 갱신
+                    if (
+                        _was_obj_drag
+                        and edit_mode == "MAP"
+                        and map_tool == "OBJECTS"
+                        and any(bool(getattr(o, "_editor_view_hidden", False)) for o in list(objs) + list(npcs))
+                    ):
+                        _persist_editor_view_hide()
                 if event.button == 3:
                     is_panning = False
                     flow_panning = False
@@ -8322,6 +8697,12 @@ def editor_main():
             
             
             
+            if event.type == pygame.MOUSEMOTION and edit_mode == "RACING" and racing_ed.get("dragging"):
+                _rwx, _rwy = get_real_pos(event.pos[0], event.pos[1])
+                _rsx, _rsy = editor_snap_pick_world_xy(_rwx, _rwy, GRID_SIZE, is_shift_pressed)
+                rc_ed.handle_map_drag(racing_ed, _rsx, _rsy)
+                continue
+
             if event.type == pygame.MOUSEMOTION and sidebar_left_sb_drag:
                 _lt, _lch = _editor_left_list_metrics(
                     edit_mode,
@@ -8338,6 +8719,7 @@ def editor_main():
                     flow_entity_entries=flow_entity_entries,
                     flow_placed_collapsed=flow_placed_collapsed,
                     baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
+                    racing_state=racing_ed,
                 )
                 _sb = _sidebar_sb_rect(0, sidebar_w, _lt, sidebar_list_bottom)
                 _ui = _step_overlay_scrollbar_layout(_sb, SCREEN_H - _lt, _lch, -scroll_y_left)
@@ -8400,6 +8782,7 @@ def editor_main():
                         flow_entity_entries=flow_entity_entries,
                         flow_placed_collapsed=flow_placed_collapsed,
                         baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
+                        racing_state=racing_ed,
                     )
                     scroll_y_left = _sidebar_scroll_clamp(scroll_y_left, _lch, _lt, sidebar_list_bottom)
                     continue
@@ -8514,6 +8897,20 @@ def editor_main():
                     editor_smooth_sidebar_thumbs = not editor_smooth_sidebar_thumbs
                     sidebar_thumb_cache.clear()
 
+                # OBJECTS: H = 선택 오브젝트 스프라이트 숨김↔이름칩 (편집 전용)
+                if (
+                    event.key == pygame.K_h
+                    and edit_mode == "MAP"
+                    and map_tool == "OBJECTS"
+                    and not (
+                        show_step_config
+                        or show_zone_config
+                        or font_ed_state.get("show")
+                    )
+                ):
+                    _toggle_view_hide_selected()
+                    continue
+
                 # [S] 키로 통합 저장
                 if event.key == pygame.K_s:
                     # 1. 맵 데이터 저장 (world_data.json)
@@ -8521,6 +8918,8 @@ def editor_main():
                         bb_ed.apply_settings_fields(
                             flow, map_id, baseball_ed.get("settings_fields") or {}
                         )
+                    if edit_mode == "RACING":
+                        rc_ed.commit_path_to_world(racing_ed, flow, map_id)
                     flow.save_editor_data(map_id, objs, npcs)
                     
                     # 2. 이벤트 데이터 저장 (events.json)
@@ -8697,6 +9096,14 @@ def editor_main():
 
         render_pool = sorted(objs + npcs + [player], key=lambda x: (getattr(x, 'layer', 0), _ysort_y(x)))
         viewport_rect = pygame.Rect(0, 0, map_area_w, map_view_h)
+        try:
+            from entity_defs import _instance_labels as _ed_inst_labels_fn
+
+            _editor_inst_labs = _ed_inst_labels_fn(
+                [x for x in (objs + npcs) if x is not None]
+            )
+        except Exception:
+            _editor_inst_labs = {}
 
         for o in render_pool:
                 orig_w, orig_h = o.image.get_size()
@@ -8748,6 +9155,12 @@ def editor_main():
 
                 if on_map:
                     hidden = _editor_entity_play_hidden(o)
+                    view_chip = (
+                        edit_mode == "MAP"
+                        and map_tool == "OBJECTS"
+                        and (not hidden)
+                        and _view_hidden_fn(o)
+                    )
                     skip_bb_ellipse = (
                         bb_ed.is_baseball_map(map_id)
                         and edit_mode in ("MAP", "BASEBALL")
@@ -8762,10 +9175,25 @@ def editor_main():
                             final_y,
                             selected=(o in selected_nodes),
                         )
+                    elif view_chip:
+                        # 큰/선택 숨김: 스프라이트 대신 이름 칩 (뒤 배치물 편집용)
+                        _lab = _editor_inst_labs.get(id(o)) or getattr(o, "name", "?")
+                        _editor_draw_object_name_chip(
+                            map_surf,
+                            o,
+                            float(foot_px_x),
+                            float(anchor_y_scr),
+                            zoom_level,
+                            selected=(o in selected_nodes),
+                            label=_lab,
+                            font=font,
+                        )
                     elif not skip_bb_ellipse:
                         map_surf.blit(s_img, (final_x, final_y))
+                        if isinstance(o, FieldItem):
+                            draw_object_text_label(map_surf, o, float(foot_px_x), float(anchor_y_scr), zoom_level)
                     if o in selected_nodes:
-                        if not hidden and not skip_bb_ellipse:
+                        if not hidden and not view_chip and not skip_bb_ellipse:
                             pygame.draw.rect(
                                 map_surf,
                                 (255, 255, 0),
@@ -9031,6 +9459,23 @@ def editor_main():
                 pk = str(baseball_ed.get("pick_xy_key") or "")
                 hint = font.render(f"맵 클릭: {pk} 좌표", True, (255, 255, 120))
                 map_surf.blit(hint, (12, 12))
+
+        if edit_mode == "RACING":
+
+            def _rc_w2m(wx, wy):
+                return world_to_map_surface_xy(
+                    bg_blit_x,
+                    bg_blit_y,
+                    float(wx),
+                    float(wy),
+                    bg_w,
+                    bg_h,
+                    sw_bg,
+                    sh_bg,
+                    0.0,
+                )
+
+            rc_ed.draw_map_overlay(map_surf, racing_ed, world_to_xy=_rc_w2m, font=font)
 
         # 드래그 중인 이벤트 박스 프리뷰
         if is_selecting_zone_rect and zone_drag_start and zone_drag_end:
@@ -9346,6 +9791,10 @@ def editor_main():
         pygame.draw.rect(screen, merge_bg, merge_obj_btn, border_radius=5)
         pygame.draw.rect(screen, merge_bd, merge_obj_btn, 2, border_radius=5)
         screen.blit(font.render("MERGE", True, merge_fg), (merge_obj_btn.x + 12, merge_obj_btn.y + 10))
+        font_btn_bg = (75, 60, 90) if font_ed_state.get("show") else (60, 55, 80)
+        pygame.draw.rect(screen, font_btn_bg, font_settings_btn, border_radius=5)
+        pygame.draw.rect(screen, (200, 170, 230), font_settings_btn, 2, border_radius=5)
+        screen.blit(font.render("FONT", True, (245, 240, 255)), (font_settings_btn.x + 14, font_settings_btn.y + 10))
         pygame.draw.rect(screen, (55, 75, 95), export_map_btn, border_radius=5)
         pygame.draw.rect(screen, (140, 170, 210), export_map_btn, 2, border_radius=5)
         screen.blit(font.render("PNG", True, (240, 248, 255)), (export_map_btn.x + 18, export_map_btn.y + 10))
@@ -9405,6 +9854,25 @@ def editor_main():
                 pygame.draw.rect(screen, (50, 80, 50), add_zone_btn)
                 pygame.draw.rect(screen, (110, 160, 110), add_zone_btn, 1)
                 screen.blit(font.render("+ ADD EVENT BOX", True, (255, 255, 255)), (add_zone_btn.x + 10, add_zone_btn.y + 6))
+
+            # OBJECTS: 뷰 숨김 — 큰것 / 선택숨김(H) / 전부보임
+            if map_tool == "OBJECTS":
+                _vw = max(40, (sidebar_w - 24) // 3)
+                _vy = left_list_tops["map_zone_btn"]
+                btn_hide_big = pygame.Rect(8, _vy, _vw, 28)
+                btn_hide_sel = pygame.Rect(btn_hide_big.right + 4, _vy, _vw, 28)
+                btn_hide_clr = pygame.Rect(btn_hide_sel.right + 4, _vy, _vw, 28)
+                for _b, _on, _lab in (
+                    (btn_hide_big, editor_hide_large, "큰것"),
+                    (btn_hide_sel, bool(editor_view_hidden_keys), "선택"),
+                    (btn_hide_clr, False, "보임"),
+                ):
+                    pygame.draw.rect(screen, (70, 70, 70), _b)
+                    if _on:
+                        pygame.draw.rect(screen, (255, 215, 0), _b, 2)
+                    else:
+                        pygame.draw.rect(screen, (100, 100, 100), _b, 1)
+                    screen.blit(font.render(_lab, True, (255, 255, 255)), (_b.x + 6, _b.y + 5))
 
             # MAP / BGZONES: Add BG Box 버튼
             add_bgzone_btn = pygame.Rect(8, left_list_tops["map_bgzone_btn"], sidebar_w - 16, 28)
@@ -9578,6 +10046,19 @@ def editor_main():
                 list_scroll=scroll_y_left,
             )
 
+        elif edit_mode == "RACING":
+            rc_ed.draw_left_panel(
+                screen,
+                font,
+                title_font,
+                racing_ed,
+                map_id,
+                TOP_BAR_H,
+                sidebar_w,
+                map_view_h,
+                list_scroll=scroll_y_left,
+            )
+
         elif edit_mode == "FLOW":
             screen.blit(
                 title_font.render("캐릭터 / 오브젝트 / 이벤트박스", True, (255, 230, 180)),
@@ -9699,6 +10180,7 @@ def editor_main():
             flow_entity_entries=flow_entity_entries,
             flow_placed_collapsed=flow_placed_collapsed,
             baseball_tool=str(baseball_ed.get("tool") or "ZONES"),
+            racing_state=racing_ed,
         )
         scroll_y_left, _ = _editor_paint_sidebar_scrollbar(
             screen, 0, sidebar_w, _lt_sb, sidebar_list_bottom, _lch_sb, scroll_y_left
@@ -10026,9 +10508,19 @@ def editor_main():
             if len(selected_nodes) == 1:
                 status_txt += f" | SELECTED: {selected_nodes[0].name}"
                 if edit_mode == "MAP" and map_tool == "OBJECTS":
-                    status_txt += " | 높이·틸트: 바로 위 회색 줄"
+                    status_txt += " | 높이·틸트: 바로 위 회색 줄 | H:선택숨김"
             else:
                 status_txt += f" | SELECTED x{len(selected_nodes)}"
+                if edit_mode == "MAP" and map_tool == "OBJECTS":
+                    status_txt += " | H:선택숨김"
+        if edit_mode == "MAP" and map_tool == "OBJECTS":
+            _vh_bits = []
+            if editor_hide_large:
+                _vh_bits.append("큰것칩")
+            if editor_view_hidden_keys:
+                _vh_bits.append(f"선택칩×{len(editor_view_hidden_keys)}")
+            if _vh_bits:
+                status_txt += " | VIEW:" + "+".join(_vh_bits)
         if edit_mode == "FLOW" and 0 <= flow_selected_entity_idx < len(flow_entity_entries):
             se = flow_entity_entries[flow_selected_entity_idx]
             status_txt += f" | FLOW: {se.get('label', se.get('name', ''))}"
@@ -10205,6 +10697,19 @@ def editor_main():
             screen.blit(ov, (0, 0))
             baseball_bb_ui["zone"] = bb_ed.draw_zone_modal(
                 screen, font, baseball_ed, SCREEN_W, SCREEN_H
+            )
+
+        if racing_ed.get("show_settings"):
+            ov = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            ov.fill((0, 0, 0, 160))
+            screen.blit(ov, (0, 0))
+            racing_rc_ui["settings"] = rc_ed.draw_settings_modal(
+                screen, font, racing_ed, SCREEN_W, SCREEN_H
+            )
+
+        if font_ed_state.get("show"):
+            font_ui["settings"] = font_ed.draw_settings_modal(
+                screen, font, font_ed_state, SCREEN_W, SCREEN_H
             )
 
         # --- [UI] 이벤트 박스(event_zones) 설정 팝업창 ---

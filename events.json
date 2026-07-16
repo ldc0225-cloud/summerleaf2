@@ -26,7 +26,7 @@
             "steps": [
                 { "type": "FADEOUT", "val": 1.0 },
                 { "type": "WAIT", "val": 1.0 },
-                { "type": "MAP", "target": "bg_jjangpu", "pos": [667, 1338], "dir": "left" },
+                { "type": "MAP", "target": "bg_jjangpu", "pos": [567, 2338], "dir": "left" },
                 { "type": "FADEIN", "val": 1.0 }
             ],
             "result": {
@@ -86,10 +86,12 @@
         "ev_jjangpu_fishing": {
             "title": "호숫가 낚시",
             "steps": [
-                { "type": "MOVE", "target": "player", "pos": [592, 1012], "dir": "down", "force": true, "wait": true },
+                { "type": "FADEOUT", "val": 1.5 },
+                { "type": "MOVE", "target": "player", "pos": [464, 1088], "dir": "down", "instant": true, "wait": true },
                 { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 555.0, "y": 1104.0, "smooth": true, "duration_sec": 0.5 },
+                { "type": "FADEIN", "val": 1.5 },
                 { "type": "INTERVAL", "val": 1.0 },
-                { "type": "OVERLAY_UI", "action": "show", "content": "button", "text": "낚시 그만두기", "font": "default", "size": 14, "color": "255,255,255", "overlay_id": "fishing_exit", "anchor": "right", "margin_x": 10, "margin_y": 36, "clickable": true, "click_action": "stop_fishing", "persist": true, "hold_forever": true, "mode": "fade", "appear": 0.15, "disappear": 0.2 },
+                { "type": "OVERLAY_UI", "action": "show", "content": "button", "text": "낚시 그만두기", "font": "default", "size": 10, "color": "255,255,255", "overlay_id": "fishing_exit", "anchor": "right", "margin_x": 10, "margin_y": 10, "clickable": true, "click_action": "stop_fishing", "persist": true, "hold_forever": true, "mode": "fade", "appear": 0.15, "disappear": 0.2 },
                 { "type": "DEV_CMD", "cmd": "start_fishing", "pond": "jjangpu_water1", "await_tap": true }
             ],
             "result": {
@@ -139,6 +141,16 @@
             "result": {
                 "mainprogress": ""
             },
+            "map_id": "bg_jjangpu"
+        },
+        "ev_shake_test": {
+            "title": "흔들림 테스트",
+            "steps": [
+                { "type": "SCREEN_FX", "kind": "shake", "on": true, "amp_px": 7.0, "freq_hz": 14.0 },
+                { "type": "INTERVAL", "val": 3.0 },
+                { "type": "SCREEN_FX", "kind": "shake", "on": false, "amp_px": 7.0, "freq_hz": 14.0 }
+            ],
+            "result": {},
             "map_id": "bg_jjangpu"
         }
     },
@@ -194,6 +206,15 @@
             "title": "핫키 K: 쉬어 디버그",
             "steps": [
                 { "type": "DEV_CMD", "cmd": "toggle_shear_debug" }
+            ],
+            "result": {}
+        },
+        "ev_hotkey_3d_rotate": {
+            "map_id": "__GLOBAL__",
+            "trigger": "hotkey",
+            "title": "핫키 Q: 3D_ROTATE 토글",
+            "steps": [
+                { "type": "DEV_CMD", "cmd": "toggle_3d_rotate" }
             ],
             "result": {}
         },
@@ -301,17 +322,18 @@
                 { "type": "MUSIC_PLAY", "music": "demo_bgm", "fade_in": 1.0, "queue": true, "loop": true, "volume": 0.8 },
                 { "type": "MAP", "target": "bg_jjangpu", "dir": "right" },
                 { "type": "SCREEN_FX", "kind": "cloud", "on": true, "dir": "SE" },
-                { "type": "SCREEN_FX", "kind": "rain", "on": true, "density": 0.35, "speed": 100.0, "angle": 15.0, "drop_len": 10, "alpha": 255, "color": "255,255,255" },
-                { "type": "CHANGE", "target": "player", "to": "c2" },
+                { "type": "CHANGE", "target": "player", "to": "ppiyak_a" },
                 { "type": "MOVE", "target": "player", "pos": [1090, 1828], "dir": "right", "instant": true },
                 { "type": "CAMERA", "mode": "follow_player", "smooth": true, "duration_sec": 0.5 },
-                { "type": "PLACE", "target": "c10", "pos": [1090, 1862], "dir": "right" },
-                { "type": "PLACE", "target": "cc1", "pos": [1088, 1890], "dir": "right" },
+                { "type": "PLACE", "target": "girl1_k", "pos": [1090, 1862], "dir": "right" },
+                { "type": "PLACE", "target": "girl2_k", "pos": [1088, 1890], "dir": "right" },
+                { "type": "PLACE", "target": "girl3_k", "pos": [1088, 1920], "dir": "left" },
                 { "type": "WAIT", "val": 0.4 },
                 { "type": "FADEIN", "val": 1.0 },
                 { "type": "EVT_STOP_BEGIN", "action": "break_loop" },
-                { "type": "FOLLOW_START", "follower": "c10", "leader": "player", "speed": 0.5 },
-                { "type": "FOLLOW_START", "follower": "cc1", "leader": "c10", "speed": 0.5 },
+                { "type": "FOLLOW_START", "follower": "girl1_k", "leader": "player", "speed": 0.5 },
+                { "type": "FOLLOW_START", "follower": "girl2_k", "leader": "girl1_k", "speed": 0.5 },
+                { "type": "FOLLOW_START", "follower": "girl3_k", "leader": "girl2_k", "speed": 1.0 },
                 { "type": "WAIT", "val": 1.0 },
                 { "type": "OVERLAY_UI", "action": "show", "content": "text", "text": "짱짱어드벤처", "font": "logo", "size": 50, "color": "255,255,255", "overlay_id": "TITLE", "anchor": "center", "margin_x": 0, "margin_y": 0, "mode": "fade", "scroll_enter": "left", "appear": 1.5, "hold": 5.0, "disappear": 1.5 },
                 { "type": "OVERLAY_UI", "action": "show", "content": "text", "text": "짱짱어드벤처", "font": "logo", "size": 16, "color": "255,255,255", "overlay_id": "TITLE", "anchor": "top_right", "margin_x": 20, "margin_y": 10, "mode": "scroll", "scroll_enter": "left", "appear": 1.0, "hold_forever": true, "persist": true },
@@ -392,24 +414,24 @@
                 { "type": "PLACE", "target": "carrot", "pos": [560, 2320], "dir": "left" },
                 { "type": "PLACE", "target": "player", "pos": [560, 2352], "dir": "left" },
                 { "type": "FADEIN", "val": 1.0 },
-                { "type": "MOVE", "target": "carrot", "pos": [ [560, 2144], [560, 2112] ], "dir": "right", "speed": 1.0, "move_sync": "demo_walk" },
+                { "type": "MOVE", "target": "carrot_a", "pos": [ [560, 2144], [560, 2112] ], "dir": "right", "speed": 1.0, "move_sync": "demo_walk" },
                 { "type": "MOVE", "target": "player", "pos": [ [560, 2144], [592, 2112] ], "dir": "right", "speed": 1.0, "move_sync": "demo_walk" },
                 { "type": "PLACE", "target": "player", "pos": [592, 2112], "dir": "left" },
-                { "type": "SAY", "text": "여름아, 잘 다녀 올 수 있지?", "bubble_target": "carrot" },
+                { "type": "SAY", "text": "여름아, 잘 다녀 올 수 있지?", "bubble_target": "carrot_a" },
                 { "type": "SAY", "text": "아..엄마 같이 들어가서 놀자~~", "bubble_target": "player" },
-                { "type": "SAY", "text": "그건 안 돼 여 ㄹ..", "auto": true, "val": 2.0, "bubble_target": "carrot" },
+                { "type": "SAY", "text": "그건 안 돼 여 ㄹ..", "auto": true, "val": 2.0, "bubble_target": "carrot_a" },
                 { "type": "SAY", "text": "알았어! 다녀올게~ 와하하하~", "bubble_target": "player" },
                 { "type": "CAMERA", "mode": "follow_player", "smooth": true, "duration_sec": 0.5 },
                 { "type": "MOVE", "target": "player", "pos": [560, 1922], "dir": "left", "speed": 2.0, "wait": true, "move_anim": "run" },
                 { "type": "PLACE", "target": "player", "dir": "left", "appear": "fade", "action": "remove" },
                 { "type": "WAIT", "val": 1.0 },
-                { "type": "CAMERA", "mode": "follow_entity", "smooth": true, "duration_sec": 0.3, "target": "carrot" },
+                { "type": "CAMERA", "mode": "follow_entity", "slot": "default", "target": "carrot_a", "smooth": true, "duration_sec": 0.3 },
                 { "type": "WAIT", "val": 1.0 },
-                { "type": "SAY", "text": "에휴..말썽쟁이~", "bubble_target": "carrot" },
+                { "type": "SAY", "text": "에휴..말썽쟁이~", "bubble_target": "carrot_a" },
                 { "type": "WAIT", "val": 0.5 },
                 { "type": "CAMERA", "mode": "lock_here", "smooth": true, "duration_sec": 1 },
-                { "type": "MOVE", "target": "carrot", "pos": [560, 2352], "dir": "left", "wait": true },
-                { "type": "PLACE", "target": "carrot", "dir": "left", "action": "remove" },
+                { "type": "MOVE", "target": "carrot_a", "pos": [560, 2352], "dir": "left", "wait": true },
+                { "type": "PLACE", "target": "carrot_a", "dir": "left", "action": "remove" },
                 { "type": "WAIT", "val": 1.0 },
                 { "type": "ZOOM", "on": false, "strength": 0.0, "duration_sec": 1.0 },
                 { "type": "CAMERA", "mode": "fixed", "smooth": true, "duration_sec": 1.5, "x": 736.0, "y": 2208.0 },
@@ -427,7 +449,7 @@
                 { "type": "PLACE", "target": "escape02", "dir": "left", "action": "remove" },
                 { "type": "ANIM_ONCE", "name": "escape03", "pos": [800, 2016] },
                 { "type": "PLACE", "target": "flower1_", "pos": [800, 1986], "dir": "left", "appear": "fade" },
-                { "type": "ENTITY_FX", "target": "flower1_", "mode": "pulse", "action": "start", "color": "255,220,100", "alpha": 160, "cycle_sec": 1.0 },
+                { "type": "ENTITY_FX", "target": "flower1_", "mode": "pulse", "action": "start", "color": "255,220,100", "alpha": 160, "cycle_sec": 1.0, "persist": true },
                 { "type": "WAIT", "val": 2.0 },
                 { "type": "CAMERA", "mode": "fixed", "slot": "default", "x": 560.0, "y": 1920.0, "smooth": true, "duration_sec": 0.5 },
                 { "type": "PLACE", "target": "player", "pos": [560, 1920], "dir": "left", "appear": "fade" },
@@ -451,23 +473,10 @@
             "condition": "mainprogress == 010100",
             "priority": 25
         },
-        "ev_flower1_4": {
-            "title": "FLOWER1 4 요정 등장",
-            "steps": [
-                { "type": "MOVE", "target": "player", "pos": [624, 2144], "dir": "right" },
-                { "type": "CHANGE", "target": "flower_fairy1", "to": "fairy1", "fade": 0.8 },
-                { "type": "TUNE", "target": "fairy1", "height": 15.0 },
-                { "type": "ZOOM", "on": true, "strength": 0.8, "duration_sec": 0.0, "target": "fairy1", "persist": true }
-            ],
-            "result": {},
-            "map_id": "__GLOBAL__",
-            "trigger": "manual",
-            "condition": "progress_flower1_1==1004",
-            "priority": 100
-        },
         "ev_baseball_enter": {
             "title": "야구장 입장",
             "steps": [
+                { "type": "SAY", "who": "nachos_a", "text": "야구장으로 출발~", "val": 0.0 },
                 { "type": "FADEOUT", "val": 0.5 },
                 { "type": "WAIT", "val": 1.0 },
                 { "type": "TUNE", "target": "player", "visible": false },
@@ -517,6 +526,84 @@
             "map_id": "__GLOBAL__",
             "trigger": "manual",
             "priority": 50
+        },
+        "ev_racing_enter": {
+            "title": "레이스 입장(테스트)",
+            "steps": [
+                { "type": "FADEOUT", "val": 0.45 },
+                { "type": "WAIT", "val": 0.35 },
+                { "type": "MAP", "target": "bg_circurt01", "pos": [752, 1184], "dir": "right" },
+                { "type": "SHEAR", "on": false, "strength": 0.0, "duration_sec": 0.2 },
+                { "type": "WAIT", "val": 0.35 },
+                { "type": "FADEIN", "val": 0.45 },
+                { "type": "OVERLAY_UI", "action": "show", "content": "button", "text": "경기 중지", "overlay_id": "racing_exit", "clickable": true, "click_action": "stop_racing", "persist": true, "hold_forever": true, "anchor": "top_left", "margin_x": 8, "margin_y": 8, "size": 10 },
+                { "type": "DEV_CMD", "cmd": "start_racing", "map": "bg_circurt01", "return_map": "bg_jjangpu", "return_pos": [850, 2310] }
+            ],
+            "result": {},
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "priority": 50
+        },
+        "ev_racing_exit": {
+            "title": "레이스 퇴장",
+            "steps": [
+                { "type": "FADEOUT", "val": 0.4 },
+                { "type": "WAIT", "val": 0.3 },
+                { "type": "3D_ROTATE", "on": false, "strength": 0.0, "duration_sec": 0.2 },
+                { "type": "OVERLAY_UI", "action": "remove", "overlay_id": "racing_exit" },
+                { "type": "DEV_CMD", "cmd": "return_from_racing" },
+                { "type": "WAIT", "val": 0.35 },
+                { "type": "FADEIN", "val": 0.4 }
+            ],
+            "result": {},
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "priority": 50
+        },
+        "ev_flower1_4": {
+            "title": "FLOWER1 4 요정 등장",
+            "steps": [
+                { "type": "MOVE", "target": "player", "pos": [624, 2144], "dir": "right" },
+                { "type": "TUNE", "target": "flower_fairy1", "height": 8.0, "visible": false },
+                { "type": "CHANGE", "target": "flower_fairy1", "to": "fairy1", "fade": 0.8 },
+                { "type": "ZOOM", "on": true, "strength": 0.8, "duration_sec": 0.0, "target": "fairy1" },
+                { "type": "TUNE", "target": "fairy1", "visible": true },
+                { "type": "CONDITION", "condition": "progress_flower1_1==1005" },
+                { "type": "SAY", "who": "fairy1", "text": "얼른 씨앗으로 변해버린 요정들을 찾아야 해!", "val": 0.0 },
+                { "type": "SAY", "who": "fairy1", "text": "어디에서 찾을 수 있을까....", "val": 0.0 },
+                { "type": "CONDITION_SKIP" },
+                { "type": "CONDITION", "condition": "progress_flower1_1==1004" },
+                { "type": "SAY", "who": "flower_fairy1", "text": "도와줘서 고마워! 넌 이름이 뭐니?", "val": 0.0 },
+                { "type": "SAY", "who": "player", "text": "응 난 여름이야. 넌 어쩌다 짱짱 앞마당에 떨어져 있었던 거야?", "val": 0.0 },
+                { "type": "SAY", "who": "flower_fairy1", "text": "응 그건 말이지....", "val": 0.0 },
+                { "type": "FADEOUT", "val": 1.0 },
+                { "type": "WAIT", "val": 2.0 },
+                { "type": "FADEIN", "val": 1.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0100.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0101.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0102.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0103.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0104.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0105.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0106.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0107.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "picture": "intro01/intro0108.png", "transition": "fade", "hi_res": true, "auto": false, "val": 3.0 },
+                { "type": "SCREEN", "auto": true, "val": 1.0, "action": "remove" },
+                { "type": "SAY", "who": "fairy1", "text": "그래서 이렇게저렇게 된 거야." },
+                { "type": "SAY", "who": "fairy1", "text": "우선 씨앗이 되어 흩어진 요정들을 찾는 게 우선이야. 방법을 찾아 보자.", "val": 0.0 },
+                { "type": "SAY", "who": "fairy1", "text": "그동안 나는 쉬고 있을게.", "val": 0.0 },
+                { "type": "CONDITION_SKIP" },
+                { "type": "TUNE", "target": "fairy1", "visible": false },
+                { "type": "CHANGE", "target": "fairy1", "to": "flower_fairy1", "fade": 0.8 },
+                { "type": "TUNE", "target": "flower_fairy1", "height": 0.0, "visible": true }
+            ],
+            "result": {
+                "progress_flower1_1": 1005
+            },
+            "map_id": "__GLOBAL__",
+            "trigger": "manual",
+            "condition": "progress_flower1_1==1004",
+            "priority": 100
         }
     },
     "SYNC": {},

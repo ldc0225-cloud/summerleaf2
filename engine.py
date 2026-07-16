@@ -28,6 +28,7 @@ from field_runtime import (
     effect_now_ms,
     fade_alpha_delta,
     parse_camera_step,
+    parse_rotate3d_step,
     parse_shear_step,
     parse_tilt_step,
     parse_zoom_step,
@@ -170,7 +171,7 @@ class SwingPrototypeEntity:
         except Exception:
             pass
 
-    def draw(self, screen, cam_x, cam_y, zoom=1.0, jump_shadow_mode=None, y_transform=None, x_offset_fn=None, sprite_perspective_q=None, shear_lod=False):
+    def draw(self, screen, cam_x, cam_y, zoom=1.0, jump_shadow_mode=None, y_transform=None, x_offset_fn=None, sprite_perspective_q=None, shear_lod=False, x_scale_fn=None, x_shift_fn=None, pivot_xy=None, cam_angle_rad=0.0, mode7_ctx=None, view_w=None):
         # cam_x/cam_y는 main에서 넘기는 cam_draw_x/cam_draw_y
         global _SWING_IMG_IDLE, _SWING_IMG_FORWARD, _SWING_IMG_BACK
         if not self.visible:
@@ -232,6 +233,7 @@ class SwingPrototypeEntity:
                     y_transform=y_transform,
                     x_offset_fn=x_offset_fn,
                     entity_scale_mul=1.0,
+                    mode7_ctx=mode7_ctx,
                 )
         except Exception:
             pass
@@ -432,6 +434,7 @@ def draw_swing_prototype(
                     y_transform=y_transform,
                     x_offset_fn=x_offset_fn,
                     entity_scale_mul=1.0,
+                    mode7_ctx=None,
                 )
         except Exception:
             pass
@@ -831,18 +834,32 @@ def _sprite_cache_put(key, surf):
 
 
 def get_cached_scaled_sprite(image, eff_zoom: float, sprite_perspective_q=None, sprite_tilt: float = 1.0):
-    """Scale + perspective-squash with caching (best-effort)."""
+    """
+    Scale + perspective-squash with caching (best-effort).
+
+    SPRITE_SCALE_STEP (원근 크기 점프 관련):
+      >0 이면 zoom 을 그 간격으로 양자화 → 예: 0.1 이면 배율이 10% 단위로만 바뀌어
+      가까이 올수록 탁탁 커지는 느낌이 남. 0 이면 픽셀 크기만 반올림(가장 연속적).
+    SPRITE_SCALE_SMOOTH: 외곽 보간(smoothscale). 크기 점프와 무관. 기본 False(nearest).
+    """
     if image is None:
         return None
     try:
-        step = float(CONFIG.get("SPRITE_SCALE_STEP", 0.1))
+        step = float(CONFIG.get("SPRITE_SCALE_STEP", 0.0) or 0.0)
     except Exception:
-        step = 0.1
-    step = max(0.01, min(0.5, step))
+        step = 0.0
+    step = max(0.0, min(0.5, step))
     try:
-        zq = round(round(float(eff_zoom) / step) * step, 4)
+        z_raw = float(eff_zoom)
     except Exception:
-        zq = float(eff_zoom)
+        z_raw = 1.0
+    if step > 1e-9:
+        try:
+            zq = round(round(z_raw / step) * step, 4)
+        except Exception:
+            zq = z_raw
+    else:
+        zq = z_raw
     try:
         iw, ih = image.get_size()
     except Exception:
@@ -857,15 +874,25 @@ def get_cached_scaled_sprite(image, eff_zoom: float, sprite_perspective_q=None, 
         st = round(float(sprite_tilt), 4)
     except Exception:
         st = 1.0
-    key = ("spr", id(image), sw, sh, pq, st)
+    try:
+        use_smooth = bool(CONFIG.get("SPRITE_SCALE_SMOOTH", False))
+    except Exception:
+        use_smooth = False
+    key = ("spr", id(image), sw, sh, pq, st, 1 if use_smooth else 0)
     got = _sprite_cache_get(key)
     if got is not None:
         return got
     if (sw, sh) != (iw, ih):
         try:
-            scaled = pygame.transform.scale(image, (sw, sh))
+            if use_smooth:
+                scaled = pygame.transform.smoothscale(image, (sw, sh))
+            else:
+                scaled = pygame.transform.scale(image, (sw, sh))
         except Exception:
-            scaled = image
+            try:
+                scaled = pygame.transform.scale(image, (sw, sh))
+            except Exception:
+                scaled = image
     else:
         scaled = image
     out = _apply_sprite_perspective_squash(scaled, pq if pq > 0 else None, st)
@@ -1132,6 +1159,853 @@ def apply_vertical_top_shear_region(
         except Exception:
             pass
     return dst
+
+
+# --- 3D_ROTATE / Mode7 (레이싱·원근 필드 전용) ---
+# 사다리꼴(apply_rotate3d) 경로는 폐기. 배경·엔티티·클릭은 모두 Mode7 ctx 를 공유한다.
+
+
+def rotate3d_config_from_data():
+    """3D_ROTATE CONFIG — Mode7 파라미터만 (data.py ROTATE3D_*)."""
+    try:
+        horizon_frac = float(CONFIG.get("ROTATE3D_HORIZON_FRAC", 0.30) or 0.30)
+    except (TypeError, ValueError):
+        horizon_frac = 0.30
+    try:
+        cam_h = float(CONFIG.get("ROTATE3D_CAM_H", 60.0) or 60.0)
+    except (TypeError, ValueError):
+        cam_h = 60.0
+    try:
+        near = float(CONFIG.get("ROTATE3D_NEAR", 8.0) or 8.0)
+    except (TypeError, ValueError):
+        near = 8.0
+    try:
+        depth_mul = float(CONFIG.get("ROTATE3D_DEPTH_MUL", 165.0) or 165.0)
+    except (TypeError, ValueError):
+        depth_mul = 165.0
+    try:
+        lateral_mul = float(CONFIG.get("ROTATE3D_LATERAL_MUL", 1.05) or 1.05)
+    except (TypeError, ValueError):
+        lateral_mul = 1.05
+    try:
+        camera_back = float(CONFIG.get("ROTATE3D_CAMERA_BACK", 26.0) or 26.0)
+    except (TypeError, ValueError):
+        camera_back = 26.0
+    try:
+        base_heading = float(CONFIG.get("ROTATE3D_BASE_HEADING", math.pi * 0.5) or (math.pi * 0.5))
+    except (TypeError, ValueError):
+        base_heading = math.pi * 0.5
+    try:
+        scale_min = float(CONFIG.get("ROTATE3D_SPRITE_SCALE_MIN", 0.05) or 0.05)
+    except (TypeError, ValueError):
+        scale_min = 0.05
+    try:
+        scale_max = float(CONFIG.get("ROTATE3D_SPRITE_SCALE_MAX", 8.0) or 8.0)
+    except (TypeError, ValueError):
+        scale_max = 8.0
+    try:
+        scale_on = bool(CONFIG.get("ROTATE3D_SPRITE_SCALE_ENABLED", True))
+    except Exception:
+        scale_on = True
+
+    def _rgb3(key, default):
+        raw = CONFIG.get(key, default)
+        try:
+            if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                return (
+                    max(0, min(255, int(raw[0]))),
+                    max(0, min(255, int(raw[1]))),
+                    max(0, min(255, int(raw[2]))),
+                )
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    try:
+        sky_path = str(CONFIG.get("ROTATE3D_SKY_PANORAMA", "") or "").strip()
+    except Exception:
+        sky_path = ""
+    try:
+        sky_yaw = float(CONFIG.get("ROTATE3D_SKY_PANORAMA_YAW_OFFSET", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        sky_yaw = 0.0
+    try:
+        sky_fov = float(CONFIG.get("ROTATE3D_SKY_FOV_RAD", 1.2) or 1.2)
+    except (TypeError, ValueError):
+        sky_fov = 1.2
+    try:
+        player_x_frac = float(CONFIG.get("ROTATE3D_PLAYER_SCREEN_X_FRAC", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        player_x_frac = 0.5
+    return {
+        "horizon_frac": max(0.0, min(0.50, float(horizon_frac))),
+        "cam_h": max(1.0, float(cam_h)),
+        "near": max(0.5, float(near)),
+        "depth_mul": max(1.0, float(depth_mul)),
+        "lateral_mul": max(0.05, float(lateral_mul)),
+        "camera_back": max(0.0, float(camera_back)),
+        "base_heading": float(base_heading),
+        "sprite_scale_enabled": bool(scale_on),
+        "sprite_scale_min": max(0.05, min(8.0, float(scale_min))),
+        "sprite_scale_max": max(0.05, min(8.0, float(scale_max))),
+        # 지평선 위/아래 빈 공간 + 360 하늘
+        "sky_color": _rgb3("ROTATE3D_SKY_COLOR", (135, 206, 235)),
+        "ground_fill_color": _rgb3("ROTATE3D_GROUND_FILL_COLOR", (0, 0, 0)),
+        "sky_panorama": sky_path,
+        "sky_panorama_yaw_offset": float(sky_yaw),
+        "sky_fov_rad": max(0.2, min(math.pi * 1.5, float(sky_fov))),
+        "player_screen_x_frac": max(0.05, min(0.95, float(player_x_frac))),
+    }
+
+
+def rotate3d_mode7_build_ctx(
+    cfg,
+    strength_01,
+    view_w,
+    view_h,
+    cam_x,
+    cam_y,
+    cam_angle_rad,
+    *,
+    ref_forward=None,
+    player_wx=None,
+    player_wy=None,
+):
+    """
+    Mode7 공통 파라미터. 배경·엔티티·클릭이 같은 식만 쓴다.
+
+      row = sy - horizon
+      p   = CAM_H / (row + NEAR)
+      depth = p * DEPTH_MUL
+      lat_scale = p * LATERAL_MUL
+
+    위쪽일수록 p↓ → 맵이 멀고 작게. sy_shift / 가로 고정 같은 후처리 없음.
+    PIVOT_FIT 은 DEPTH_MUL 만 조정해 발이 화면 하단 빌보드에 맞게 함.
+    """
+    try:
+        w = max(1, int(view_w))
+        h = max(1, int(view_h))
+        s = max(0.0, min(1.0, float(strength_01)))
+        cx = float(cam_x)
+        cy = float(cam_y)
+        ang = float(cam_angle_rad)
+    except (TypeError, ValueError):
+        return None
+    hf = float(cfg.get("horizon_frac", 0.30))
+    horizon = int(round(float(h) * hf * s))
+    horizon = max(0, min(h - 2, horizon))
+    cam_h = float(cfg.get("cam_h", 60.0))
+    near = float(cfg.get("near", 8.0))
+    depth_mul = float(cfg.get("depth_mul", 165.0)) * max(s, 1e-6)
+    lateral_mul = float(cfg.get("lateral_mul", 1.05))
+    fwd_x = math.cos(ang)
+    fwd_y = math.sin(ang)
+    lat_x = -fwd_y
+    lat_y = fwd_x
+    if ref_forward is None:
+        try:
+            ref_forward = float(cfg.get("camera_back", 26.0)) * s
+        except (TypeError, ValueError):
+            ref_forward = 26.0 * s
+    ref_forward = max(float(near), float(ref_forward))
+
+    try:
+        pad = float(CONFIG.get("ROTATE3D_PLAYER_BOTTOM_PAD", 18) or 18)
+    except (TypeError, ValueError):
+        pad = 18.0
+    pad = max(0.0, pad)
+    # 플레이어 발·Mode7 가로 원점(view_cx). 0.5=중앙, ~0.33=좌측 1/3 → 전방 트랙이 오른쪽에 넓게.
+    try:
+        if isinstance(cfg, dict) and cfg.get("player_screen_x_frac") is not None:
+            x_frac = float(cfg.get("player_screen_x_frac"))
+        else:
+            x_frac = float(CONFIG.get("ROTATE3D_PLAYER_SCREEN_X_FRAC", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        x_frac = 0.5
+    x_frac = max(0.05, min(0.95, float(x_frac)))
+    player_sx = float(w) * x_frac
+    player_sy = float(h) - pad
+    view_cx = float(player_sx)  # 배경·스프라이트 lateral 원점 = 플레이어 화면 X
+
+    try:
+        pivot_fit = bool(CONFIG.get("ROTATE3D_PIVOT_FIT_PLAYER", True))
+    except Exception:
+        pivot_fit = True
+    if pivot_fit and cam_h > 1e-6 and ref_forward > 1e-6:
+        denom = float(player_sy) - float(horizon) + float(near)
+        if denom > 1.0:
+            depth_mul = float(denom) * float(ref_forward) / float(cam_h)
+            depth_mul = max(1.0, min(2000.0, depth_mul))
+
+    return {
+        "mode7": True,
+        "w": w,
+        "h": h,
+        "strength": s,
+        "horizon": horizon,
+        "cam_h": cam_h,
+        "near": near,
+        "depth_mul": depth_mul,
+        "lateral_mul": lateral_mul,
+        "cam_x": cx,
+        "cam_y": cy,
+        "cam_angle": ang,
+        "fwd_x": fwd_x,
+        "fwd_y": fwd_y,
+        "lat_x": lat_x,
+        "lat_y": lat_y,
+        "ref_forward": float(ref_forward),
+        "player_sx": float(player_sx),
+        "player_sy": float(player_sy),
+        "view_cx": float(view_cx),  # Mode7 가로 투영 중심(=player_sx)
+        "player_screen_x_frac": float(x_frac),
+        "sprite_scale_enabled": bool(cfg.get("sprite_scale_enabled", True)),
+        "sprite_scale_min": float(cfg.get("sprite_scale_min", 0.05)),
+        "sprite_scale_max": float(cfg.get("sprite_scale_max", 8.0)),
+    }
+
+
+def rotate3d_mode7_forward(wx, wy, ctx):
+    """카메라→월드점 forward 깊이(월드 단위)."""
+    if not ctx:
+        return 0.0
+    try:
+        dx = float(wx) - float(ctx.get("cam_x", 0.0))
+        dy = float(wy) - float(ctx.get("cam_y", 0.0))
+        return dx * float(ctx.get("fwd_x", 1.0)) + dy * float(ctx.get("fwd_y", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def rotate3d_mode7_cull_pads():
+    """
+    Mode7 스프라이트 컬링 패딩 (data.ROTATE3D_CULL_*).
+    bounds-aware cull 이 화면 가장자리·하단 여유에 사용한다.
+    """
+    try:
+        pad = float(CONFIG.get("ROTATE3D_CULL_PAD_PX", 64) or 64)
+    except (TypeError, ValueError):
+        pad = 64.0
+    pad = max(0.0, min(256.0, pad))
+    try:
+        below_pad = float(CONFIG.get("ROTATE3D_CULL_BELOW_PAD_PX", 220) or 220)
+    except (TypeError, ValueError):
+        below_pad = 220.0
+    below_pad = max(pad, min(480.0, below_pad))
+    return pad, below_pad
+
+
+def rotate3d_mode7_billboard_bounds(sx, sy, img_w, img_h, *, anchor="feet"):
+    """
+    Mode7 빌보드 화면 사각형 (left, top, right, bottom).
+    feet: 하단 중앙 앵커(위쪽으로 그림). center: 중심 앵커.
+    """
+    iw = max(0.0, float(img_w))
+    ih = max(0.0, float(img_h))
+    sx = float(sx)
+    sy = float(sy)
+    a = (anchor or "feet").strip().lower()
+    if a in ("center", "centre", "mid", "middle", "head"):
+        left = sx - iw * 0.5
+        top = sy - ih * 0.5
+    else:
+        # feet / foot / ground / bottom
+        left = sx - iw * 0.5
+        top = sy - ih
+    return left, top, left + iw, top + ih
+
+
+def rotate3d_mode7_bounds_visible(sx, sy, img_w, img_h, ctx, *, anchor="feet"):
+    """
+    스프라이트 화면 사각형이 (패딩된) 뷰와 겹치면 True.
+
+    발점이 지평선·화면 밖이어도 몸통이 남아 있으면 그린다.
+    → 큰 mountain/tree 가 거리·각도에 따라 통째로 팝인/아웃 하던 문제 완화.
+    지평선(horizon)으로 발을 자르지 않는다(빌보드는 하늘 띠로 올라가는 게 정상).
+    """
+    if not ctx:
+        return True
+    pad, below_pad = rotate3d_mode7_cull_pads()
+    try:
+        w = float(ctx.get("w", CONFIG.get("WIDTH", 640)) or 640)
+        h = float(ctx.get("h", CONFIG.get("HEIGHT", 480)) or 480)
+    except (TypeError, ValueError):
+        w = float(CONFIG.get("WIDTH", 640) or 640)
+        h = float(CONFIG.get("HEIGHT", 480) or 480)
+    left, top, right, bottom = rotate3d_mode7_billboard_bounds(
+        sx, sy, img_w, img_h, anchor=anchor
+    )
+    if right < -pad or left > w + pad:
+        return False
+    # 전체가 화면 위로 완전히 나간 경우만 제외 (상단 패딩 = pad)
+    if bottom < -pad:
+        return False
+    if top > h + below_pad:
+        return False
+    return True
+
+
+def rotate3d_mode7_project(wx, wy, ctx, *, height_off=0.0, zoom=1.0, screen_w=0.0, screen_h=0.0, anchor="feet"):
+    """
+    월드 점 → Mode7 화면 feet + 스프라이트 깊이 스케일 (SNES Mode7 / 마리오카트식).
+
+    위치(sx,sy): 배경과 같은 Mode7 식 (도로 좌우 수렴 유지).
+    스프라이트 크기: 앞뒤(forward)만. 좌우(lateral)는 크기에 안 씀.
+      scale = ref_forward / forward
+    → 플레이어와 같은 깊이(카메라 앞쪽 거리)면 scale≈1 (플레이어 빌보드와 동일).
+      더 앞(카메라에 가까움)이면 커지고, 더 뒤(지평선)면 작아짐.
+
+    반환:
+      valid — 투영 수학 가능(카메라 앞 near 이상). False면 그리지 말 것.
+      visible — 컬링 힌트.
+        screen_w/h > 0 이면 스프라이트 사각형(bounds-aware).
+        없으면 발점+패딩 폴백(지평선 컷 없음). 실제 draw는 크기 확정 후 bounds 재판정 권장.
+    """
+    if not ctx:
+        return None
+    try:
+        w = float(ctx.get("w", 1))
+        h = float(ctx.get("h", 1))
+        horizon = float(ctx.get("horizon", 0))
+        cam_x = float(ctx.get("cam_x", 0.0))
+        cam_y = float(ctx.get("cam_y", 0.0))
+        fwd_x = float(ctx.get("fwd_x", 1.0))
+        fwd_y = float(ctx.get("fwd_y", 0.0))
+        lat_x = float(ctx.get("lat_x", 0.0))
+        lat_y = float(ctx.get("lat_y", 1.0))
+        cam_h = float(ctx.get("cam_h", 60.0))
+        near = float(ctx.get("near", 8.0))
+        depth_mul = max(1e-6, float(ctx.get("depth_mul", 165.0)))
+        lateral_mul = float(ctx.get("lateral_mul", 1.05))
+        try:
+            ref_forward = float(ctx.get("ref_forward", 26.0))
+        except (TypeError, ValueError):
+            ref_forward = 26.0
+        ref_forward = max(1e-6, ref_forward)
+        z = max(1e-6, float(zoom))
+        wx = float(wx)
+        wy = float(wy)
+    except (TypeError, ValueError):
+        return None
+
+    dx = wx - cam_x
+    dy = wy - cam_y
+    forward = dx * fwd_x + dy * fwd_y
+    lateral = dx * lat_x + dy * lat_y
+
+    min_fwd = max(near * 0.25, 1.0)
+    if forward < min_fwd:
+        return {
+            "sx": 0.0,
+            "sy": 0.0,
+            "scale": 0.0,
+            "forward": float(forward),
+            "lat_scale": 0.0,
+            "visible": False,
+            "valid": False,
+        }
+
+    p = forward / depth_mul
+    sy = horizon + cam_h / max(p, 1e-9) - near
+    # 위치용 가로 샘플(도로 Mode7). 스프라이트 크기에는 쓰지 않음.
+    # 가로 원점은 view_cx(=player_sx). 중앙(0.5w)이 아니면 전방 시야가 한쪽으로 넓어짐.
+    lat_scale = max(p * lateral_mul, 1e-6)
+    try:
+        view_cx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
+    except (TypeError, ValueError):
+        view_cx = w * 0.5
+    sx = view_cx + lateral / lat_scale
+
+    try:
+        if not bool(ctx.get("sprite_scale_enabled", True)):
+            sc = 1.0
+        else:
+            # 깊이만: 플레이어 발(depth=ref_forward)에서 1.0
+            sc = float(ref_forward) / max(float(forward), 1e-6)
+            lo = float(ctx.get("sprite_scale_min", 0.05))
+            hi = float(ctx.get("sprite_scale_max", 8.0))
+            if lo > hi:
+                lo, hi = hi, lo
+            sc = max(lo, min(hi, float(sc)))
+    except (TypeError, ValueError):
+        sc = float(ref_forward) / max(float(forward), 1e-6)
+
+    if float(height_off or 0.0) > 0.0:
+        # 플레이어 점프와 동일 계열: 같은 깊이에서 height_off*zoom
+        sy -= float(height_off) * z * float(sc)
+
+    try:
+        sw = float(screen_w or 0.0)
+        sh = float(screen_h or 0.0)
+    except (TypeError, ValueError):
+        sw, sh = 0.0, 0.0
+    if sw > 0.0 or sh > 0.0:
+        # 호출측이 스케일된 스프라이트 크기를 넘긴 경우: 사각형 기준
+        visible = rotate3d_mode7_bounds_visible(
+            sx, sy, sw, sh, ctx, anchor=anchor
+        )
+    else:
+        # 크기 모름(sort/헬퍼): 발점+패딩만. 지평선으로 자르지 않음.
+        pad, below_pad = rotate3d_mode7_cull_pads()
+        visible = (sy <= h + below_pad) and (sy >= -pad) and (-pad <= sx <= w + pad)
+
+    return {
+        "sx": float(sx),
+        "sy": float(sy),
+        "scale": float(sc),
+        "forward": float(forward),
+        "lat_scale": float(lat_scale),
+        "visible": bool(visible),
+        "valid": True,
+    }
+
+
+def rotate3d_mode7_sprite_scale(wx, wy, ctx):
+    """월드 오브젝트 빌보드 깊이 스케일. 투영 불가면 0."""
+    pr = rotate3d_mode7_project(wx, wy, ctx)
+    if not pr or not pr.get("valid", pr.get("visible")):
+        return 0.0
+    return float(pr.get("scale", 1.0))
+
+
+def rotate3d_mode7_sort_key(wx, wy, ctx):
+    """
+    y-sort 키: 작을수록 먼저(뒤) 그린다.
+    Mode7에서는 화면 feet Y — 멀리(지평선 쪽)가 더 작음.
+    투영 불가(카메라 뒤)만 아주 작게(맨 뒤) 두어 정렬 안정화.
+    """
+    if not ctx:
+        try:
+            return float(wy)
+        except (TypeError, ValueError):
+            return 0.0
+    pr = rotate3d_mode7_project(wx, wy, ctx)
+    if not pr or not pr.get("valid", pr.get("visible")):
+        return -1e9
+    return float(pr["sy"])
+
+
+def rotate3d_mode7_world_to_screen(wx, wy, ctx, *, height_off=0.0, zoom=1.0):
+    """맵 월드 좌표 → Mode7 화면 좌표. 투영 불가면 (매우 밖) 좌표."""
+    pr = rotate3d_mode7_project(wx, wy, ctx, height_off=height_off, zoom=zoom)
+    if not pr:
+        return float(wx), float(wy)
+    if not pr.get("valid", pr.get("visible")):
+        return -1e6, -1e6
+    return float(pr["sx"]), float(pr["sy"])
+
+
+def rotate3d_mode7_screen_to_world(sx, sy, ctx):
+    """Mode7 화면(world_surf) 좌표 → 맵 월드 좌표 (배경 샘플 역변환과 동일)."""
+    if not ctx:
+        return float(sx), float(sy)
+    try:
+        w = float(ctx.get("w", 1))
+        horizon = float(ctx.get("horizon", 0))
+        cam_x = float(ctx.get("cam_x", 0.0))
+        cam_y = float(ctx.get("cam_y", 0.0))
+        fwd_x = float(ctx.get("fwd_x", 1.0))
+        fwd_y = float(ctx.get("fwd_y", 0.0))
+        lat_x = float(ctx.get("lat_x", 0.0))
+        lat_y = float(ctx.get("lat_y", 1.0))
+        cam_h = float(ctx.get("cam_h", 60.0))
+        near = float(ctx.get("near", 6.0))
+        depth_mul = max(1e-6, float(ctx.get("depth_mul", 165.0)))
+        lateral_mul = float(ctx.get("lateral_mul", 1.05))
+        sx = float(sx)
+        sy = float(sy)
+    except (TypeError, ValueError):
+        return float(sx), float(sy)
+    row = max(near * 0.05, sy - horizon + near)
+    p_row = cam_h / row
+    forward = p_row * depth_mul
+    lat_scale = max(p_row * lateral_mul, 1e-6)
+    try:
+        view_cx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
+    except (TypeError, ValueError):
+        view_cx = w * 0.5
+    lateral = (sx - view_cx) * lat_scale
+    wx = cam_x + forward * fwd_x + lateral * lat_x
+    wy = cam_y + forward * fwd_y + lateral * lat_y
+    return float(wx), float(wy)
+
+
+def rotate3d_mode7_player_screen(ctx, *, height_off=0.0, zoom=1.0):
+    """플레이어 스프라이트는 화면 하단·player_sx 고정 (회전 피벗 = 이 발 좌표)."""
+    if not ctx:
+        return 320.0, 400.0
+    try:
+        sx = float(ctx.get("player_sx", float(ctx.get("w", 640)) * 0.5))
+        sy = float(ctx.get("player_sy", float(ctx.get("h", 480)) - 18.0))
+    except (TypeError, ValueError):
+        return 320.0, 400.0
+    if float(height_off or 0.0) > 0.0:
+        # 점프 높이: 플레이어는 빌보드라 월드 압축비 대신 zoom만 (손아이템과 동일 계열)
+        sy -= float(height_off) * float(zoom)
+    return float(sx), float(sy)
+
+
+def rotate3d_mode7_entity_screen(wx, wy, ctx, *, height_off=0.0, zoom=1.0, player_billboard=False):
+    """
+    Mode7 엔티티 feet 화면좌표.
+    player_billboard=True → 하단·player_sx 고정(플레이어·손에 든 아이템만).
+    그 외는 월드 투영. 비가시이면 (-1e6,-1e6).
+    """
+    if player_billboard:
+        return rotate3d_mode7_player_screen(ctx, height_off=height_off, zoom=zoom)
+    return rotate3d_mode7_world_to_screen(wx, wy, ctx, height_off=height_off, zoom=zoom)
+
+
+def _rotate3d_mode7_parse_rgb(raw, default=(0, 0, 0)):
+    """CONFIG/cfg RGB 튜플 파싱."""
+    try:
+        if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+            return (
+                max(0, min(255, int(raw[0]))),
+                max(0, min(255, int(raw[1]))),
+                max(0, min(255, int(raw[2]))),
+            )
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def rotate3d_mode7_fill_sky_and_ground(dst, ctx, cfg=None, *, fill_sky=True):
+    """
+    Mode7 빈 공간 채움.
+      - 지평선 아래: ground_fill_color (기본 검정) — 맵 밖 픽셀이 여기에 남음
+      - 지평선 위: sky_color 단색, 또는 ROTATE3D_SKY_PANORAMA 360 원통 샘플
+        · 가로: cam_angle + 화면X FOV → 이미지 U wrap (좌우 회전 시 하늘이 같이 돎)
+        · 세로: 화면 0..horizon → 이미지 V (상단=하늘 위, 지평선=이미지 하단)
+    fill_sky=False 이면 전체 clear만 (마스크 Mode7용).
+    """
+    if dst is None or not ctx:
+        return
+    try:
+        w = int(dst.get_width())
+        h = int(dst.get_height())
+        horizon = int(ctx.get("horizon", 0) or 0)
+    except Exception:
+        return
+    if w <= 0 or h <= 0:
+        return
+    horizon = max(0, min(h, horizon))
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    ground = _rotate3d_mode7_parse_rgb(
+        cfg.get("ground_fill_color", CONFIG.get("ROTATE3D_GROUND_FILL_COLOR", (0, 0, 0))),
+        (0, 0, 0),
+    )
+    sky = _rotate3d_mode7_parse_rgb(
+        cfg.get("sky_color", CONFIG.get("ROTATE3D_SKY_COLOR", (135, 206, 235))),
+        (135, 206, 235),
+    )
+
+    # 1) 전체(또는 하단)를 바닥색으로 — Mode7 맵 샘플이 덮지 못한 곳은 검정으로 남음
+    try:
+        dst.fill(ground)
+    except Exception:
+        return
+
+    if not fill_sky or horizon <= 0:
+        return
+
+    # 2) 지평선 위 하늘
+    sky_path = ""
+    try:
+        sky_path = str(cfg.get("sky_panorama", CONFIG.get("ROTATE3D_SKY_PANORAMA", "")) or "").strip()
+    except Exception:
+        sky_path = ""
+    pan = _load_image_cached(sky_path) if sky_path else None
+
+    if pan is None:
+        try:
+            dst.fill(sky, pygame.Rect(0, 0, w, horizon))
+        except Exception:
+            pass
+        return
+
+    try:
+        cam_ang = float(ctx.get("cam_angle", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cam_ang = 0.0
+    try:
+        yaw_off = float(
+            cfg.get(
+                "sky_panorama_yaw_offset",
+                CONFIG.get("ROTATE3D_SKY_PANORAMA_YAW_OFFSET", 0.0),
+            )
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        yaw_off = 0.0
+    try:
+        fov = float(
+            cfg.get("sky_fov_rad", CONFIG.get("ROTATE3D_SKY_FOV_RAD", 1.2)) or 1.2
+        )
+    except (TypeError, ValueError):
+        fov = 1.2
+    fov = max(0.2, min(math.pi * 1.5, fov))
+
+    try:
+        sw = int(pan.get_width())
+        sh = int(pan.get_height())
+    except Exception:
+        sw, sh = 0, 0
+    if sw <= 0 or sh <= 0:
+        try:
+            dst.fill(sky, pygame.Rect(0, 0, w, horizon))
+        except Exception:
+            pass
+        return
+
+    two_pi = math.pi * 2.0
+    base_yaw = cam_ang + yaw_off
+
+    try:
+        import numpy as np
+
+        sky_arr = pygame.surfarray.array3d(pan)
+        out = pygame.surfarray.pixels3d(dst)
+        try:
+            sx_arr = np.arange(w, dtype=np.float64)
+            # 화면 가로 → yaw 슬라이스 (원통 360). 원점은 view_cx(플레이어 X).
+            try:
+                vcx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
+            except (TypeError, ValueError):
+                vcx = float(w) * 0.5
+            ang = base_yaw + ((sx_arr - vcx) / max(1.0, float(w))) * fov
+            ux = np.floor(np.mod(ang / two_pi, 1.0) * float(sw)).astype(np.int32)
+            np.clip(ux, 0, sw - 1, out=ux)
+            # 세로: sy=0 → 이미지 상단, sy=horizon-1 → 이미지 하단
+            den = max(1, horizon - 1)
+            for sy in range(horizon):
+                vy = int(round(float(sy) / float(den) * float(sh - 1)))
+                vy = max(0, min(sh - 1, vy))
+                out[:, sy] = sky_arr[ux, vy]
+        finally:
+            del out
+    except Exception:
+        # numpy 실패 시 픽셀 루프
+        try:
+            try:
+                vcx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
+            except (TypeError, ValueError):
+                vcx = float(w) * 0.5
+            for sx in range(w):
+                ang = base_yaw + ((float(sx) - vcx) / max(1.0, float(w))) * fov
+                u = int(math.floor((ang / two_pi) % 1.0 * float(sw)))
+                u = max(0, min(sw - 1, u))
+                den = max(1, horizon - 1)
+                for sy in range(horizon):
+                    v = int(round(float(sy) / float(den) * float(sh - 1)))
+                    v = max(0, min(sh - 1, v))
+                    dst.set_at((sx, sy), pan.get_at((u, v)))
+        except Exception:
+            try:
+                dst.fill(sky, pygame.Rect(0, 0, w, horizon))
+            except Exception:
+                pass
+
+
+def apply_rotate3d_mode7(
+    dst,
+    map_surf,
+    cam_x,
+    cam_y,
+    cam_angle_rad,
+    strength_01,
+    cfg,
+    *,
+    ctx=None,
+    clear_color=(0, 0, 0),
+    ref_forward=None,
+    player_wx=None,
+    player_wy=None,
+    fill_sky=True,
+):
+    """
+    Mode7 배경: 지평선~하단 각 행
+      p = CAM_H/(row+NEAR); depth = p*DEPTH_MUL; lat_scale = p*LATERAL_MUL
+    → 윗줄일수록 맵이 멀고 작게 (상하·좌우 같은 비율).
+
+    빈 공간:
+      fill_sky=True  → 지평선 위 하늘색/360파노라마, 아래(맵 밖) 검정(ground_fill)
+      fill_sky=False → clear_color 단색만 (마스크 Mode7 등)
+    """
+    if dst is None or map_surf is None:
+        return None
+    try:
+        w = int(dst.get_width())
+        h = int(dst.get_height())
+        mw = int(map_surf.get_width())
+        mh = int(map_surf.get_height())
+    except Exception:
+        return None
+    if w <= 0 or h <= 0 or mw <= 0 or mh <= 0:
+        return None
+    if ctx is None:
+        ctx = rotate3d_mode7_build_ctx(
+            cfg,
+            strength_01,
+            w,
+            h,
+            cam_x,
+            cam_y,
+            cam_angle_rad,
+            ref_forward=ref_forward,
+            player_wx=player_wx,
+            player_wy=player_wy,
+        )
+    if ctx is None or float(ctx.get("strength", 0.0)) <= 1e-6:
+        return None
+    horizon = int(ctx["horizon"])
+    fwd_x = float(ctx["fwd_x"])
+    fwd_y = float(ctx["fwd_y"])
+    lat_x = float(ctx["lat_x"])
+    lat_y = float(ctx["lat_y"])
+    cam_h = float(ctx["cam_h"])
+    near = float(ctx["near"])
+    depth_mul = float(ctx["depth_mul"])
+    lateral_mul = float(ctx["lateral_mul"])
+    cx = float(ctx["cam_x"])
+    cy = float(ctx["cam_y"])
+    try:
+        view_cx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
+    except (TypeError, ValueError):
+        view_cx = float(w) * 0.5
+
+    # 지평선 위/아래 빈 공간 선채움 (맵 샘플이 덮는 부분만 이후 덮어씀)
+    if fill_sky:
+        rotate3d_mode7_fill_sky_and_ground(dst, ctx, cfg, fill_sky=True)
+    else:
+        try:
+            dst.fill(clear_color)
+        except Exception:
+            pass
+
+    try:
+        import numpy as np
+
+        map_arr = pygame.surfarray.array3d(map_surf)
+        out = pygame.surfarray.pixels3d(dst)
+        sx_arr = np.arange(w, dtype=np.float32)
+        try:
+            for sy in range(horizon, h):
+                row = float(sy - horizon)
+                p_row = cam_h / (row + near)
+                depth = p_row * depth_mul
+                lat_scale = p_row * lateral_mul
+                row_cx = cx + fwd_x * depth
+                row_cy = cy + fwd_y * depth
+                lat = (sx_arr - view_cx) * lat_scale
+                mx = (row_cx + lat * lat_x).astype(np.int32)
+                my = (row_cy + lat * lat_y).astype(np.int32)
+                m = (mx >= 0) & (mx < mw) & (my >= 0) & (my < mh)
+                if np.any(m):
+                    out[sx_arr[m].astype(np.int32), sy] = map_arr[mx[m], my[m]]
+        finally:
+            del out
+    except Exception:
+        try:
+            map_arr = pygame.surfarray.array3d(map_surf)
+            out = pygame.surfarray.pixels3d(dst)
+            for sy in range(horizon, h):
+                row = float(sy - horizon)
+                p_row = cam_h / (row + near)
+                depth = p_row * depth_mul
+                lat_scale = p_row * lateral_mul
+                row_cx = cx + fwd_x * depth
+                row_cy = cy + fwd_y * depth
+                for sx in range(w):
+                    lat = (float(sx) - view_cx) * lat_scale
+                    mx = int(row_cx + lat * lat_x)
+                    my = int(row_cy + lat * lat_y)
+                    if 0 <= mx < mw and 0 <= my < mh:
+                        out[sx, sy] = map_arr[mx, my]
+            del out
+        except Exception:
+            return None
+    return ctx
+
+
+def rotate3d_flat_rotate(fx, fy, px, py, angle_rad):
+    """평면 cam-screen 좌표를 pivot 기준 angle_rad 만큼 회전 (틸트 보조·하위호환)."""
+    try:
+        a = float(angle_rad)
+        fx, fy, px, py = float(fx), float(fy), float(px), float(py)
+    except (TypeError, ValueError):
+        return fx, fy
+    if abs(a) <= 1e-9:
+        return fx, fy
+    c = math.cos(a)
+    s = math.sin(a)
+    rdx = fx - px
+    rdy = fy - py
+    return px + rdx * c - rdy * s, py + rdx * s + rdy * c
+
+
+def rotate3d_flat_unrotate(fx, fy, px, py, angle_rad):
+    """rotate3d_flat_rotate 의 역."""
+    return rotate3d_flat_rotate(fx, fy, px, py, -float(angle_rad))
+
+
+def map_feet_screen_xy(
+    flat_x,
+    flat_y,
+    *,
+    y_transform=None,
+    x_scale_fn=None,
+    x_shift_fn=None,
+    x_offset_fn=None,
+    pivot_xy=None,
+    cam_angle_rad=0.0,
+    anchor_x=0.5,
+    view_w=640,
+    height_off=0.0,
+    zoom=1.0,
+):
+    """평면 cam-screen 좌표 → 틸트/쉬어 반영 발 위치(스프라이트 크기는 그대로)."""
+    fx = float(flat_x)
+    fy_flat = float(flat_y)
+    if pivot_xy is not None:
+        try:
+            px, py = float(pivot_xy[0]), float(pivot_xy[1])
+            fx, fy_flat = rotate3d_flat_rotate(fx, fy_flat, px, py, float(cam_angle_rad))
+        except (TypeError, ValueError, IndexError):
+            pass
+    vw = max(1.0, float(view_w))
+    ax = float(anchor_x) * vw
+    if callable(x_scale_fn):
+        try:
+            sc = float(x_scale_fn(fy_flat))
+            fx = ax + (fx - ax) * sc
+        except Exception:
+            pass
+    if callable(x_shift_fn):
+        try:
+            fx += float(x_shift_fn(fy_flat))
+        except Exception:
+            pass
+    if callable(y_transform):
+        try:
+            fy = float(y_transform(fy_flat))
+        except Exception:
+            fy = fy_flat
+    else:
+        fy = fy_flat
+    fy_q = float(int(round(float(fy))))
+    if callable(x_offset_fn):
+        try:
+            fx += float(shear_base_offset_px(fy_q, x_offset_fn))
+        except Exception:
+            pass
+    h_off = float(height_off or 0.0)
+    if h_off > 0.0:
+        fy = fy_q - h_off * float(zoom)
+    else:
+        fy = fy_q
+    return float(fx), float(fy)
 
 
 def shear_strip_row_span(surface_h, blit_y, view_h, *, pad_px=64, bucket_px=128):
@@ -1517,7 +2391,10 @@ def _blit_feet_shadow(
     y_transform=None,
     x_offset_fn=None,
     entity_scale_mul=1.0,
+    mode7_ctx=None,
+    player_billboard=False,
 ):
+    """발 그림자. Mode7 중에는 지면 좌표를 rotate3d_mode7_project 로 투영 (height=0 지면)."""
     if not CONFIG.get("CHARACTER_SHADOW_ENABLED", True):
         return
     try:
@@ -1533,22 +2410,52 @@ def _blit_feet_shadow(
         entity_scale_mul = 1.0
     offx = float(CONFIG.get("SHADOW_OFFSET_X", 5))
     offy = float(CONFIG.get("SHADOW_OFFSET_Y", 6))
-    cx = (gx + offx - cam_x) * zoom
-    cy = (gy + offy - cam_y) * zoom
-    if callable(y_transform):
-        try:
-            cy = float(y_transform(float(cy)))
-        except Exception:
-            pass
-    # tilt/shear에서 subpixel y 흔들림이 x_offset_fn 입력을 흔들어 떨림이 생길 수 있어,
-    # x_offset_fn에는 정수 픽셀 y를 넣는다(가벼운 안정화).
-    cy_q = float(int(round(float(cy))))
-    if callable(x_offset_fn):
-        cx = float(cx) + float(shear_base_offset_px(cy_q, x_offset_fn))
+    depth_scale = 1.0
+    if mode7_ctx:
+        # 지면 그림자: height_off=0. 월드 오프셋 후 Mode7 투영.
+        if player_billboard:
+            cx, cy = rotate3d_mode7_player_screen(mode7_ctx, height_off=0.0, zoom=float(zoom))
+            # 플레이어 빌보드: 화면 오프셋을 살짝만 (월드 단위 off 는 깊이마다 달라서 사용 안 함)
+            try:
+                cx = float(cx) + float(offx) * 0.35 * float(zoom)
+                cy = float(cy) + float(offy) * 0.35 * float(zoom)
+            except Exception:
+                pass
+            depth_scale = 1.0
+        else:
+            pr = rotate3d_mode7_project(
+                float(gx) + float(offx),
+                float(gy) + float(offy),
+                mode7_ctx,
+                height_off=0.0,
+                zoom=float(zoom),
+            )
+            # 그림자: 투영만 되면 그림(작은 타원이라 발점 지평선 컷 불필요)
+            if not pr or not pr.get("valid", pr.get("visible")):
+                return
+            cx = float(pr["sx"])
+            cy = float(pr["sy"])
+            try:
+                depth_scale = max(0.08, min(4.0, float(pr.get("scale", 1.0) or 1.0)))
+            except (TypeError, ValueError):
+                depth_scale = 1.0
+    else:
+        cx = (gx + offx - cam_x) * zoom
+        cy = (gy + offy - cam_y) * zoom
+        if callable(y_transform):
+            try:
+                cy = float(y_transform(float(cy)))
+            except Exception:
+                pass
+        # tilt/shear에서 subpixel y 흔들림이 x_offset_fn 입력을 흔들어 떨림이 생길 수 있어,
+        # x_offset_fn에는 정수 픽셀 y를 넣는다(가벼운 안정화).
+        cy_q = float(int(round(float(cy))))
+        if callable(x_offset_fn):
+            cx = float(cx) + float(shear_base_offset_px(cy_q, x_offset_fn))
     base_rx = float(CONFIG.get("SHADOW_ELLIPSE_RX", 15))
     base_ry = float(CONFIG.get("SHADOW_ELLIPSE_RY", 7))
-    rx = max(2, int(base_rx * zoom * size_scale * entity_scale_mul))
-    ry = max(1, int(base_ry * zoom * size_scale * entity_scale_mul))
+    rx = max(2, int(base_rx * zoom * size_scale * entity_scale_mul * depth_scale))
+    ry = max(1, int(base_ry * zoom * size_scale * entity_scale_mul * depth_scale))
     col = CONFIG.get("SHADOW_COLOR", (18, 18, 38))
     r, g, b = int(col[0]), int(col[1]), int(col[2])
     base_alpha = float(CONFIG.get("SHADOW_BASE_ALPHA", 92))
@@ -1654,6 +2561,22 @@ def load_baseball_overlay_frames(body_type: str, anim_set: str):
         return []
     folder = "baseball_k" if bt in ("kid", "child") else "baseball_a"
     st = str(anim_set or "idle_baseball").strip().lower()
+    path = os.path.join("assets", "images", "character", folder, f"{st}_left")
+    frames = _load_anim_dir_cached(path)
+    return list(frames) if frames else []
+
+
+def load_fishing_overlay_frames(body_type: str, anim_set: str):
+    """
+    공용 낚시 오버레이 — assets/images/character/fishing_a|k/<anim_set>_left/
+    body_type: adult | kid | animal (animal → 빈 목록)
+    anim_set: idle_fishing | draw_fishing | pull_fishing | tension_fishing
+    """
+    bt = str(body_type or "adult").strip().lower()
+    if bt in ("animal", "pet"):
+        return []
+    folder = "fishing_k" if bt in ("kid", "child") else "fishing_a"
+    st = str(anim_set or "idle_fishing").strip().lower()
     path = os.path.join("assets", "images", "character", folder, f"{st}_left")
     frames = _load_anim_dir_cached(path)
     return list(frames) if frames else []
@@ -2045,7 +2968,9 @@ class BaseCharacter:
         # - duration_ms <= 0 or None: 다음 명령이 오기 전까지 지속
         self._anim_override = None  # {"state":str,"t_end":int|None,"prev":str,"loop":bool}
         self.playing_baseball = False
+        self.playing_fishing = False
         self._sprite_overlay = None
+        self._fishing_overlay_tag = ""
         # 이벤트 ZOOM: 카메라 줌과 별도로 스프라이트만 추가 배율 (1.0=기본)
         self.event_entity_zoom = 1.0
         self.event_entity_zoom_target = 1.0
@@ -2386,6 +3311,8 @@ class BaseCharacter:
         y_transform=None,
         x_offset_fn=None,
         entity_scale_mul=1.0,
+        mode7_ctx=None,
+        player_billboard=False,
     ):
         if not CONFIG.get("CHARACTER_SHADOW_ENABLED", True):
             return
@@ -2421,27 +3348,35 @@ class BaseCharacter:
             y_transform=y_transform,
             x_offset_fn=x_offset_fn,
             entity_scale_mul=entity_scale_mul,
+            mode7_ctx=mode7_ctx,
+            player_billboard=player_billboard,
         )
 
-    def draw(self, screen, cam_x, cam_y, zoom=1.0, jump_shadow_mode=None, y_transform=None, x_offset_fn=None, sprite_perspective_q=None, shear_lod=False):
+    def draw(self, screen, cam_x, cam_y, zoom=1.0, jump_shadow_mode=None, y_transform=None, x_offset_fn=None, sprite_perspective_q=None, shear_lod=False, x_scale_fn=None, x_shift_fn=None, pivot_xy=None, cam_angle_rad=0.0, mode7_ctx=None, view_w=None):
         if not self.is_visible: return # 플레이어가 숨김 상태면 그리지 않음
 
         try:
             ez = entity_combined_zoom_mul(self)
         except Exception:
             ez = 1.0
+        # Mode7: Player만 하단 고정·스케일1. NPC/기타는 월드 투영 + 깊이 스케일
         eff = float(zoom) * ez
+        mode7_player_bb = bool(mode7_ctx) and isinstance(self, Player)
 
-        self._draw_feet_shadow(
-            screen,
-            cam_x,
-            cam_y,
-            zoom,
-            jump_shadow_mode,
-            y_transform=y_transform,
-            x_offset_fn=x_offset_fn,
-            entity_scale_mul=ez,
-        )
+        h_off = float(getattr(self, "height", 0) or 0)
+        mode7_pr = None
+        if mode7_ctx and (not mode7_player_bb):
+            mode7_pr = rotate3d_mode7_project(
+                float(self.pos[0]),
+                float(self.pos[1]),
+                mode7_ctx,
+                height_off=h_off,
+                zoom=float(zoom),
+            )
+            # 카메라 뒤 등 투영 불가일 때만 즉시 스킵. 화면 컬링은 스케일 후 bounds.
+            if not mode7_pr or not mode7_pr.get("valid", mode7_pr.get("visible")):
+                return
+            eff *= float(mode7_pr.get("scale", 1.0) or 1.0)
 
         # 1. 캐릭터 이미지 줌 처리 (카메라 줌 × 이벤트 엔티티 배율)
         render_img = self.image
@@ -2465,23 +3400,60 @@ class BaseCharacter:
         )
 
         # 2. 줌이 적용된 화면 좌표 계산
-        feet_y = float((self.pos[1] - cam_y) * zoom)
-        if callable(y_transform):
-            try:
-                feet_y = float(y_transform(feet_y))
-            except Exception:
-                pass
-        # 쉬어(x_offset_fn)의 입력 y를 정수 픽셀로 스냅(홀수 좌표 배치 + 카메라 이동 시 떨림 완화)
-        feet_y_q = float(int(round(float(feet_y))))
-        feet_x = float((self.pos[0] - cam_x) * zoom)
-        if callable(x_offset_fn):
-            feet_x = float(feet_x) + float(shear_base_offset_px(feet_y_q, x_offset_fn))
-        h_off = float(getattr(self, "height", 0) or 0)
-        if h_off > 0.0:
-            feet_y = float(feet_y_q) - h_off * float(zoom)
+        try:
+            vw = float(view_w if view_w is not None else CONFIG.get("WIDTH", 640))
+        except Exception:
+            vw = 640.0
+        if mode7_player_bb:
+            feet_x, feet_y = rotate3d_mode7_player_screen(
+                mode7_ctx,
+                height_off=h_off,
+                zoom=float(zoom),
+            )
+        elif mode7_pr is not None:
+            feet_x, feet_y = float(mode7_pr["sx"]), float(mode7_pr["sy"])
         else:
-            feet_y = float(feet_y_q)
-        # 발 픽셀 고정 후 정수 절반폭 (에디터·FieldItem·render_align 규칙과 동일)
+            feet_x, feet_y = map_feet_screen_xy(
+                float((self.pos[0] - cam_x) * zoom),
+                float((self.pos[1] - cam_y) * zoom),
+                y_transform=y_transform,
+                x_scale_fn=x_scale_fn,
+                x_shift_fn=x_shift_fn,
+                x_offset_fn=x_offset_fn,
+                pivot_xy=pivot_xy,
+                cam_angle_rad=float(cam_angle_rad),
+                anchor_x=0.5,
+                view_w=vw,
+                height_off=h_off,
+                zoom=float(zoom),
+            )
+
+        # Mode7 NPC 등: 발점이 지평선 밖이어도 몸통이 남으면 그림
+        if mode7_ctx and (not mode7_player_bb):
+            if not rotate3d_mode7_bounds_visible(
+                feet_x,
+                feet_y,
+                render_img.get_width(),
+                render_img.get_height(),
+                mode7_ctx,
+                anchor="feet",
+            ):
+                return
+
+        # 발 그림자: Mode7이면 지면 투영 (높이 반영 X — 점프해도 그림자만 작아짐)
+        self._draw_feet_shadow(
+            screen,
+            cam_x,
+            cam_y,
+            zoom,
+            jump_shadow_mode,
+            y_transform=y_transform,
+            x_offset_fn=x_offset_fn,
+            entity_scale_mul=ez * (float(mode7_pr.get("scale", 1.0)) if mode7_pr else 1.0),
+            mode7_ctx=mode7_ctx,
+            player_billboard=mode7_player_bb,
+        )
+
         fpx, fpy = int(round(float(feet_x))), int(round(float(feet_y)))
         dx, dy = blit_topleft_bottom_center(fpx, fpy, render_img.get_width(), render_img.get_height())
 
@@ -2534,18 +3506,31 @@ class BaseCharacter:
                 hez = 1.0
             hez = max(0.05, min(8.0, hez))
             h_eff = float(zoom) * hez
-
-            dx_base, dy_base = _field_world_to_screen_anchor(
-                foot_wx,
-                foot_wy,
-                cam_x,
-                cam_y,
-                zoom,
-                height=float(getattr(hi, "height", 0) or 0),
-                y_transform=y_transform,
-                x_offset_fn=x_offset_fn,
-                anchor="feet",
-            )
+            # 손에 든 아이템: 플레이어와 같이 하단 고정·스케일 1
+            if mode7_ctx:
+                dx_base, dy_base = rotate3d_mode7_player_screen(
+                    mode7_ctx,
+                    height_off=float(getattr(hi, "height", 0) or 0),
+                    zoom=float(zoom),
+                )
+            else:
+                dx_base, dy_base = _field_world_to_screen_anchor(
+                    foot_wx,
+                    foot_wy,
+                    cam_x,
+                    cam_y,
+                    zoom,
+                    height=float(getattr(hi, "height", 0) or 0),
+                    y_transform=y_transform,
+                    x_offset_fn=x_offset_fn,
+                    x_scale_fn=x_scale_fn,
+                    x_shift_fn=x_shift_fn,
+                    pivot_xy=pivot_xy,
+                    cam_angle_rad=float(cam_angle_rad),
+                    mode7_ctx=None,
+                    view_w=view_w,
+                    anchor="feet",
+                )
             prepared = _prepare_field_sprite_blit(
                 h_img,
                 dx_base,
@@ -3893,6 +4878,13 @@ def _field_world_to_screen_anchor(
     height=0.0,
     y_transform=None,
     x_offset_fn=None,
+    x_scale_fn=None,
+    x_shift_fn=None,
+    pivot_xy=None,
+    cam_angle_rad=0.0,
+    mode7_ctx=None,
+    anchor_x=0.5,
+    view_w=None,
     anchor="feet",
 ):
     """
@@ -3905,8 +4897,42 @@ def _field_world_to_screen_anchor(
       center/head/… — pos 가 앵커 그대로 (height 보정 없음).
     """
     z = float(zoom)
-    dx_base = float((float(world_x) - float(cam_x)) * z)
-    dy_base = float((float(world_y) - float(cam_y)) * z)
+    flat_x = float((float(world_x) - float(cam_x)) * z)
+    flat_y = float((float(world_y) - float(cam_y)) * z)
+    anc = (anchor or "feet").strip().lower()
+    h_off = float(height or 0.0) if anc in ("feet", "foot", "ground", "bottom") else 0.0
+    if mode7_ctx:
+        pr = rotate3d_mode7_project(
+            float(world_x),
+            float(world_y),
+            mode7_ctx,
+            height_off=h_off,
+            zoom=z,
+        )
+        if not pr or not pr.get("valid", pr.get("visible")):
+            return -1e6, -1e6
+        return float(pr["sx"]), float(pr["sy"])
+    if callable(x_scale_fn) or callable(x_shift_fn) or pivot_xy is not None:
+        try:
+            vw = float(view_w if view_w is not None else CONFIG.get("WIDTH", 640))
+        except Exception:
+            vw = 640.0
+        return map_feet_screen_xy(
+            flat_x,
+            flat_y,
+            y_transform=y_transform,
+            x_scale_fn=x_scale_fn,
+            x_shift_fn=x_shift_fn,
+            x_offset_fn=x_offset_fn,
+            pivot_xy=pivot_xy,
+            cam_angle_rad=float(cam_angle_rad),
+            anchor_x=float(anchor_x),
+            view_w=vw,
+            height_off=h_off,
+            zoom=z,
+        )
+    dx_base = flat_x
+    dy_base = flat_y
     if callable(y_transform):
         try:
             dy_base = float(y_transform(dy_base))
@@ -3914,15 +4940,9 @@ def _field_world_to_screen_anchor(
             pass
     dy_q = float(int(round(float(dy_base))))
     if callable(x_offset_fn):
-        # 슬라이스 쉬어(_prepare_field_sprite_blit)의 qbot 양자화와 일치하도록 반올림 전 dy_base 사용.
         dx_base = float(dx_base) + float(shear_base_offset_px(dy_base, x_offset_fn))
-    anc = (anchor or "feet").strip().lower()
-    if anc in ("feet", "foot", "ground", "bottom"):
-        h_off = float(height or 0.0)
-        if h_off > 0.0:
-            dy_base = float(dy_q) - h_off * z
-        else:
-            dy_base = float(dy_q)
+    if h_off > 0.0:
+        dy_base = float(dy_q) - h_off * z
     else:
         dy_base = float(dy_q)
     return dx_base, dy_base
@@ -5403,7 +6423,7 @@ class FieldItem:
                 self.frame_idx = idx
                 self.image = self.frames[idx]
 
-    def draw(self, screen, cam_x, cam_y, player=None, global_frame=0, zoom=1.0, y_transform=None, x_offset_fn=None, sprite_perspective_q=None, shear_lod=False):
+    def draw(self, screen, cam_x, cam_y, player=None, global_frame=0, zoom=1.0, y_transform=None, x_offset_fn=None, sprite_perspective_q=None, shear_lod=False, x_scale_fn=None, x_shift_fn=None, pivot_xy=None, cam_angle_rad=0.0, mode7_ctx=None, view_w=None):
         if self.is_held:
             return
         if not bool(getattr(self, "is_visible", True)):
@@ -5414,19 +6434,39 @@ class FieldItem:
         except Exception:
             ez = 1.0
         eff_z = float(zoom) * ez
-
-        # --- [1. 기본 좌표 계산] — FieldItem·Effect(ANIM_ONCE) 공통 규칙 ---
-        dx_base, dy_base = _field_world_to_screen_anchor(
-            self.pos[0],
-            self.pos[1],
-            cam_x,
-            cam_y,
-            zoom,
-            height=float(getattr(self, "height", 0) or 0),
-            y_transform=y_transform,
-            x_offset_fn=x_offset_fn,
-            anchor="feet",
-        )
+        h_world = float(getattr(self, "height", 0) or 0)
+        if mode7_ctx:
+            # Mode7: 카메라 앞이면 투영. 가시성은 스케일 확정 후 스프라이트 사각형으로 재판정.
+            m7 = rotate3d_mode7_project(
+                float(self.pos[0]),
+                float(self.pos[1]),
+                mode7_ctx,
+                height_off=h_world,
+                zoom=float(zoom),
+            )
+            if not m7 or not m7.get("valid", m7.get("visible")):
+                return
+            eff_z *= float(m7.get("scale", 1.0) or 1.0)
+            dx_base, dy_base = float(m7["sx"]), float(m7["sy"])
+        else:
+            # --- [1. 기본 좌표 계산] — FieldItem·Effect(ANIM_ONCE) 공통 규칙 ---
+            dx_base, dy_base = _field_world_to_screen_anchor(
+                self.pos[0],
+                self.pos[1],
+                cam_x,
+                cam_y,
+                zoom,
+                height=h_world,
+                y_transform=y_transform,
+                x_offset_fn=x_offset_fn,
+                x_scale_fn=x_scale_fn,
+                x_shift_fn=x_shift_fn,
+                pivot_xy=pivot_xy,
+                cam_angle_rad=float(cam_angle_rad),
+                mode7_ctx=None,
+                view_w=view_w,
+                anchor="feet",
+            )
 
         # --- [2. 이미지 준비 & 크기 파악] ---
         current_img = self.image
@@ -5451,23 +6491,30 @@ class FieldItem:
                 vx_pre = 0.0
             wm_pre = str(asc_pre.get("wrap", "camera_view") or "camera_view").strip().lower()
             tile_hscroll = abs(vx_pre) > 1e-9 and wm_pre not in ("legacy_wrap", "teleport")
-        
-        # 슬롯처럼 이미지가 작아도 최소 50픽셀의 여유는 줍니다.
-        # 가로 타일 스크롤: 발(앵커)만으로 컬링하면 넓은 레이어가 화면 밖으로 잘못 걸러질 수 있음
-        if tile_hscroll:
-            margin_w = max(50, img_w * 2 + 120)
-        else:
-            margin_w = max(50, img_w // 2 + 10)
-        margin_h = max(50, img_h + 10)
 
         screen_w = CONFIG["WIDTH"]
         screen_h = CONFIG["HEIGHT"]
 
         # --- [3. 최적화 조건문 (이미지 크기 반영)] ---
-        # 이미지 전체가 화면 밖으로 완전히 나갔을 때만 return 합니다.
-        if dx_base < -margin_w or dx_base > screen_w + margin_w or \
-           dy_base < -10 or dy_base > screen_h + margin_h: # dy_base는 발 밑 기준이므로 상단 여유는 넉넉히
-            return 
+        # Mode7: 발점이 아니라 스케일된 스프라이트 사각형이 뷰와 겹칠 때만 유지.
+        if mode7_ctx:
+            if not rotate3d_mode7_bounds_visible(
+                dx_base, dy_base, img_w, img_h, mode7_ctx, anchor="feet"
+            ):
+                return
+        else:
+            # 슬롯처럼 이미지가 작아도 최소 50픽셀의 여유는 줍니다.
+            # 가로 타일 스크롤: 발(앵커)만으로 컬링하면 넓은 레이어가 화면 밖으로 잘못 걸러질 수 있음
+            if tile_hscroll:
+                margin_w = max(50, img_w * 2 + 120)
+            else:
+                margin_w = max(50, img_w // 2 + 10)
+            margin_h = max(50, img_h + 10)
+            # 이미지 전체가 화면 밖으로 완전히 나갔을 때만 return 합니다.
+            # dy_base는 발 밑 기준 → 상단은 img_h로 margin_h에 이미 반영.
+            if dx_base < -margin_w or dx_base > screen_w + margin_w or \
+               dy_base < -10 or dy_base > screen_h + margin_h:
+                return 
         
         # --- [4. 나머지 로직 (슬롯, 스케일링, 투명도 등 동일)] ---
         if self.is_slot and not self.has_real_image:
@@ -5583,6 +6630,7 @@ class FieldItem:
             screen.blit(render_img, (x0 + rw, fy))
         else:
             screen.blit(render_img, (fx, fy))
+        draw_object_text_label(screen, self, dx_base, dy_base, eff_z)
 
     def update(self, player_pos):
         if self.is_flying:
@@ -5859,6 +6907,13 @@ class Effect:
         x_offset_fn=None,
         sprite_perspective_q=None,
         shear_lod=False,
+        x_scale_fn=None,
+        x_shift_fn=None,
+        pivot_xy=None,
+        cam_angle_rad=0.0,
+        mode7_ctx=None,
+        view_w=None,
+        **_unused,
     ):
         """
         월드 이펙트(ANIM_ONCE/EFFECT) — FieldItem 과 동일한 틸트/쉬어/발·중심 앵커 규칙.
@@ -5869,22 +6924,43 @@ class Effect:
         idx = max(0, min(len(self.images) - 1, int(self.frame_idx)))
         img = self.images[idx]
         anc = (self.anchor or "feet").strip().lower()
-        dx_base, dy_base = _field_world_to_screen_anchor(
-            self.pos[0],
-            self.pos[1],
-            cam_x,
-            cam_y,
-            zoom,
-            height=float(getattr(self, "height", 0) or 0),
-            y_transform=y_transform,
-            x_offset_fn=x_offset_fn,
-            anchor=anc,
-        )
+        eff_z = float(zoom)
+        h_world = float(getattr(self, "height", 0) or 0)
+        if mode7_ctx:
+            m7 = rotate3d_mode7_project(
+                float(self.pos[0]),
+                float(self.pos[1]),
+                mode7_ctx,
+                height_off=h_world if anc in ("feet", "foot", "ground", "bottom") else 0.0,
+                zoom=float(zoom),
+            )
+            if not m7 or not m7.get("valid", m7.get("visible")):
+                return
+            eff_z *= float(m7.get("scale", 1.0) or 1.0)
+            dx_base, dy_base = float(m7["sx"]), float(m7["sy"])
+        else:
+            dx_base, dy_base = _field_world_to_screen_anchor(
+                self.pos[0],
+                self.pos[1],
+                cam_x,
+                cam_y,
+                zoom,
+                height=h_world,
+                y_transform=y_transform,
+                x_offset_fn=x_offset_fn,
+                x_scale_fn=x_scale_fn,
+                x_shift_fn=x_shift_fn,
+                pivot_xy=pivot_xy,
+                cam_angle_rad=float(cam_angle_rad),
+                mode7_ctx=None,
+                view_w=view_w,
+                anchor=anc,
+            )
         prepared = _prepare_field_sprite_blit(
             img,
             dx_base,
             dy_base,
-            eff_z=float(zoom),
+            eff_z=eff_z,
             sprite_tilt=getattr(self, "sprite_tilt", 1.0),
             sprite_perspective_q=sprite_perspective_q,
             x_offset_fn=x_offset_fn,
@@ -5896,6 +6972,20 @@ class Effect:
         if prepared is None:
             return
         render_img, fx, fy = prepared
+        # Mode7: 준비된 실제 blit 크기로 bounds-aware cull
+        if mode7_ctx:
+            anc_b = "center" if anc in ("center", "centre", "mid", "middle", "head") else "feet"
+            # prepared 의 (fx,fy)는 topleft. 앵커 점으로 되돌리지 않고 사각형 교차로 판정.
+            rw = float(render_img.get_width())
+            rh = float(render_img.get_height())
+            if anc_b == "center":
+                ax = float(fx) + rw * 0.5
+                ay = float(fy) + rh * 0.5
+            else:
+                ax = float(dx_base)
+                ay = float(dy_base)
+            if not rotate3d_mode7_bounds_visible(ax, ay, rw, rh, mode7_ctx, anchor=anc_b):
+                return
         screen.blit(render_img, (fx, fy))
 
 
@@ -6188,17 +7278,390 @@ import pygame
 import math
 
 # --- 화면 고정 UI 오버레이 (OVERLAY_UI 스텝): 논리 해상도 기준 ---
-_UI_FONT_CACHE = {}  # (font_key, size) -> pygame.font.Font
+_UI_FONT_CACHE = {}  # (font_key, size, outlined) -> pygame.font.Font | OutlinedUIFont
+_BASE_UI_FONT_CACHE = {}  # (font_key, size) -> pygame.font.Font (TTF 본체)
+_UI_FONT_CACHE_MAX = 256
+_UI_TITLE_FONT_KEYS = frozenset({"logo", "title"})
 
 
-def _resolve_ui_font(font_key, size_px: int):
+def _ui_font_outline_px() -> int:
+    try:
+        on = bool(CONFIG.get("UI_FONT_OUTLINE_ENABLED", CONFIG.get("SAY_FONT_OUTLINE_ENABLED", True)))
+    except Exception:
+        on = True
+    if not on:
+        return 0
+    try:
+        px320 = float(
+            CONFIG.get("UI_FONT_OUTLINE_PX_320", CONFIG.get("SAY_FONT_OUTLINE_PX_320", 1)) or 1
+        )
+    except (TypeError, ValueError):
+        px320 = 1.0
+    try:
+        return max(1, int(round(_scale_px_from_320(px320, screen_w=int(CONFIG.get("WIDTH", 320) or 320)))))
+    except Exception:
+        try:
+            return max(1, int(round(float(px320))))
+        except Exception:
+            return 1
+
+
+def _ui_font_outline_color():
+    try:
+        col = CONFIG.get("UI_FONT_OUTLINE_COLOR", CONFIG.get("SAY_FONT_OUTLINE_COLOR", (255, 255, 255)))
+        if isinstance(col, (list, tuple)) and len(col) >= 3:
+            return (int(col[0]), int(col[1]), int(col[2]))
+    except Exception:
+        pass
+    return (255, 255, 255)
+
+
+def _normalize_rgb_color(color):
+    try:
+        if isinstance(color, (list, tuple)) and len(color) >= 3:
+            return (int(color[0]), int(color[1]), int(color[2]))
+    except Exception:
+        pass
+    return (255, 255, 255)
+
+
+def _is_light_outline_color(color) -> bool:
+    r, g, b = _normalize_rgb_color(color)
+    return min(r, g, b) >= 200
+
+
+def _is_white_fill_color(color) -> bool:
+    r, g, b = _normalize_rgb_color(color)
+    return min(r, g, b) >= 230
+
+
+def _ui_font_fill_color_default():
+    """게임 통일 채움색(검정). CONFIG UI_FONT_FILL_COLOR."""
+    try:
+        col = CONFIG.get("UI_FONT_FILL_COLOR", (0, 0, 0))
+        if isinstance(col, (list, tuple)) and len(col) >= 3:
+            return (int(col[0]), int(col[1]), int(col[2]))
+    except Exception:
+        pass
+    return (0, 0, 0)
+
+
+def _ui_font_force_fill_enabled() -> bool:
+    try:
+        return bool(CONFIG.get("UI_FONT_FORCE_FILL_COLOR", True))
+    except Exception:
+        return True
+
+
+def _ui_font_resolve_fill_color(color, outline_color):
+    """
+    채움색 결정.
+    - UI_FONT_FORCE_FILL_COLOR: 항상 UI_FONT_FILL_COLOR (검정+흰테두리 통일)
+    - 아니면 밝은 테두리+흰 채움일 때만 UI_FONT_LIGHT_FILL_COLOR 로 대체
+    """
+    if _ui_font_force_fill_enabled():
+        return _ui_font_fill_color_default()
+    if not _is_light_outline_color(outline_color):
+        return color
+    if not _is_white_fill_color(color):
+        return color
+    try:
+        rep = CONFIG.get("UI_FONT_LIGHT_FILL_COLOR", CONFIG.get("UI_FONT_FILL_COLOR", (0, 0, 0)))
+        if isinstance(rep, (list, tuple)) and len(rep) >= 3:
+            return (int(rep[0]), int(rep[1]), int(rep[2]))
+    except Exception:
+        pass
+    return _ui_font_fill_color_default()
+
+
+def _ui_font_fill_on_light_outline(color, outline_color):
+    """호환용 별칭 — _ui_font_resolve_fill_color."""
+    return _ui_font_resolve_fill_color(color, outline_color)
+
+
+def clear_ui_font_cache() -> None:
+    """CONFIG 폰트 설정 변경 후 캐시 무효화 (에디터 FONT 저장·미니게임 종료 시)."""
+    try:
+        _UI_FONT_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _BASE_UI_FONT_CACHE.clear()
+    except Exception:
+        pass
+
+
+def _trim_ui_font_cache() -> None:
+    """캐시 상한 초과 시 전체 삭제 대신 오래된 항목만 제거."""
+    try:
+        n = len(_UI_FONT_CACHE)
+    except Exception:
+        return
+    if n <= _UI_FONT_CACHE_MAX:
+        return
+    try:
+        drop = max(1, n - _UI_FONT_CACHE_MAX // 2)
+        for k in list(_UI_FONT_CACHE.keys())[:drop]:
+            _UI_FONT_CACHE.pop(k, None)
+    except Exception:
+        try:
+            _UI_FONT_CACHE.clear()
+        except Exception:
+            pass
+
+
+def _effective_outline_px(font: pygame.font.Font, outline_px: int) -> int:
+    try:
+        px = int(outline_px)
+    except Exception:
+        px = 0
+    px = max(0, min(6, px))
+    if px <= 0:
+        return 0
+    try:
+        h = int(font.get_height())
+    except Exception:
+        return px
+    if h <= 12:
+        return 0
+    if h <= 18:
+        return min(px, 1)
+    if h <= 26:
+        return min(px, 1)
+    return px
+
+
+def _outline_ring_offsets(radius: int):
+    """반지름 r 인근 8방향(+축) 오프셋."""
+    r = max(1, int(radius))
+    return (
+        (-r, 0),
+        (r, 0),
+        (0, -r),
+        (0, r),
+        (-r, -r),
+        (-r, r),
+        (r, -r),
+        (r, r),
+    )
+
+
+def _render_surface_with_outline(
+    font: pygame.font.Font,
+    text,
+    antialias,
+    color,
+    *,
+    outline_px: int,
+    outline_color,
+    resolve_fill: bool = True,
+    soft_px: int = 0,
+) -> pygame.Surface:
+    """font.render + 테두리(+옵션 soft 글로우)를 합친 Surface 반환."""
+    outline_px = _effective_outline_px(font, outline_px)
+    try:
+        soft_i = max(0, min(8, int(soft_px)))
+    except Exception:
+        soft_i = 0
+    if resolve_fill:
+        color = _ui_font_resolve_fill_color(color, outline_color)
+    try:
+        s_main = font.render(str(text or ""), bool(antialias), color)
+    except Exception:
+        s_main = None
+    if s_main is None:
+        return pygame.Surface((1, 1), pygame.SRCALPHA)
+    if outline_px <= 0 and soft_i <= 0:
+        return s_main
+    try:
+        s_ol = font.render(str(text or ""), bool(antialias), outline_color)
+    except Exception:
+        return s_main
+    pad = int(outline_px) + int(soft_i) + 3
+    sw = int(s_main.get_width()) + 2 * pad
+    sh = int(s_main.get_height()) + 2 * pad
+    tmp = pygame.Surface((max(1, sw), max(1, sh)), pygame.SRCALPHA)
+    cx, cy = int(pad), int(pad)
+
+    # soft 글로우: 하드 테두리 바깥에 알파가 줄어드는 링
+    if soft_i > 0:
+        hard = max(1, int(outline_px)) if outline_px > 0 else 0
+        for r in range(hard + soft_i, hard, -1):
+            # 바깥일수록 옅게
+            dist = r - hard
+            frac = 1.0 - (float(dist) / float(soft_i + 1))
+            a = max(16, min(160, int(150.0 * frac)))
+            try:
+                layer = s_ol.copy()
+                layer.set_alpha(a)
+            except Exception:
+                layer = s_ol
+            for dx, dy in _outline_ring_offsets(r):
+                tmp.blit(layer, (cx + dx, cy + dy))
+
+    if outline_px > 0:
+        offs = list(_outline_ring_offsets(outline_px))
+        for dx, dy in offs:
+            tmp.blit(s_ol, (cx + dx, cy + dy))
+        if outline_px >= 2:
+            d2 = int(outline_px)
+            for dx, dy in ((-d2, 0), (d2, 0), (0, -d2), (0, d2)):
+                tmp.blit(s_ol, (cx + dx, cy + dy))
+    tmp.blit(s_main, (cx, cy))
+    return tmp
+
+
+class OutlinedUIFont:
+    """UI 폰트 — render() 시 테두리 포함 Surface.
+    style(dict)이 있으면 용도별 프로필 색·두께·AA·soft 를 쓰고, 없으면 CONFIG UI_FONT_* 전역값.
+    """
+
+    def __init__(self, base_font: pygame.font.Font, *, font_key: str = "default", style=None):
+        self._base = base_font
+        self._font_key = str(font_key or "default").strip().lower()
+        self._style = dict(style) if isinstance(style, dict) else None
+
+    def render(self, text, antialias, color):
+        st = self._style
+        if st is not None:
+            try:
+                ol_on = bool(st.get("outline_enabled", True))
+            except Exception:
+                ol_on = True
+            try:
+                ol_px0 = float(st.get("outline_px_320", 1) or 1)
+            except (TypeError, ValueError):
+                ol_px0 = 1.0
+            if ol_on:
+                try:
+                    ol_px = max(
+                        0,
+                        int(
+                            round(
+                                _scale_px_from_320(
+                                    ol_px0, screen_w=int(CONFIG.get("WIDTH", 320) or 320)
+                                )
+                            )
+                        ),
+                    )
+                except Exception:
+                    ol_px = max(1, int(round(ol_px0)))
+            else:
+                ol_px = 0
+            # soft_px_320 → 논리 px (테두리 외곽 번짐)
+            try:
+                soft0 = float(st.get("soft_px_320", 0) or 0)
+            except (TypeError, ValueError):
+                soft0 = 0.0
+            soft0 = max(0.0, min(8.0, soft0))
+            if soft0 > 0.0:
+                try:
+                    soft_px = max(
+                        0,
+                        int(
+                            round(
+                                _scale_px_from_320(
+                                    soft0, screen_w=int(CONFIG.get("WIDTH", 320) or 320)
+                                )
+                            )
+                        ),
+                    )
+                except Exception:
+                    soft_px = max(0, int(round(soft0)))
+            else:
+                soft_px = 0
+            # 프로필 antialias 가 있으면 호출부의 True/False 보다 우선
+            if "antialias" in st:
+                try:
+                    aa = bool(st.get("antialias", True))
+                except Exception:
+                    aa = bool(antialias)
+            else:
+                aa = bool(antialias)
+            ol_col = _normalize_rgb_color(st.get("outline_color", (255, 255, 255)))
+            if bool(st.get("force_color", True)):
+                fill = _normalize_rgb_color(st.get("color", (0, 0, 0)))
+            else:
+                fill = color
+            return _render_surface_with_outline(
+                self._base,
+                text,
+                aa,
+                fill,
+                outline_px=ol_px,
+                outline_color=ol_col,
+                resolve_fill=False,
+                soft_px=soft_px,
+            )
+        return _render_surface_with_outline(
+            self._base,
+            text,
+            antialias,
+            color,
+            outline_px=_ui_font_outline_px(),
+            outline_color=_ui_font_outline_color(),
+        )
+
+
+    def size(self, text):
+        return self._base.size(text)
+
+    def get_height(self):
+        return self._base.get_height()
+
+    def get_linesize(self):
+        return self._base.get_linesize()
+
+    def metrics(self, *args, **kwargs):
+        return self._base.metrics(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+def get_font_profile(slot: str) -> dict:
+    """용도 슬롯 프로필 (data.UI_FONT_PROFILES)."""
+    try:
+        from data import ensure_ui_font_profiles
+
+        profiles = ensure_ui_font_profiles()
+    except Exception:
+        profiles = CONFIG.get("UI_FONT_PROFILES") or {}
+    sid = str(slot or "ui").strip() or "ui"
+    try:
+        p = profiles.get(sid) or profiles.get("ui") or {}
+        return dict(p) if isinstance(p, dict) else {}
+    except Exception:
+        return {}
+
+
+def font_profile_size_px(slot: str, *, screen_w: int | None = None, size_320=None) -> int:
+    """프로필 size_320 → 현재 논리 해상도 px."""
+    p = get_font_profile(slot)
+    try:
+        s320 = float(size_320 if size_320 is not None else p.get("size_320", 14) or 14)
+    except (TypeError, ValueError):
+        s320 = 14.0
+    try:
+        sw = int(screen_w if screen_w is not None else CONFIG.get("WIDTH", 320) or 320)
+    except Exception:
+        sw = 320
+    try:
+        return max(6, int(round(_scale_px_from_320(s320, screen_w=sw))))
+    except Exception:
+        return max(6, int(round(s320)))
+
+
+def _load_base_ui_font(font_key: str, size_px: int) -> pygame.font.Font:
+    """TTF만 로드 (테두리 래퍼 없음). 동일 (font_key, size) 는 재사용."""
     try:
         sz = max(6, min(256, int(size_px)))
     except Exception:
         sz = 16
     fk = (font_key or "default") or "default"
-    k = (fk, sz)
-    hit = _UI_FONT_CACHE.get(k)
+    fk_l = str(fk).strip().lower()
+    bk = (fk_l, sz)
+    hit = _BASE_UI_FONT_CACHE.get(bk)
     if hit is not None:
         return hit
     path = None
@@ -6224,11 +7687,129 @@ def _resolve_ui_font(font_key, size_px: int):
             font = pygame.font.Font(None, sz)
         except Exception:
             font = pygame.font.SysFont("arial", sz)
-    _UI_FONT_CACHE[k] = font
-    if len(_UI_FONT_CACHE) > 128:
-        _UI_FONT_CACHE.clear()
-        _UI_FONT_CACHE[k] = font
+    _BASE_UI_FONT_CACHE[bk] = font
     return font
+
+
+def _style_cache_key(style) -> tuple:
+    if not isinstance(style, dict):
+        return ("nostyle",)
+    c = _normalize_rgb_color(style.get("color", (0, 0, 0)))
+    oc = _normalize_rgb_color(style.get("outline_color", (255, 255, 255)))
+    try:
+        opx = round(float(style.get("outline_px_320", 1) or 1), 3)
+    except (TypeError, ValueError):
+        opx = 1.0
+    try:
+        soft = round(float(style.get("soft_px_320", 0) or 0), 3)
+    except (TypeError, ValueError):
+        soft = 0.0
+    return (
+        str(style.get("font_key") or ""),
+        bool(style.get("outline_enabled", True)),
+        opx,
+        soft,
+        bool(style.get("antialias", True)),
+        c,
+        oc,
+        bool(style.get("force_color", True)),
+    )
+
+
+def resolve_font_profile(slot: str, size_px: int | None = None, *, screen_w: int | None = None):
+    """용도 슬롯 프로필로 OutlinedUIFont(또는 동일 인터페이스) 반환."""
+    style = get_font_profile(slot)
+    fk = str(style.get("font_key") or "default").strip() or "default"
+    if size_px is None:
+        sz = font_profile_size_px(slot, screen_w=screen_w)
+    else:
+        try:
+            sz = max(6, min(256, int(size_px)))
+        except Exception:
+            sz = 16
+    return _resolve_ui_font(fk, sz, outlined=True, style=style)
+
+
+def _resolve_ui_font(font_key, size_px: int, *, outlined: bool = True, style=None):
+    try:
+        sz = max(6, min(256, int(size_px)))
+    except Exception:
+        sz = 16
+    fk = (font_key or "default") or "default"
+    fk_l = str(fk).strip().lower()
+    if isinstance(style, dict):
+        use_outline = True  # OutlinedUIFont 가 style.outline_enabled 로 두께 0 가능
+        k = ("styled", fk_l, sz, _style_cache_key(style))
+    else:
+        use_outline = bool(outlined) and fk_l not in _UI_TITLE_FONT_KEYS
+        k = (fk_l, sz, use_outline)
+    hit = _UI_FONT_CACHE.get(k)
+    if hit is not None:
+        return hit
+    font = _load_base_ui_font(fk, sz)
+    if use_outline:
+        font = OutlinedUIFont(font, font_key=fk_l, style=style)
+    _UI_FONT_CACHE[k] = font
+    _trim_ui_font_cache()
+    return font
+
+
+def _normalize_object_text_label(spec):
+    if not isinstance(spec, dict):
+        return None
+    text = str(spec.get("text") or "").strip()
+    if not text:
+        return None
+    try:
+        size = max(6, min(96, int(float(spec.get("size", 16) or 16))))
+    except Exception:
+        size = 16
+    try:
+        ox = float(spec.get("offset_x", 0) or 0)
+    except Exception:
+        ox = 0.0
+    try:
+        oy = float(spec.get("offset_y", -24) or -24)
+    except Exception:
+        oy = -24.0
+    font_key = str(spec.get("font") or "default").strip() or "default"
+    return {"text": text, "font": font_key, "size": size, "offset_x": ox, "offset_y": oy}
+
+
+def _get_object_text_label(item):
+    base = dict((OBJ_ASSETS.get(str(getattr(item, "name", "") or ""), {}) or {}).get("text_label") or {})
+    we = getattr(item, "_world_entry", None) or {}
+    inst = we.get("text_label") if isinstance(we, dict) else None
+    if isinstance(inst, dict) and inst:
+        base.update(inst)
+    return _normalize_object_text_label(base)
+
+
+def draw_object_text_label(surface, item, anchor_x, anchor_y, zoom=1.0):
+    spec = _get_object_text_label(item)
+    if not spec:
+        return
+    try:
+        scale = max(0.25, float(zoom))
+    except Exception:
+        scale = 1.0
+    # 오브젝트 size 가 있으면 사용, 없으면 프로필 size_320
+    try:
+        base_sz = float(spec["size"])
+    except Exception:
+        base_sz = float(get_font_profile("object_label").get("size_320", 16) or 16)
+    size_px = max(6, int(round(base_sz * scale)))
+    style = get_font_profile("object_label")
+    fk = str(spec.get("font") or style.get("font_key") or "default").strip() or "default"
+    style = dict(style)
+    style["font_key"] = fk
+    font = _resolve_ui_font(fk, size_px, outlined=True, style=style)
+    fg = font.render(spec["text"], True, style.get("color", (0, 0, 0)))
+    px = float(anchor_x) + float(spec["offset_x"]) * scale
+    py = float(anchor_y) + float(spec["offset_y"]) * scale
+    sx = int(round(px - fg.get_width() * 0.5))
+    sy = int(round(py - fg.get_height()))
+    surface.blit(fg, (sx, sy))
 
 
 def _parse_overlay_rgb(step):
@@ -6246,7 +7827,8 @@ def _parse_overlay_rgb(step):
                 return (int(parts[0]), int(parts[1]), int(parts[2]))
             except Exception:
                 pass
-    return (255, 255, 255)
+    # 기본 오버레이 글자색 — 검정(흰 테두리는 OutlinedUIFont)
+    return (0, 0, 0)
 
 
 def _overlay_anchor_xy(anchor: str, w: int, h: int, mx: int, my: int, sw: int, sh: int):
@@ -6325,6 +7907,28 @@ def _overlay_ui_px(px_320: float, *, screen_w: int, step: dict | None = None) ->
             return int(round(float(px_320)))
 
 
+def _overlay_styled_font(step: dict, *, screen_w: int, default_size_320=14):
+    """OVERLAY_UI: logo 키면 logo 프로필, 아니면 ui 프로필 + 스텝 font/size."""
+    font_key = str(step.get("font") or "").strip() or None
+    slot = "logo" if (font_key or "").lower() in ("logo", "title") else "ui"
+    style = dict(get_font_profile(slot))
+    if font_key:
+        style["font_key"] = font_key
+    else:
+        font_key = str(style.get("font_key") or "default")
+    size_src = step.get("size")
+    if size_src is None:
+        size_src = step.get("font_size")
+    if size_src is None:
+        size_src = style.get("size_320", default_size_320)
+    fs = max(1, _overlay_ui_px(size_src, screen_w=screen_w, step=step))
+    font = _resolve_ui_font(font_key, fs, outlined=True, style=style)
+    col = _parse_overlay_rgb(step)
+    if bool(style.get("force_color", True)):
+        col = _normalize_rgb_color(style.get("color", col))
+    return font, col
+
+
 def _build_overlay_surface_from_step(step: dict):
     try:
         screen_w = int(CONFIG.get("WIDTH", 320) or 320)
@@ -6332,10 +7936,7 @@ def _build_overlay_surface_from_step(step: dict):
         screen_w = 320
     ct = (step.get("content") or step.get("content_type") or "text").strip().lower()
     if ct == "button":
-        font_key = (step.get("font") or "default").strip() or "default"
-        fs = max(1, _overlay_ui_px(step.get("size") or step.get("font_size") or 14, screen_w=screen_w, step=step))
-        col = _parse_overlay_rgb(step)
-        font = _resolve_ui_font(font_key, fs)
+        font, col = _overlay_styled_font(step, screen_w=screen_w, default_size_320=14)
         label = str(step.get("text") or step.get("label") or "OK")
         try:
             ts = font.render(label, True, col)
@@ -6369,10 +7970,7 @@ def _build_overlay_surface_from_step(step: dict):
         if not name:
             return None
         return _load_obj_surface_ui(name)
-    font_key = (step.get("font") or "default").strip() or "default"
-    fs = max(1, _overlay_ui_px(step.get("size") or step.get("font_size") or 16, screen_w=screen_w, step=step))
-    col = _parse_overlay_rgb(step)
-    font = _resolve_ui_font(font_key, fs)
+    font, col = _overlay_styled_font(step, screen_w=screen_w, default_size_320=16)
     raw = step.get("text") or ""
     lines = str(raw).replace("\r\n", "\n").split("\n") if raw else [""]
     surfaces = []
@@ -6449,13 +8047,15 @@ def _blit_text_with_outline(
     outline_color,
     outline_px: int,
     alpha: int = 255,
+    resolve_fill: bool = True,
 ):
     """텍스트 테두리(스트로크) 렌더: outline_color로 주변을 찍고 color를 마지막에 찍는다."""
-    try:
-        outline_px = int(outline_px)
-    except Exception:
-        outline_px = 0
-    outline_px = max(0, min(6, outline_px))
+    outline_px = _effective_outline_px(font, outline_px)
+    if resolve_fill:
+        if _ui_font_force_fill_enabled():
+            color = _ui_font_fill_color_default()
+        else:
+            color = _ui_font_resolve_fill_color(color, outline_color)
     try:
         s_main = font.render(str(text or ""), True, color)
     except Exception:
@@ -6768,6 +8368,8 @@ class EventManager:
         self._progress_refresh_pending = False
         # SCREEN overlay (인트로/슬라이드 같은 화면 덮개)
         self.active_screen = None  # dict or None
+        # SCREEN hi_res: main.py가 640x480 전환 전 출력 상태를 보관·복구
+        self.screen_hi_res_snapshot = None
         # UI 오버레이 (로고/텍스트, 논리 해상도 좌표)
         self._ui_overlays = []  # list of dict, see _apply_overlay_ui_step
         self._ui_overlay_pending = []  # [{execute_at_ms, step}] — 트랙별 예약
@@ -6793,6 +8395,7 @@ class EventManager:
         # 필드 연출: 이벤트 스텝 TILT/SHEAR가 main의 tilt/shear를 덮어쓸 때 사용
         self.tilt_control = None  # dict: target, instant_once?, speed?(0~1)
         self.shear_control = None  # dict: enabled, max_px?, strength_mul, bypass_strength, instant_once?, speed?
+        self.rotate3d_control = None  # dict: target(strength 0~1), instant_once?, duration_sec?, t0_ms
         self.world_zoom_step_speed = None  # 디버그 핫키 등 구형 zoom/sec
         self.world_zoom_timed = None  # 시계 기반 월드 줌 보간 {start,target,t0_ms,duration_sec}
         self.field_tilt_snapshot = None  # (tilt_bg_demo, tilt_target, tilt_current, shear_debug) 이벤트 시작 시점
@@ -6818,90 +8421,29 @@ class EventManager:
         # SYNC: 맵 로드 후 순차 실행 대기열 (main.py가 채움)
         self.pending_sync_queue = []
         self._is_sync_event = False
-        self._active_minigame = None  # {"session", "step"}
+        # 외부 minigames/ 패키지 연동은 폐기. 훅은 하위 호환용 no-op 만 남긴다.
+        self._active_minigame = None
         self._entity_visual_event_snaps = {}  # id(ent) -> 이벤트 시작 전(첫 변경 시) 스냅샷
         self._entity_visual_event_persist = set()  # id(ent) — 종료 후에도 유지
 
     def is_minigame_active(self) -> bool:
-        mg = self._active_minigame
-        if not mg:
-            return False
-        session = mg.get("session")
-        return session is not None and not bool(getattr(session, "done", True))
+        """외부 minigames/ 비사용 — 항상 False."""
+        return False
 
     def _clear_minigame(self):
         self._active_minigame = None
 
     def minigame_push_event(self, event) -> None:
-        mg = self._active_minigame
-        if not mg:
-            return
-        session = mg.get("session")
-        if session is None or getattr(session, "done", False):
-            return
-        handle = getattr(session, "handle_event", None)
-        if callable(handle):
-            handle(event)
+        return
 
     def tick_minigame(self, dt_sec: float) -> None:
-        mg = self._active_minigame
-        if not mg:
-            return
-        session = mg.get("session")
-        if session is None or getattr(session, "done", False):
-            return
-        tick = getattr(session, "tick", None)
-        if callable(tick):
-            tick(dt_sec)
+        return
 
     def draw_minigame(self, surf, font_fn) -> None:
-        mg = self._active_minigame
-        if not mg:
-            return
-        session = mg.get("session")
-        draw = getattr(session, "draw", None) if session is not None else None
-        if callable(draw):
-            draw(surf, font_fn)
+        return
 
     def _finish_minigame(self, session, step) -> None:
-        """미니게임 종료 시 세이브 플래그·점수 반영."""
-        if not self.flow:
-            return
-        res = session.result() if hasattr(session, "result") else {}
-        won = bool(res.get("won", False))
-        sd = self.flow.save_data
-        win_key = (step.get("win_flag") or "progress_frog_minigame_win").strip()
-        sd[win_key] = 1 if won else 0
-        try:
-            score = int(res.get("score", 0) or 0)
-        except (TypeError, ValueError):
-            score = 0
-        last_key = (step.get("last_score_key") or "score_frog_trial_last").strip()
-        sd[last_key] = score
-        best_key = (step.get("best_score_key") or "score_frog_trial_best").strip()
-        try:
-            prev_best = int(sd.get(best_key, 0) or 0)
-        except (TypeError, ValueError):
-            prev_best = 0
-        if score > prev_best:
-            sd[best_key] = score
-        if won and _step_bool_true(step.get("seed_on_win", True)):
-            seed_key = (step.get("seed_key") or "progress_frog_seed").strip()
-            try:
-                have = int(sd.get(seed_key, 0) or 0)
-            except (TypeError, ValueError):
-                have = 0
-            if have < 1:
-                sd[seed_key] = 1
-        extra = step.get("result_win") if won else step.get("result_lose")
-        if isinstance(extra, dict):
-            for rk, rv in extra.items():
-                if rv is None or (isinstance(rv, str) and str(rv).strip() == ""):
-                    continue
-                sd[rk] = rv
-        print(
-            f"[MINIGAME] done won={won} score={score} caught={res.get('caught', '?')}"
-        )
+        self._clear_minigame()
 
     def set_fragment_catalog(self, catalog: dict):
         """CALL_EVENT target 카탈로그 (LOCAL/GLOBAL/SYNC/FRAGMENTS)."""
@@ -6948,6 +8490,7 @@ class EventManager:
         print(f"[이벤트 시작] ID: {event_id}")
         self.tilt_control = None
         self.shear_control = None
+        self.rotate3d_control = None
         self.world_zoom_step_speed = None
         self.world_zoom_timed = None
         # FX는 이벤트 밖에서도 유지될 수 있으니 기본은 유지. (OFF는 FX 스텝에서 명시)
@@ -7734,14 +9277,24 @@ class EventManager:
                 al = self._say_ui_fade_alpha_for_overlays()
                 blit_icon(bb["frames"][fi], cx, top_y, ox, oy, al)
 
-    def draw_ui_overlays(self, screen: pygame.Surface, head_ctx=None):
-        """논리 해상도 서피스(CONFIG WIDTH×HEIGHT) 좌표로 블릿."""
-        try:
-            self._draw_head_attached_ui(screen, head_ctx)
-        except Exception:
-            pass
+    def draw_ui_overlays(self, screen: pygame.Surface, head_ctx=None, *, layer="all"):
+        """논리 해상도 서피스(CONFIG WIDTH×HEIGHT) 좌표로 블릿.
+
+        layer:
+          all — chrome + dialog (기본)
+          chrome — OVERLAY_UI(exit 버튼 등), SCREEN 아래
+          dialog — 말풍선·SAY 텍스트박스, SCREEN 위
+        """
+        draw_chrome = layer in ("all", "chrome")
+        draw_dialog = layer in ("all", "dialog")
+
+        if draw_dialog:
+            try:
+                self._draw_head_attached_ui(screen, head_ctx)
+            except Exception:
+                pass
         # SAY 텍스트박스 (events.json SAY)
-        if bool(getattr(self, "is_talking", False)) and bool(CONFIG.get("SAY_USE_TEXTBOX_UI", True)):
+        if draw_dialog and bool(getattr(self, "is_talking", False)) and bool(CONFIG.get("SAY_USE_TEXTBOX_UI", True)):
             try:
                 w = int(CONFIG.get("WIDTH", 320) or 320)
                 h = int(CONFIG.get("HEIGHT", 240) or 240)
@@ -7806,22 +9359,23 @@ class EventManager:
             rw = int(round(_scale_px_from_320(rw0, screen_w=w)))
             rh = int(round(_scale_px_from_320(rh0, screen_w=w)))
 
+            # 대화/이름: UI_FONT_PROFILES dialog / dialog_name
+            body_p = get_font_profile("dialog")
+            name_p = get_font_profile("dialog_name")
+            fkey = str(body_p.get("font_key") or CONFIG.get("SAY_FONT_KEY", "dialog") or "dialog").strip() or "dialog"
+            nfkey = str(name_p.get("font_key") or fkey).strip() or fkey
             try:
-                fkey = str(CONFIG.get("SAY_FONT_KEY", "dialog") or "dialog").strip() or "dialog"
-            except Exception:
-                fkey = "dialog"
-            try:
-                fs0 = float(CONFIG.get("SAY_FONT_SIZE_320", 12) or 12)
+                fs0 = float(body_p.get("size_320", CONFIG.get("SAY_FONT_SIZE_320", 12)) or 12)
             except Exception:
                 fs0 = 12.0
             try:
-                nfs0 = float(CONFIG.get("SAY_NAME_FONT_SIZE_320", fs0) or fs0)
+                nfs0 = float(name_p.get("size_320", CONFIG.get("SAY_NAME_FONT_SIZE_320", fs0)) or fs0)
             except Exception:
                 nfs0 = fs0
             fs = max(6, int(round(_scale_px_from_320(fs0, screen_w=w))))
             nfs = max(6, int(round(_scale_px_from_320(nfs0, screen_w=w))))
-            font = _resolve_ui_font(fkey, fs)
-            name_font = _resolve_ui_font(fkey, nfs)
+            font = _resolve_ui_font(fkey, fs, outlined=False)
+            name_font = _resolve_ui_font(nfkey, nfs, outlined=False)
 
             try:
                 line_gap0 = float(CONFIG.get("SAY_LINE_GAP_PX_320", 2) or 2)
@@ -7834,27 +9388,31 @@ class EventManager:
             line_gap = int(round(_scale_px_from_320(line_gap0, screen_w=w)))
             name_gap = int(round(_scale_px_from_320(name_gap0, screen_w=w)))
 
+            name_col = _normalize_rgb_color(name_p.get("color", CONFIG.get("SAY_NAME_COLOR", (0, 0, 0))))
+            text_col = _normalize_rgb_color(body_p.get("color", CONFIG.get("SAY_TEXT_COLOR", (0, 0, 0))))
             try:
-                name_col = tuple(CONFIG.get("SAY_NAME_COLOR", (255, 235, 120)) or (255, 235, 120))
+                ol_on = bool(body_p.get("outline_enabled", CONFIG.get("SAY_FONT_OUTLINE_ENABLED", True)))
             except Exception:
-                name_col = (255, 235, 120)
+                ol_on = True
             try:
-                text_col = tuple(CONFIG.get("SAY_TEXT_COLOR", (255, 255, 255)) or (255, 255, 255))
-            except Exception:
-                text_col = (255, 255, 255)
-            try:
-                ol_on = bool(CONFIG.get("SAY_FONT_OUTLINE_ENABLED", False))
-            except Exception:
-                ol_on = False
-            try:
-                ol_px0 = float(CONFIG.get("SAY_FONT_OUTLINE_PX_320", 1) or 1)
+                ol_px0 = float(body_p.get("outline_px_320", CONFIG.get("SAY_FONT_OUTLINE_PX_320", 1)) or 1)
             except Exception:
                 ol_px0 = 1.0
             ol_px = int(round(_scale_px_from_320(ol_px0, screen_w=w))) if ol_on else 0
+            ol_col = _normalize_rgb_color(
+                body_p.get("outline_color", CONFIG.get("SAY_FONT_OUTLINE_COLOR", (255, 255, 255)))
+            )
+            # 이름 전용 테두리(프로필이 다르면 이름 쪽 우선)
             try:
-                ol_col = tuple(CONFIG.get("SAY_FONT_OUTLINE_COLOR", (0, 0, 0)) or (0, 0, 0))
+                name_ol_on = bool(name_p.get("outline_enabled", ol_on))
             except Exception:
-                ol_col = (0, 0, 0)
+                name_ol_on = ol_on
+            try:
+                name_ol_px0 = float(name_p.get("outline_px_320", ol_px0) or ol_px0)
+            except Exception:
+                name_ol_px0 = ol_px0
+            name_ol_px = int(round(_scale_px_from_320(name_ol_px0, screen_w=w))) if name_ol_on else 0
+            name_ol_col = _normalize_rgb_color(name_p.get("outline_color", ol_col))
 
             cur_y = y
             try:
@@ -7872,7 +9430,7 @@ class EventManager:
                     show_name = True
             if bool(show_name) and who.strip():
                 try:
-                    if ol_px > 0:
+                    if name_ol_px > 0:
                         _tw, _th = _blit_text_with_outline(
                             screen,
                             name_font,
@@ -7880,9 +9438,10 @@ class EventManager:
                             x,
                             cur_y,
                             color=name_col,
-                            outline_color=ol_col,
-                            outline_px=ol_px,
+                            outline_color=name_ol_col,
+                            outline_px=name_ol_px,
                             alpha=say_alpha,
+                            resolve_fill=False,
                         )
                         cur_y += int(_th) + name_gap
                     else:
@@ -7920,6 +9479,7 @@ class EventManager:
                             outline_color=ol_col,
                             outline_px=ol_px,
                             alpha=say_alpha,
+                            resolve_fill=False,
                         )
                         cur_y += int(_th) + line_gap
                     else:
@@ -7932,6 +9492,8 @@ class EventManager:
                 except Exception:
                     break
 
+        if not draw_chrome:
+            return
         for ov in list(self._ui_overlays or []):
             if ov.get("phase") == "done":
                 continue
@@ -8251,8 +9813,8 @@ class EventManager:
                 self._say_finish_after_fade_out()
             return
 
-        if bool(getattr(self, "active_screen", None)):
-            self.next_step()
+        if self.try_advance_screen():
+            return
 
     def update(self, player, camera, objs, npcs, mask_img=None, dt_sec=1.0 / 60.0):
         if mask_img is not None:
@@ -9125,22 +10687,11 @@ class EventManager:
             self.wait_timer = pygame.time.get_ticks() + int(max(0.0, sec) * 1000)
 
         elif s_type == "MINIGAME_PLAY":
-            from minigames import create_session
-
+            # 외부 패키지 minigames/ 는 본체에 포함·import 하지 않는다.
+            # 필드 미니게임은 activities/ 만 사용. 잔존 이벤트 스텝은 스킵.
             game_id = (step.get("game") or step.get("val") or step.get("name") or "").strip()
-            try:
-                lw = int(CONFIG.get("WIDTH", 640))
-                lh = int(CONFIG.get("HEIGHT", 480))
-            except Exception:
-                lw, lh = 640, 480
-            save = dict(self.flow.save_data) if self.flow else {}
-            session = create_session(game_id, lw, lh, step, save)
-            if session is None:
-                print(f"[MINIGAME] unknown game: {game_id!r}")
-                self.next_step()
-            else:
-                self._active_minigame = {"session": session, "step": step}
-                print(f"[MINIGAME] start {game_id!r}")
+            print(f"[MINIGAME] skipped (external minigames disabled): {game_id!r}")
+            self.next_step()
 
         elif s_type in ("ANIM", "ACTION_ANIM"):
             self._run_char_anim_step(step, player, npcs, objs)
@@ -9237,6 +10788,18 @@ class EventManager:
             if ps.get("max_px") is not None:
                 d["max_px"] = int(ps["max_px"])
             self.shear_control = d
+            self.next_step()
+
+        elif s_type == "3D_ROTATE":
+            pr = parse_rotate3d_step(step)
+            rc = {
+                "target": float(pr["target"]),
+                "duration_sec": float(pr["duration_sec"]),
+                "t0_ms": effect_now_ms(),
+            }
+            if pr["instant"]:
+                rc["instant_once"] = True
+            self.rotate3d_control = rc
             self.next_step()
 
         elif s_type == "ENTITY_FX":
@@ -9725,15 +11288,26 @@ class EventManager:
                     self.active_screen["mode"] = "removing"
                     self.active_screen["transition"] = transition or self.active_screen.get("transition", "fade")
                     self.active_screen["phase_elapsed_sec"] = 0.0
+                    self.active_screen["skip_pending"] = False
+                    self.active_screen["advance_done"] = True
                     try:
                         if step.get("val") is not None:
                             diss = float(step.get("val") or 0)
                         else:
-                            diss = float(self.active_screen.get("duration_sec", 0.4) or 0.4)
+                            diss = float(
+                                self.active_screen.get(
+                                    "transition_sec",
+                                    self.active_screen.get("duration_sec", 0.4),
+                                )
+                                or 0.4
+                            )
                     except Exception:
                         diss = 0.4
-                    self.active_screen["duration_sec"] = max(0.12, float(diss))
-                    self.active_screen["duration_ms"] = int(self.active_screen["duration_sec"] * 1000.0)
+                    diss = max(0.12, float(diss)) * 2.0
+                    self.active_screen["transition_sec"] = diss
+                    self.active_screen["duration_sec"] = diss
+                    self.active_screen["duration_ms"] = int(diss * 1000.0)
+                    self.is_busy = True
                 else:
                     self.next_step()
                 return
@@ -9741,22 +11315,12 @@ class EventManager:
             # show/update: 오버레이 생성/갱신
             pic = (step.get("picture") or "").strip()
             music = (step.get("music") or "").strip()
-            text = step.get("text")
 
             # picture는 상대경로면 assets/images/screen 기준으로 보정
             if pic and not os.path.isabs(pic):
                 # 이미 assets/... 로 시작하면 그대로, 아니면 screen 폴더로
                 if not pic.replace("\\", "/").startswith("assets/"):
                     pic = os.path.join("assets", "images", "screen", pic)
-
-            # 기본 duration (전환 시간). val이 있으면 전환+자동넘김에 같이 사용
-            trans_ms = 400
-            if step.get("val") is not None:
-                try:
-                    trans_ms = max(120, int(float(step.get("val")) * 1000))
-                except:
-                    trans_ms = 400
-            trans_sec = max(0.12, float(trans_ms) / 1000.0)
 
             # 이미지 로드
             img = None
@@ -9770,40 +11334,29 @@ class EventManager:
             # 이미 스크린이 떠 있는 상황에서 새로운 스크린이 오면, 스크린끼리 전환 상태(crossing)로 진입
             if self.active_screen and self.active_screen.get("mode") in ("showing", "holding"):
                 prev_img = self.active_screen.get("img")
-                self.active_screen = {
-                    "img": img,  # 다음 스크린의 최종 이미지
-                    "prev_img": prev_img,
-                    "next_img": img,
-                    "picture": pic,
-                    "music": music,
-                    "transition": transition or "fade",
-                    "bg": bg,
-                    "mode": "crossing",
-                    "t0": now_t,
-                    "duration_ms": trans_ms,
-                    "duration_sec": trans_sec,
-                    "phase_elapsed_sec": 0.0,
-                    "text": text if text is not None else "",
-                    "auto": bool(step.get("auto", False)),
-                    "auto_ms": int(float(step.get("val", 0) or 0) * 1000) if step.get("auto") and step.get("val") is not None else None,
-                }
+                self.active_screen = self._screen_overlay_from_step(
+                    step,
+                    img=img,
+                    pic=pic,
+                    music=music,
+                    transition=transition or "fade",
+                    bg=bg,
+                    mode="crossing",
+                    now_t=now_t,
+                    prev_img=prev_img,
+                )
             else:
                 # 처음 켜질 때는 검은 바탕 위로 페이드 인
-                self.active_screen = {
-                    "img": img,
-                    "picture": pic,
-                    "music": music,
-                    "transition": transition or "fade",
-                    "bg": bg,
-                    "mode": "showing",
-                    "t0": now_t,
-                    "duration_ms": trans_ms,
-                    "duration_sec": trans_sec,
-                    "phase_elapsed_sec": 0.0,
-                    "text": text if text is not None else "",
-                    "auto": bool(step.get("auto", False)),
-                    "auto_ms": int(float(step.get("val", 0) or 0) * 1000) if step.get("auto") and step.get("val") is not None else None,
-                }
+                self.active_screen = self._screen_overlay_from_step(
+                    step,
+                    img=img,
+                    pic=pic,
+                    music=music,
+                    transition=transition or "fade",
+                    bg=bg,
+                    mode="showing",
+                    now_t=now_t,
+                )
 
             # 음악 재생(지정된 경우)
             if music:
@@ -9825,8 +11378,8 @@ class EventManager:
                 except Exception as e:
                     print(f"[SCREEN] music load/play failed: {music} ({e})")
 
-            # SCREEN 자체는 즉시 다음 스텝으로 넘어가도 오버레이는 유지됨
-            self.next_step()
+            # 유지 시간·클릭 대기 — 완료 시 _complete_screen_slide()가 next_step 1회
+            self.is_busy = True
 
         elif s_type == "OVERLAY_UI":
             self._dispatch_overlay_ui_step(step)
@@ -10112,13 +11665,10 @@ class EventManager:
                 self.next_step()
 
         elif s_type == "MINIGAME_PLAY":
-            mg = self._active_minigame
-            session = mg.get("session") if isinstance(mg, dict) else None
-            if session is not None and bool(getattr(session, "done", False)):
-                st = mg.get("step") if isinstance(mg, dict) else {}
-                self._finish_minigame(session, st if isinstance(st, dict) else {})
-                self._clear_minigame()
-                self.next_step()
+            # 본체는 minigames/ 를 쓰지 않음. busy 잔존 시에도 즉시 통과.
+            self._clear_minigame()
+            self.is_busy = False
+            self.next_step()
 
         elif s_type in ("ANIM", "ACTION_ANIM"):
             if self._anim_wait_end_ms and pygame.time.get_ticks() >= int(self._anim_wait_end_ms):
@@ -10203,6 +11753,7 @@ class EventManager:
         # 탈출 시에는 이벤트 연출을 전부 끄고 스냅샷 복구(end_event)가 되도록 틸트/쉬어 명령 제거
         self.tilt_control = None
         self.shear_control = None
+        self.rotate3d_control = None
         self.world_zoom_step_speed = None
         self.world_zoom_timed = None
         if self._escape_action == "break_loop":
@@ -10433,11 +11984,156 @@ class EventManager:
         apply_entity_visual_patch(ent, step)
         self.next_step()
 
+    def _parse_step_bool(self, raw, *, default=False) -> bool:
+        if raw is None:
+            return bool(default)
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+        return bool(raw)
+
     def _parse_fx_on_flag(self, step) -> bool:
-        on_raw = step.get("on", True)
-        if isinstance(on_raw, str):
-            return on_raw.strip().lower() in ("1", "true", "t", "yes", "y", "on")
-        return bool(on_raw)
+        """SCREEN_FX 등 스텝 dict의 on 필드."""
+        if not isinstance(step, dict):
+            return self._parse_step_bool(step, default=True)
+        return self._parse_step_bool(step.get("on", True), default=True)
+
+    def _screen_timing_from_step(self, step) -> dict:
+        """SCREEN show 스텝 → 전환·유지·텍스트 지연·입력 정책."""
+        hold_sec = 3.0
+        if step.get("val") is not None:
+            try:
+                hold_sec = max(0.0, float(step.get("val")))
+            except (TypeError, ValueError):
+                hold_sec = 3.0
+        transition_sec = 0.5
+        if step.get("transition_sec") is not None:
+            try:
+                transition_sec = max(0.12, float(step.get("transition_sec")))
+            except (TypeError, ValueError):
+                transition_sec = 0.5
+        transition_sec = max(0.12, float(transition_sec)) * 2.0
+        try:
+            min_hold_sec = max(0.0, float(CONFIG.get("SCREEN_MIN_HOLD_SEC", 1.0) or 1.0))
+        except (TypeError, ValueError, NameError):
+            min_hold_sec = 1.0
+        text_raw = step.get("text")
+        text_str = "" if text_raw is None else str(text_raw)
+        text_delay = 1.0
+        if text_str.strip():
+            if step.get("text_delay_sec") is not None:
+                try:
+                    text_delay = max(0.0, float(step.get("text_delay_sec")))
+                except (TypeError, ValueError):
+                    text_delay = 1.0
+        force = self._parse_step_bool(
+            step.get("force", step.get("locked", False)), default=False
+        )
+        auto = self._parse_step_bool(step.get("auto", True), default=True)
+        return {
+            "hold_sec": float(hold_sec),
+            "transition_sec": float(transition_sec),
+            "min_hold_sec": float(min_hold_sec),
+            "text": text_str,
+            "text_show_delay_sec": float(text_delay),
+            "force": bool(force),
+            "auto": bool(auto),
+            "hi_res": self._parse_step_bool(step.get("hi_res", False), default=False),
+        }
+
+    def try_advance_screen(self) -> bool:
+        """SCREEN holding 중 클릭 스킵(강제 모드·중복 클릭 무시)."""
+        info = getattr(self, "active_screen", None)
+        if not info:
+            return False
+        if info.get("advance_done") or info.get("skip_pending"):
+            return False
+        if bool(info.get("force")):
+            return False
+        if str(info.get("mode") or "").strip().lower() != "holding":
+            return False
+        info["skip_pending"] = True
+        return True
+
+    def _complete_screen_slide(self) -> None:
+        """현재 SCREEN 슬라이드 종료 → 이벤트 다음 스텝 1회만."""
+        info = getattr(self, "active_screen", None)
+        if not info or info.get("advance_done"):
+            return
+        info["advance_done"] = True
+        self.is_busy = False
+        self.next_step()
+
+    def _screen_overlay_from_step(
+        self,
+        step,
+        *,
+        img,
+        pic: str,
+        music: str,
+        transition: str,
+        bg: str,
+        mode: str,
+        now_t: int,
+        prev_img=None,
+    ) -> dict:
+        timing = self._screen_timing_from_step(step)
+        trans_sec = float(timing["transition_sec"])
+        trans_ms = max(120, int(trans_sec * 1000.0))
+        overlay = {
+            "img": img,
+            "picture": pic,
+            "music": music,
+            "transition": transition or "fade",
+            "bg": bg,
+            "hi_res": bool(timing["hi_res"]),
+            "mode": mode,
+            "t0": now_t,
+            "transition_sec": trans_sec,
+            "duration_ms": trans_ms,
+            "duration_sec": trans_sec,
+            "phase_elapsed_sec": 0.0,
+            "hold_sec": float(timing["hold_sec"]),
+            "hold_elapsed_sec": 0.0,
+            "min_hold_sec": float(timing.get("min_hold_sec", 1.0) or 1.0),
+            "text": timing["text"],
+            "text_show_delay_sec": float(timing["text_show_delay_sec"]),
+            "force": bool(timing["force"]),
+            "auto": bool(timing["auto"]),
+            "skip_pending": False,
+            "advance_done": False,
+        }
+        if prev_img is not None:
+            overlay["prev_img"] = prev_img
+            overlay["next_img"] = img
+        return overlay
+
+    def _screen_holding_state_from(self, info: dict) -> dict:
+        trans_sec = max(
+            0.12,
+            float(info.get("transition_sec", info.get("duration_sec", 0.5)) or 0.5),
+        )
+        return {
+            "img": info.get("next_img") or info.get("img"),
+            "picture": info.get("picture"),
+            "music": info.get("music"),
+            "transition": info.get("transition", "fade"),
+            "bg": info.get("bg", "black"),
+            "hi_res": bool(info.get("hi_res", False)),
+            "mode": "holding",
+            "transition_sec": trans_sec,
+            "duration_sec": trans_sec,
+            "duration_ms": int(trans_sec * 1000.0),
+            "phase_elapsed_sec": 0.0,
+            "hold_sec": float(info.get("hold_sec", 3.0) or 3.0),
+            "hold_elapsed_sec": 0.0,
+            "min_hold_sec": float(info.get("min_hold_sec", 1.0) or 1.0),
+            "text": info.get("text") or "",
+            "text_show_delay_sec": float(info.get("text_show_delay_sec", 1.0) or 1.0),
+            "force": bool(info.get("force", False)),
+            "auto": bool(info.get("auto", True)),
+            "skip_pending": False,
+            "advance_done": False,
+        }
 
     def clear_all_screen_fx(self) -> None:
         """SCREEN_FX kind=all on:false — 구름·비·톤 등 화면 FX 전부 끔."""
@@ -10497,42 +12193,50 @@ class EventManager:
             tick_screen_fx_rain(rain, dt_sec)
 
     def _tick_active_screen(self, dt_sec=1.0 / 60.0):
-        """SCREEN 오버레이 전환 진행 — 실제 경과 초 기준."""
+        """SCREEN 오버레이 전환·유지·자동/클릭 넘김."""
         info = self.active_screen
         if not info:
             return
         mode = (info.get("mode") or "showing").strip().lower()
+        dt = max(0.0, float(dt_sec))
+
+        if mode == "holding":
+            info["hold_elapsed_sec"] = float(info.get("hold_elapsed_sec", 0.0) or 0.0) + dt
+            hold_el = float(info.get("hold_elapsed_sec", 0.0) or 0.0)
+            try:
+                min_hold = max(0.0, float(info.get("min_hold_sec", 1.0) or 1.0))
+            except (TypeError, ValueError):
+                min_hold = 1.0
+            if hold_el < min_hold:
+                return
+            if info.get("skip_pending") and not bool(info.get("force")):
+                self._complete_screen_slide()
+                return
+            hold_sec = float(info.get("hold_sec", 3.0) or 3.0)
+            if bool(info.get("auto", True)) and hold_el >= hold_sec:
+                self._complete_screen_slide()
+            return
+
         if mode not in ("showing", "crossing", "removing"):
             return
-        dt = max(0.0, float(dt_sec))
+
         el = float(info.get("phase_elapsed_sec", 0.0) or 0.0) + dt
         info["phase_elapsed_sec"] = el
         try:
-            dur = float(info.get("duration_sec", 0.4) or 0.4)
+            dur = float(info.get("transition_sec", info.get("duration_sec", 0.4)) or 0.4)
         except Exception:
             dur = 0.4
         dur = max(0.12, dur)
         if el < dur:
             return
         if mode == "crossing":
-            next_img = info.get("next_img") or info.get("img")
-            self.active_screen = {
-                "img": next_img,
-                "picture": info.get("picture"),
-                "music": info.get("music"),
-                "transition": info.get("transition", "fade"),
-                "bg": info.get("bg", "black"),
-                "mode": "holding",
-                "duration_sec": dur,
-                "duration_ms": int(dur * 1000.0),
-                "phase_elapsed_sec": dur,
-                "text": info.get("text") or "",
-                "auto": info.get("auto", False),
-                "auto_ms": info.get("auto_ms"),
-            }
+            self.active_screen = self._screen_holding_state_from(info)
         elif mode == "showing":
             info["mode"] = "holding"
-            info["phase_elapsed_sec"] = dur
+            info["phase_elapsed_sec"] = 0.0
+            info["hold_elapsed_sec"] = 0.0
+            info["skip_pending"] = False
+            info["advance_done"] = False
 
     def draw_screen_overlay(self, screen: pygame.Surface):
         """SCREEN 스텝 오버레이를 게임 화면 위에 렌더링."""
@@ -10544,7 +12248,7 @@ class EventManager:
         bg = (info.get("bg") or "black").strip().lower()
         mode = info.get("mode") or "showing"
         try:
-            dur = float(info.get("duration_sec", 0.4) or 0.4)
+            dur = float(info.get("transition_sec", info.get("duration_sec", 0.4)) or 0.4)
         except Exception:
             dur = 0.4
         if dur <= 0 and info.get("duration_ms"):
@@ -10559,6 +12263,7 @@ class EventManager:
             p = 1.0 - p
         if mode == "holding":
             p = 1.0
+            el = float(info.get("hold_elapsed_sec", 0.0) or 0.0)
 
         # 배경 처리
         # - bg="black"(기본): 기존처럼 검은 배경으로 화면을 덮은 뒤 이미지를 표시
@@ -10632,16 +12337,25 @@ class EventManager:
             else:
                 blit_scaled_center(img, alpha=255 * p)
 
-        # 텍스트(옵션): 간단히 하단 중앙
+        # 텍스트(옵션): 이미지 표시(holding) 후 text_show_delay_sec 뒤 페이드 인
         txt = info.get("text") or ""
-        if txt:
-            try:
-                font = pygame.font.SysFont("malgungothic", 22)
-            except:
-                font = pygame.font.SysFont("arial", 22)
-            pad = 16
-            box = pygame.Surface((w, 80), pygame.SRCALPHA)
-            box.fill((0, 0, 0, int(160 * p)))
-            screen.blit(box, (0, h - 80))
-            t_surf = font.render(str(txt), True, (255, 255, 255))
-            screen.blit(t_surf, (pad, h - 60))
+        if txt and mode == "holding":
+            delay = float(info.get("text_show_delay_sec", 1.0) or 1.0)
+            hold_el = float(info.get("hold_elapsed_sec", 0.0) or 0.0)
+            if hold_el >= delay:
+                fade_dur = 0.35
+                text_u = min(1.0, max(0.0, (hold_el - delay) / fade_dur))
+                try:
+                    font = resolve_font_profile("screen_caption", screen_w=w)
+                except Exception:
+                    font = resolve_font_profile("ui", size_px=22, screen_w=w)
+                pad = 16
+                box = pygame.Surface((w, 80), pygame.SRCALPHA)
+                box.fill((0, 0, 0, int(160 * text_u)))
+                screen.blit(box, (0, h - 80))
+                cap_col = _normalize_rgb_color(get_font_profile("screen_caption").get("color", (0, 0, 0)))
+                t_surf = font.render(str(txt), True, cap_col)
+                if text_u < 1.0:
+                    t_surf = t_surf.copy()
+                    t_surf.set_alpha(int(255 * text_u))
+                screen.blit(t_surf, (pad, h - 60))

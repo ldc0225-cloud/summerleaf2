@@ -93,10 +93,41 @@ def is_scoreboard_object(o) -> bool:
 
 def scoreboard_default_zoom(obj_def: Optional[dict] = None) -> float:
     if isinstance(obj_def, dict):
-        z = obj_def.get("scoreboard_zoom", obj_def.get("zoom"))
+        style = obj_def.get("scoreboard_style") or {}
+        z = obj_def.get("scoreboard_zoom", style.get("zoom", obj_def.get("zoom")))
         if z is not None:
             return max(0.25, _safe_float(z, 1.75))
     return 1.75
+
+
+def scoreboard_style_from_object(o) -> Dict[str, Any]:
+    od = getattr(o, "obj_def", None) or {}
+    we = getattr(o, "_world_entry", None) or {}
+    style = {
+        "use_image": True,
+        "alpha": 200,
+        "show_corner_label": True,
+        "corner_label": "",
+        "border_color": [210, 255, 220],
+        "fill_color": [24, 48, 40],
+    }
+    if isinstance(od.get("scoreboard_style"), dict):
+        style.update(dict(od.get("scoreboard_style") or {}))
+    if isinstance(we.get("scoreboard_style"), dict):
+        style.update(dict(we.get("scoreboard_style") or {}))
+    style["use_image"] = bool(style.get("use_image", True))
+    style["show_corner_label"] = bool(style.get("show_corner_label", True))
+    style["corner_label"] = str(style.get("corner_label") or "").strip()
+    style["alpha"] = max(0, min(255, int(_safe_float(style.get("alpha"), 200))))
+    return style
+
+
+def scoreboard_zoom_from_object(o) -> float:
+    we = getattr(o, "_world_entry", None) or {}
+    if isinstance(we, dict) and we.get("scoreboard_zoom") is not None:
+        return max(0.25, _safe_float(we.get("scoreboard_zoom"), 1.75))
+    od = getattr(o, "obj_def", None) or {}
+    return scoreboard_default_zoom(od if isinstance(od, dict) else None)
 
 
 def apply_scoreboard_defaults(o) -> None:
@@ -108,8 +139,8 @@ def apply_scoreboard_defaults(o) -> None:
         o.obj_def = dict(od)
     o.sprite_tilt = 1.0
     o.ysort_mode = str(od.get("ysort", "ground") or "ground")
-    o.is_visible = True
-    o.entity_def_zoom = scoreboard_default_zoom(od)
+    o.is_visible = bool(scoreboard_style_from_object(o).get("use_image", True))
+    o.entity_def_zoom = scoreboard_zoom_from_object(o)
     if getattr(o, "layer", None) is None:
         o.layer = 1
     we = getattr(o, "_world_entry", None)
@@ -906,12 +937,24 @@ BASEBALL_EDITOR_SCALAR_KEYS = [
     ("fan_half_deg", "방향 게이지 반각(°)", "float", _bbd("fan_half_deg", 37.0)),
     ("fan_half_deg_auto", "반각 마스크 자동", "bool", _bbd("fan_half_deg_auto", False)),
     ("fan_half_margin_deg", "자동 반각 여유(°)", "float", _bbd("fan_half_margin_deg", 1.5)),
+    ("fan_half_guide_visible", "맵 가이드라인 표시", "bool", _bbd("fan_half_guide_visible", True)),
     ("pwr_sweet_spot_half_width", "장타 구간 반폭(0~1)", "float", _bbd("pwr_sweet_spot_half_width", 0.05)),
     ("pwr_power_sweet_spot_half_width", "파워장타 구간 반폭(0~1)", "float", _bbd("pwr_power_sweet_spot_half_width", 0.025)),
     ("pwr_trap_half_width_new", "새 함정 구간 반폭(0~1)", "float", _bbd("pwr_trap_half_width_new", 0.02)),
     ("pwr_sweet_spot_bonus_mul", "장타 보너스 배율", "float", _bbd("pwr_sweet_spot_bonus_mul", 1.1)),
-    ("pwr_power_sweet_spot_bonus_mul", "파워장타 보너스 배율", "float", _bbd("pwr_power_sweet_spot_bonus_mul", 1.2)),
-    ("pwr_confirm_hold_sec", "파워 게이지 확인 유지(초)", "float", _bbd("pwr_confirm_hold_sec", 0.5)),
+    ("pwr_power_sweet_spot_bonus_mul", "파워 게이지 선택 표시 유지(초)", "float", _bbd("pwr_confirm_hold_sec", 1.0)),
+    ("normal_swing_pause_sec", "일반 타구 포즈 대기(초)", "float", _bbd("normal_swing_pause_sec", 0.5)),
+    ("power_swing_pause_sec", "파워장타 포즈 대기(초)", "float", _bbd("power_swing_pause_sec", 1.5)),
+    ("power_swing_zoom_value", "파워장타 줌 값", "float", _bbd("power_swing_zoom_value", 4.0)),
+    ("power_swing_zoom_in_sec", "파워장타 줌인 시간(초)", "float", _bbd("power_swing_zoom_in_sec", 0.12)),
+    ("power_swing_zoom_restore_sec", "파워장타 줌복귀 시간(초)", "float", _bbd("power_swing_zoom_restore_sec", 0.12)),
+    ("power_swing_shake_sec", "파워장타 흔들림 시간(초)", "float", _bbd("power_swing_shake_sec", 1.0)),
+    ("power_swing_shake_amp_px", "파워장타 흔들림 세기(px)", "float", _bbd("power_swing_shake_amp_px", 50.0)),
+    ("power_swing_shake_freq_hz", "파워장타 흔들림 Hz", "float", _bbd("power_swing_shake_freq_hz", 16.0)),
+    ("p2_switch_fade_out_sec", "1P→2P 페이드아웃(초)", "float", _bbd("p2_switch_fade_out_sec", 0.25)),
+    ("p2_switch_fade_hold_sec", "1P→2P 검정화면 유지(초)", "float", _bbd("p2_switch_fade_hold_sec", 0.08)),
+    ("p2_switch_fade_in_sec", "1P→2P 페이드인(초)", "float", _bbd("p2_switch_fade_in_sec", 0.25)),
+    ("swing_anim_base_sec", "타격 애니메이션 기본시간(초)", "float", _bbd("swing_anim_base_sec", 0.45)),
     ("swing_speed_mul", "타격 애니메이션 속도 배율", "float", _bbd("swing_speed_mul", 1.3)),
     ("max_carry_px", "최대 비거리(px)", "float", _bbd("max_carry_px", 960.0)),
     ("tee_height", "티 높이", "float", _bbd("tee_height", 16.0)),

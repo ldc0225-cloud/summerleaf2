@@ -1,9 +1,8 @@
 """
-activities — 필드 위 미니게임(그네·낚시 등) 통합 패키지.
+activities — 필드 위 미니게임(그네·낚시·야구·향후 카트 등) 통합 패키지.
 
 [개념]
-  - minigames/ : 전체 화면 전환 (raindodge, antarctic_run …)
-  - activities/: 맵·캐릭터를 유지한 채 필드에서 플레이 (swing_ride, fishing …)
+  - activities/: 맵·캐릭터를 유지한 채 필드에서 플레이 (본체 미니게임은 여기만)
 
 [호출 — 이벤트에서 직관적으로]
   { "type": "DEV_CMD", "cmd": "start_fishing" }
@@ -16,6 +15,10 @@ activities — 필드 위 미니게임(그네·낚시 등) 통합 패키지.
   { "type": "DEV_CMD", "cmd": "start_baseball" }
   { "type": "DEV_CMD", "cmd": "start_baseball", "mode": "story" }
   OVERLAY_UI click_action: stop_baseball
+
+[레이스]
+  { "type": "DEV_CMD", "cmd": "start_racing", "map": "bg_town" }
+  OVERLAY_UI click_action: stop_racing
 
 [main.py 역할]
   - FieldActivityHost 인스턴스 1개
@@ -32,11 +35,13 @@ from __future__ import annotations
 from .base import BaseFieldActivity, FieldDrawContext
 from .baseball import BaseballActivity
 from .fishing import FishingActivity
+from .racing import RacingActivity
 from .host import FieldActivityHost
 from ._registry import create_activity, list_registered, register_activity
 
 register_activity("fishing", FishingActivity)
 register_activity("baseball", BaseballActivity)
+register_activity("racing", RacingActivity)
 
 
 def list_activities():
@@ -65,6 +70,7 @@ __all__ = [
     "FieldDrawContext",
     "FishingActivity",
     "BaseballActivity",
+    "RacingActivity",
     "create_activity",
     "list_activities",
     "request_field_activity",

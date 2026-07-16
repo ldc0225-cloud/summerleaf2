@@ -36,6 +36,115 @@ SHEAR_ON_OPTS = [("—", ""), ("On", "true"), ("Off", "false")]
 DEFAULT_PRESENCE_TARGETS = 3
 
 
+def _ui_font_dropdown_opts() -> list:
+    try:
+        from data import UI_FONT_FILES
+
+        keys = sorted((UI_FONT_FILES or {}).keys())
+    except Exception:
+        keys = ["default"]
+    return [("—", "")] + [(k, k) for k in keys]
+
+
+def _object_text_label_rows(prefix: str, *, allow_fallback: bool = False) -> list:
+    rows = [
+        ("── 오브젝트 표시 글자 — 발 기준 offset ──", f"{prefix}hint_text_label", "hint"),
+        ("  표시 글자", f"{prefix}text", "text"),
+        ("  폰트", f"{prefix}font", "dropdown", _ui_font_dropdown_opts()),
+        ("  글자 크기", f"{prefix}size", "text"),
+        ("  X offset (발 기준, +는 오른쪽)", f"{prefix}offset_x", "text"),
+        ("  Y offset (발 기준, +는 아래)", f"{prefix}offset_y", "text"),
+    ]
+    if allow_fallback:
+        rows.append(("  ※ 비운 칸은 object_defs 타입 기본값 사용", f"{prefix}hint_text_label_fb", "hint"))
+    return rows
+
+
+def _object_text_label_to_fields(spec: dict, fields: dict, prefix: str) -> None:
+    s = dict(spec or {})
+    fields[f"{prefix}text"] = str(s.get("text") or "")
+    fields[f"{prefix}font"] = str(s.get("font") or "")
+    fields[f"{prefix}size"] = "" if s.get("size") is None else str(s.get("size"))
+    fields[f"{prefix}offset_x"] = "" if s.get("offset_x") is None else str(s.get("offset_x"))
+    fields[f"{prefix}offset_y"] = "" if s.get("offset_y") is None else str(s.get("offset_y"))
+
+
+def _object_text_label_from_fields(fields: dict, prefix: str, *, allow_partial: bool = False) -> dict | None:
+    out = {}
+    text = str(fields.get(f"{prefix}text") or "").strip()
+    font = str(fields.get(f"{prefix}font") or "").strip()
+    size = str(fields.get(f"{prefix}size") or "").strip()
+    ox = str(fields.get(f"{prefix}offset_x") or "").strip()
+    oy = str(fields.get(f"{prefix}offset_y") or "").strip()
+    if text:
+        out["text"] = text
+    if font:
+        out["font"] = font
+    if size:
+        out["size"] = int(float(size))
+    if ox:
+        out["offset_x"] = float(ox)
+    if oy:
+        out["offset_y"] = float(oy)
+    if not out:
+        return None
+    if not allow_partial and not out.get("text"):
+        return None
+    return out
+
+
+def _scoreboard_style_rows(prefix: str, *, allow_fallback: bool = False) -> list:
+    rows = [
+        ("── 전광판 표시 ──", f"{prefix}hint", "hint"),
+        ("  이미지 사용", f"{prefix}use_image", "dropdown", BOOL_OPTS),
+        ("  크기 배율", f"{prefix}zoom", "text"),
+        ("  투명도 0~255", f"{prefix}alpha", "text"),
+        ("  좌상단 글자 표시", f"{prefix}show_corner_label", "dropdown", BOOL_OPTS),
+        ("  좌상단 글자(비우면 없음)", f"{prefix}corner_label", "text"),
+        ("  테두리색 R,G,B", f"{prefix}border_color", "text"),
+        ("  내부색 R,G,B", f"{prefix}fill_color", "text"),
+    ]
+    if allow_fallback:
+        rows.append(("  ※ 비운 칸은 object_defs 타입 기본값 사용", f"{prefix}hint_fb", "hint"))
+    return rows
+
+
+def _scoreboard_style_to_fields(zoom, style, fields: dict, prefix: str) -> None:
+    s = dict(style or {})
+    fields[f"{prefix}zoom"] = "" if zoom is None else str(zoom)
+    fields[f"{prefix}use_image"] = _opt_bool_field(s.get("use_image"), "")
+    fields[f"{prefix}alpha"] = "" if s.get("alpha") is None else str(s.get("alpha"))
+    fields[f"{prefix}show_corner_label"] = _opt_bool_field(s.get("show_corner_label"), "")
+    fields[f"{prefix}corner_label"] = str(s.get("corner_label") or "")
+    fields[f"{prefix}border_color"] = "" if s.get("border_color") is None else ",".join(str(int(v)) for v in (s.get("border_color") or [])[:3])
+    fields[f"{prefix}fill_color"] = "" if s.get("fill_color") is None else ",".join(str(int(v)) for v in (s.get("fill_color") or [])[:3])
+
+
+def _scoreboard_style_from_fields(fields: dict, prefix: str, *, allow_partial: bool = False):
+    zoom_s = str(fields.get(f"{prefix}zoom") or "").strip()
+    out = {}
+    for k in ("use_image", "show_corner_label"):
+        v = str(fields.get(f"{prefix}{k}") or "").strip().lower()
+        if v in ("true", "1", "yes"):
+            out[k] = True
+        elif v in ("false", "0", "no"):
+            out[k] = False
+    corner_label = str(fields.get(f"{prefix}corner_label") or "").strip()
+    if corner_label:
+        out["corner_label"] = corner_label
+    a = str(fields.get(f"{prefix}alpha") or "").strip()
+    if a:
+        out["alpha"] = int(float(a))
+    for k in ("border_color", "fill_color"):
+        raw = str(fields.get(f"{prefix}{k}") or "").strip()
+        if raw:
+            out[k] = [int(float(x.strip())) for x in raw.split(",")[:3]]
+    zoom = float(zoom_s) if zoom_s else None
+    if not allow_partial and zoom is None and not out:
+        return None, None
+    return zoom, out or None
+
+
 def _tune_value_modal_rows(prefix: str) -> list:
     """TUNE 스텝과 동일 필드 — prefix 예: player_, tgt1_."""
     p = str(prefix or "")
@@ -904,6 +1013,8 @@ def obj_def_modal_section_rows(
     ]
     basic_setup.extend(_entity_fx_editor_rows(prefix="", label="기본 FX"))
     basic_setup.extend(_spawn_editor_rows(spawn_prefix="spawn_"))
+    basic_setup.extend(_object_text_label_rows("label_"))
+    basic_setup.extend(_scoreboard_style_rows("scb_"))
     return {
         "basic_setup": basic_setup,
         "progress": _progress_editor_rows(prog_prefix="prog", rule_count=prog_count),
@@ -924,6 +1035,8 @@ def obj_inst_modal_section_rows(
         ),
     ]
     basic_setup.extend(_spawn_editor_rows(spawn_prefix="inst_spawn_"))
+    basic_setup.extend(_object_text_label_rows("inst_label_", allow_fallback=True))
+    basic_setup.extend(_scoreboard_style_rows("inst_scb_", allow_fallback=True))
     return {
         "basic_setup": basic_setup,
         "progress": _progress_editor_rows(prog_prefix="inst_prog", rule_count=inst_prog_count),
@@ -1725,6 +1838,8 @@ def _obj_def_to_fields(odef: dict) -> dict:
     _state_patch_to_fields((odef or {}).get("spawn_state") or {}, fields, "spawn_")
     _progress_apply_to_fields((odef or {}).get("progress_apply"), fields, slot_prefix="prog")
     _entity_fx_to_fields((odef or {}).get("entity_fx"), fields, prefix="")
+    _object_text_label_to_fields((odef or {}).get("text_label"), fields, "label_")
+    _scoreboard_style_to_fields((odef or {}).get("scoreboard_zoom"), (odef or {}).get("scoreboard_style"), fields, "scb_")
     return fields
 
 
@@ -1748,6 +1863,20 @@ def _obj_def_from_fields(fields: dict, base: dict) -> dict:
         row["entity_fx"] = fx
     else:
         row.pop("entity_fx", None)
+    tl = _object_text_label_from_fields(fields, "label_")
+    if tl is not None:
+        row["text_label"] = tl
+    else:
+        row.pop("text_label", None)
+    scb_zoom, scb_style = _scoreboard_style_from_fields(fields, "scb_")
+    if scb_zoom is not None:
+        row["scoreboard_zoom"] = scb_zoom
+    else:
+        row.pop("scoreboard_zoom", None)
+    if scb_style is not None:
+        row["scoreboard_style"] = scb_style
+    else:
+        row.pop("scoreboard_style", None)
     return row
 
 
@@ -1854,6 +1983,8 @@ class ObjInstModal(_ConfigModal):
         we = getattr(item, "_world_entry", None) or {}
         _state_patch_to_fields(we.get("spawn_state") or {}, self.fields, "inst_spawn_")
         _progress_apply_to_fields(we.get("progress_apply"), self.fields, slot_prefix="inst_prog")
+        _object_text_label_to_fields(we.get("text_label"), self.fields, "inst_label_")
+        _scoreboard_style_to_fields(we.get("scoreboard_zoom"), we.get("scoreboard_style"), self.fields, "inst_scb_")
         self._sync_slot_counts_from_fields()
         self.show = True
         self.scroll = 0
@@ -1886,7 +2017,26 @@ class ObjInstModal(_ConfigModal):
             we["progress_apply"] = pa
         else:
             we.pop("progress_apply", None)
+        tl = _object_text_label_from_fields(self.fields, "inst_label_", allow_partial=True)
+        if tl is not None:
+            we["text_label"] = tl
+        else:
+            we.pop("text_label", None)
+        scb_zoom, scb_style = _scoreboard_style_from_fields(self.fields, "inst_scb_", allow_partial=True)
+        if scb_zoom is not None:
+            we["scoreboard_zoom"] = scb_zoom
+        else:
+            we.pop("scoreboard_zoom", None)
+        if scb_style is not None:
+            we["scoreboard_style"] = scb_style
+        else:
+            we.pop("scoreboard_style", None)
         self.target_item._world_entry = we
+        try:
+            from activities.baseball_zones import apply_scoreboard_defaults
+            apply_scoreboard_defaults(self.target_item)
+        except Exception:
+            pass
         from char_behavior import apply_entity_progress_state
         from flow import GameFlow
 

@@ -90,6 +90,9 @@ class FieldRuntimeUI:
         "shear_debug_on",
         "shear_suppressed",
         "zoom_idx",
+        "rotate3d_on",
+        "rotate3d_target",
+        "rotate3d_angle",
     )
 
     def __init__(self):
@@ -103,6 +106,9 @@ class FieldRuntimeUI:
         # TILT_SHEAR_ENABLED=True일 때 핫키(R)로 필드 쉬어 끄기
         self.shear_suppressed = False
         self.zoom_idx = 1
+        self.rotate3d_on = False
+        self.rotate3d_target = 0.0
+        self.rotate3d_angle = 0.0
 
 
 FIELD_RUNTIME_UI = FieldRuntimeUI()
@@ -251,7 +257,7 @@ def parse_duration_sec(step, *, default_sec=1.0):
 
 # 연속 배치 시 한 프레임에 같이 시작 (ZOOM·TILT·SHEAR·CAMERA)
 PARALLEL_EFFECT_STEP_TYPES = frozenset(
-    {"ZOOM", "TILT", "SHEAR", "CAMERA", "CONDITION", "CONDITION_SKIP"}
+    {"ZOOM", "TILT", "SHEAR", "CAMERA", "3D_ROTATE", "CONDITION", "CONDITION_SKIP"}
 )
 
 
@@ -414,6 +420,13 @@ def apply_map_field_defaults(map_id, ui, ev_mgr=None):
     else:
         ui.tilt_target = 1.0
 
+    try:
+        ui.rotate3d_on = False
+        ui.rotate3d_target = 0.0
+        ui.rotate3d_angle = 0.0
+    except Exception:
+        pass
+
     if bool(CONFIG.get("TILT_SHEAR_ENABLED", False)):
         ui.shear_suppressed = not shear_on
         ui.shear_debug_on = False
@@ -508,6 +521,22 @@ def parse_shear_step(step):
         except (TypeError, ValueError):
             pass
     return out
+
+
+def parse_rotate3d_step(step):
+    on = parse_step_bool(step.get("on"), True)
+    strength = step.get("strength")
+    if strength is None or str(strength).strip() == "":
+        strength = 1.0 if on else 0.0
+    strength = parse_strength_01(strength, 1.0 if on else 0.0)
+    dur = parse_duration_sec(step, default_sec=float(CONFIG.get("ROTATE3D_DEFAULT_DURATION_SEC", 0.4) or 0.4))
+    return {
+        "on": bool(on),
+        "strength": float(strength),
+        "target": float(strength) if on else 0.0,
+        "duration_sec": float(dur),
+        "instant": float(dur) <= 0.0,
+    }
 
 
 def parse_zoom_step(step):
@@ -644,6 +673,15 @@ def _canonical_zoom_json(parsed):
     return j
 
 
+def _canonical_rotate3d_json(parsed):
+    return {
+        "type": "3D_ROTATE",
+        "on": bool(parsed["on"]),
+        "strength": round(float(parsed["strength"]), 4),
+        "duration_sec": round(float(parsed["duration_sec"]), 4),
+    }
+
+
 def fill_editor_fields_from_step(step_fields, step, step_type):
     t = (step_type or "").upper()
     if t == "TILT":
@@ -657,6 +695,11 @@ def fill_editor_fields_from_step(step_fields, step, step_type):
         step_fields["shear_strength"] = str(round(p["strength"], 4))
         step_fields["shear_duration_sec"] = str(round(p["duration_sec"], 4))
         step_fields["shear_px"] = "" if p.get("max_px") is None else str(p["max_px"])
+    elif t == "3D_ROTATE":
+        p = parse_rotate3d_step(step)
+        step_fields["rotate3d_on"] = "true" if p["on"] else "false"
+        step_fields["rotate3d_strength"] = str(round(p["strength"], 4))
+        step_fields["rotate3d_duration_sec"] = str(round(p["duration_sec"], 4))
     elif t == "ZOOM":
         p = parse_zoom_step(step)
         step_fields["zoom_on"] = "true" if p["on"] else "false"
@@ -695,6 +738,13 @@ def build_step_from_editor_fields(step_fields, step_type):
         if px and str(px).strip():
             stub["px"] = px
         return _canonical_shear_json(parse_shear_step(stub))
+    if t == "3D_ROTATE":
+        stub = {
+            "on": step_fields.get("rotate3d_on"),
+            "strength": step_fields.get("rotate3d_strength"),
+            "duration_sec": step_fields.get("rotate3d_duration_sec"),
+        }
+        return _canonical_rotate3d_json(parse_rotate3d_step(stub))
     if t == "ZOOM":
         stub = {
             "on": step_fields.get("zoom_on"),
@@ -1037,6 +1087,26 @@ def handle_overlay_ui_click_action(
             pass
         return "consumed"
 
+    if act == "stop_racing":
+        try:
+            if field_activities is not None:
+                field_activities.cancel()
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("racing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+        return "consumed"
+
     return None
 
 
@@ -1081,6 +1151,14 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
         else:
             rt.shear_debug_on = not rt.shear_debug_on
             rt.shear_suppressed = False
+    elif n == "toggle_3d_rotate":
+        rt.rotate3d_on = not bool(getattr(rt, "rotate3d_on", False))
+        try:
+            d = float(CONFIG.get("ROTATE3D_DEFAULT_STRENGTH", 1.0) or 1.0)
+        except Exception:
+            d = 1.0
+        d = max(0.0, min(1.0, float(d)))
+        rt.rotate3d_target = float(d) if rt.rotate3d_on else 0.0
     elif n == "cycle_zoom_debug":
         steps = CONFIG.get("DEBUG_ZOOM_STEPS", [2.0, 0.5, 1.0])
         if not isinstance(steps, (list, tuple)) or not steps:
@@ -1177,6 +1255,77 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
             }
         except Exception:
             pass
+    elif n == "start_racing":
+        from activities import request_field_activity
+
+        params = {"save_data": dict(flow.save_data) if flow else {}}
+        if isinstance(step, dict):
+            if step.get("map") or step.get("map_id"):
+                params["map"] = step.get("map") or step.get("map_id")
+            if step.get("return_map"):
+                params["return_map"] = step.get("return_map")
+            if step.get("return_pos"):
+                params["return_pos"] = step.get("return_pos")
+        request_field_activity(ev_mgr, "racing", **params)
+    elif n == "stop_racing":
+        try:
+            ev_mgr.field_activity_stop_request = True
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("racing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+    elif n == "return_from_racing":
+        target_map = ""
+        target_pos = None
+        try:
+            sd = flow.save_data if flow else {}
+            target_map = str(sd.pop("racing_exit_map", "") or "").strip()
+            target_pos = sd.pop("racing_exit_pos", None)
+        except Exception:
+            target_map = ""
+            target_pos = None
+        if not target_map:
+            target_map = "bg_jjangpu"
+            target_pos = [850.0, 2310.0]
+        if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
+            target_pos = [850.0, 2310.0]
+        try:
+            ev_mgr.pending_map_change = {
+                "map_id": target_map,
+                "pos": [float(target_pos[0]), float(target_pos[1])],
+            }
+            if flow is not None:
+                flow.save_data["current_map"] = target_map
+                flow.save_data["player_pos"] = [
+                    float(target_pos[0]),
+                    float(target_pos[1]),
+                ]
+                try:
+                    flow.save_game(
+                        target_map,
+                        [float(target_pos[0]), float(target_pos[1])],
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": False,
+            }
+        except Exception:
+            pass
     elif n == "return_from_baseball":
         target_map = ""
         target_pos = None
@@ -1236,7 +1385,7 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
             for k in ("pond", "pond_id", "win_flag", "map", "map_id", "mode", "return_map", "return_pos"):
                 if k in step and step.get(k) is not None:
                     params[k] = step.get(k)
-        if act_id == "baseball":
+        if act_id == "baseball" or act_id == "racing":
             params["save_data"] = dict(flow.save_data) if flow else {}
         if act_id:
             request_field_activity(ev_mgr, act_id, **params)
@@ -1558,7 +1707,20 @@ class CloudShadowSystem:
         wy = max(-margin, min(float(map_h) + margin, wy))
         self._append_cloud(wx, wy, speed, scale_min, scale_max, age_sec=0.0)
 
-    def update_and_draw_world(self, screen, dt_sec, settings, cam_x, cam_y, zoom, y_transform=None, x_offset_fn=None, f_q=1.0, map_size=None):
+    def update_and_draw_world(
+        self,
+        screen,
+        dt_sec,
+        settings,
+        cam_x,
+        cam_y,
+        zoom,
+        y_transform=None,
+        x_offset_fn=None,
+        f_q=1.0,
+        map_size=None,
+        mode7_ctx=None,
+    ):
         enabled = bool(settings.get("enabled", False))
         if self._last_enabled is None:
             self._last_enabled = enabled
@@ -1643,6 +1805,41 @@ class CloudShadowSystem:
             if wx < -cull_margin or wx > map_w + cull_margin or wy < -cull_margin or wy > map_h + cull_margin:
                 continue
             keep.append(c)
+            soft = settings.get("soften", 0.0)
+            # Mode7: 구름도 지면 투영 (평평한 맵 그림자 FX)
+            if mode7_ctx:
+                try:
+                    from engine import rotate3d_mode7_bounds_visible, rotate3d_mode7_project
+
+                    pr = rotate3d_mode7_project(wx, wy, mode7_ctx, height_off=0.0, zoom=float(zoom))
+                    if not pr or not pr.get("valid", pr.get("visible")):
+                        continue
+                    sx = float(pr["sx"])
+                    sy = float(pr["sy"])
+                    depth_sc = max(0.08, min(4.0, float(pr.get("scale", 1.0) or 1.0)))
+                    surf = self._cache_get_render(
+                        c["img_i"], c["scale"] * depth_sc, zoom, f_q, alpha, soften=soft
+                    )
+                    # 앵커를 대략 구름 이미지 중심으로 — 크기 확정 후 bounds cull
+                    if not rotate3d_mode7_bounds_visible(
+                        sx,
+                        sy,
+                        surf.get_width(),
+                        surf.get_height(),
+                        mode7_ctx,
+                        anchor="center",
+                    ):
+                        continue
+                    screen.blit(
+                        surf,
+                        (
+                            int(round(sx - surf.get_width() * 0.5)),
+                            int(round(sy - surf.get_height() * 0.5)),
+                        ),
+                    )
+                    continue
+                except Exception:
+                    pass
             # main.py 배경 blit과 동일: int(round((0-cam)*zoom)) 원점 + 월드*줌 (스프라이트/배경과 픽셀 정렬)
             try:
                 zd = float(zoom)
@@ -1663,7 +1860,6 @@ class CloudShadowSystem:
                     sx = float(sx) + float(x_offset_fn(float(sy)))
                 except Exception:
                     pass
-            soft = settings.get("soften", 0.0)
             surf = self._cache_get_render(c["img_i"], c["scale"], zoom, f_q, alpha, soften=soft)
             screen.blit(surf, (int(round(sx)), int(round(sy))))
         self._clouds = keep

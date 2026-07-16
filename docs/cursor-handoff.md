@@ -125,8 +125,9 @@ bg_jjangpu signpost01 상호작용
 ### 패키지
 | 패키지 | 용도 |
 |--------|------|
-| `minigames/` | 전체 화면 (raindodge, kart…) |
-| **`activities/`** | 맵 유지 필드 플레이 (fishing, **baseball**) |
+| **`activities/`** | 맵 유지 필드 플레이 (fishing, **baseball**, 향후 카트 등) |
+
+(예전 외부 `minigames/` 패키지·단독 데모는 제거. 본체는 activities만 사용.)
 
 ### 모드 (`activities/baseball.py`)
 | mode | 설명 |

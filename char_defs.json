@@ -1,5 +1,5 @@
 {
-  "carrot": {
+  "carrot_a": {
     "type": "adult",
     "jump_max_gap": 30,
     "name": "당근",
@@ -13,7 +13,7 @@
       "mode": "idle"
     }
   },
-  "broccoli": {
+  "broccoli_a": {
     "type": "adult",
     "jump_max_gap": 30,
     "name": "브로콜리",
@@ -48,12 +48,12 @@
     "type": "animal",
     "jump_max_gap": 30
   },
-  "c1": {
+  "nachos_a": {
     "type": "adult",
     "jump_max_gap": 30,
     "mask_nav": true,
-    "name": "선생님1",
-    "display_name": "c1",
+    "name": "나쵸",
+    "display_name": "nachos",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -63,12 +63,12 @@
       "mode": "idle"
     }
   },
-  "c2": {
+  "ppiyak_a": {
     "type": "adult",
     "jump_max_gap": 30,
     "mask_nav": true,
-    "name": "선생님2",
-    "display_name": "c2",
+    "name": "삐약이선생님",
+    "display_name": "ppiyak",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -90,7 +90,7 @@
   "c6": {
     "type": "adult",
     "jump_max_gap": 30,
-    "name": "여름",
+    "name": "여름이",
     "display_name": "c6",
     "interact": {
       "enabled": false,
@@ -110,11 +110,12 @@
   "c9": {
     "jump_max_gap": 30
   },
-  "c10": {
+  "summer_k": {
     "type": "kid",
     "jump_max_gap": 30,
     "mask_nav": true,
-    "display_name": "여름이",
+    "name": "여름",
+    "display_name": "summer",
     "interact": {
       "enabled": true,
       "range": 52.0,
@@ -129,41 +130,41 @@
           "id": "line1",
           "when": "progress_c10_talk == 0",
           "say": {
-            "who": "c10",
+            "who": "summer_k",
             "text": "안녕! 여기는 짱푸 공원이야. 처음 왔구나?",
             "show_name": true
           },
           "after": {
-            "progress_c10_talk": 1,
-            "progress_c10_affinity": 5
+            "progress_summer_k_talk": 1,
+            "progress_summer_k_affinity": 5
           }
         },
         {
           "id": "line2",
-          "when": "progress_c10_affinity >= 10",
+          "when": "progress_summer_k_affinity >= 10",
           "say": {
-            "who": "c10",
+            "who": "summer_k",
             "text": "너랑 이야기하는 건 재밌어. 또 놀자!",
             "show_name": true
           },
           "after": {
-            "progress_c10_affinity": 15
+            "progress_summer_k_affinity": 15
           }
         },
         {
           "id": "line3",
           "when": "mainprogress == 010100",
           "say": {
-            "who": "c10",
+            "who": "summer_k",
             "text": "저기 벤치에 앉으면 쉬기 좋아.",
             "show_name": true
           }
         },
         {
           "id": "line4",
-          "when": "progress_c10_talk == 1",
+          "when": "progress_summer_k_talk == 1",
           "say": {
-            "who": "c10",
+            "who": "summer_k",
             "text": "오늘도 산책이야? 날씨가 좋네.",
             "show_name": true
           }
@@ -177,11 +178,11 @@
       }
     }
   },
-  "cc1": {
+  "boy1_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "꼬마1",
-    "display_name": "cc1",
+    "name": "boy1",
+    "display_name": "boy1",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -191,11 +192,11 @@
       "mode": "idle"
     }
   },
-  "cc2": {
+  "boy2_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "꼬마2",
-    "display_name": "cc2",
+    "name": "boy2",
+    "display_name": "boy2",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -205,11 +206,11 @@
       "mode": "idle"
     }
   },
-  "cc3": {
+  "boy3_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "꼬마3",
-    "display_name": "cc3",
+    "name": "boy3",
+    "display_name": "boy3",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -219,11 +220,39 @@
       "mode": "idle"
     }
   },
-  "cc4": {
+  "girl1_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "꼬마4",
-    "display_name": "cc4",
+    "name": "girl1",
+    "display_name": "girl1",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
+  },
+  "girl2_k": {
+    "type": "kid",
+    "jump_max_gap": 30,
+    "name": "girl2",
+    "display_name": "girl2",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
+  },
+  "girl3_k": {
+    "type": "kid",
+    "jump_max_gap": 30,
+    "name": "girl3",
+    "display_name": "girl3",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -268,7 +297,7 @@
         "dir": "left"
       },
       {
-        "when": "progress_flower1_1 == 1004",
+        "when": "progress_flower1_1 >= 1004",
         "visible": true,
         "anim": "jump",
         "anim_mode": "hold",
@@ -292,7 +321,7 @@
           "priority": 100
         },
         {
-          "condition": "progress_flower1_1==1004",
+          "condition": "progress_flower1_1>=1004",
           "event_id": "ev_flower1_4",
           "priority": 100
         }
@@ -314,6 +343,7 @@
           "when": "progress_flower1_1 == 1003"
         }
       ]
-    }
+    },
+    "name": "flower_fairy1"
   }
 }

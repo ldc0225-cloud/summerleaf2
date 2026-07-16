@@ -44,7 +44,7 @@ class FieldActivityHost:
             return True
 
     def consume_request(
-        self, request: dict, *, player, objs=None, npcs=None, mask=None, world_data=None
+        self, request: dict, *, player, objs=None, npcs=None, mask=None, world_data=None, ev_mgr=None
     ) -> bool:
         """ev_mgr.field_activity_request 소비."""
         if not isinstance(request, dict):
@@ -68,6 +68,8 @@ class FieldActivityHost:
             params["mask"] = mask
         if world_data is not None:
             params["world_data"] = world_data
+        if ev_mgr is not None:
+            params["ev_mgr"] = ev_mgr
         try:
             ok = bool(session.begin(player, **params))
         except Exception as e:
@@ -108,9 +110,16 @@ class FieldActivityHost:
             pass
         return None
 
-    def tick(self, dt_sec: float, player, now_ms: int) -> None:
+    def tick(self, dt_sec: float, player, now_ms: int, *, npcs=None, objs=None) -> None:
         if self._session is None:
             return
+        # 맵 전환·progress 적용 후 main 의 npcs 리스트가 바뀌어도 세션이 최신 참조를 쓰게 함
+        try:
+            bind = getattr(self._session, "bind_field_lists", None)
+            if callable(bind):
+                bind(npcs=npcs, objs=objs)
+        except Exception:
+            pass
         try:
             self._session.tick(dt_sec, player, now_ms)
         except Exception as e:
@@ -168,6 +177,7 @@ class FieldActivityHost:
             if callable(draw_world):
                 draw_world(ctx)
             else:
+                # fishing 등: 월드 오버레이는 draw() 한 경로만
                 self._session.draw(ctx)
         except Exception as e:
             print(f"[activity] draw_world error: {e}")
@@ -185,15 +195,13 @@ class FieldActivityHost:
             print(f"[activity] draw error: {e}")
 
     def draw_screen(self, ctx: FieldDrawContext) -> None:
-        """월드 줌 이후 논리 화면에 그릴 UI (야구 메뉴·게이지 등)."""
+        """월드 줌 이후 논리 화면에 그릴 UI (야구 메뉴·레이스 HUD 등). draw()로 폴백하지 않음."""
         if self._session is None:
             return
         try:
             draw_screen = getattr(self._session, "draw_screen", None)
             if callable(draw_screen):
                 draw_screen(ctx)
-            else:
-                self._session.draw(ctx)
         except Exception as e:
             print(f"[activity] draw_screen error: {e}")
 

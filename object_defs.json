@@ -311,6 +311,14 @@
     "layer": 0,
     "category": "건축물류"
   },
+  "signpost02": {
+    "path": "images/object/signpost02.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
   "swing1": {
     "path": "images/object/swing1.png",
     "is_holdable": false,
@@ -347,7 +355,15 @@
     "path": "images/object/TV.png",
     "is_holdable": false,
     "collision": true,
-    "category": "가구류"
+    "category": "가구류",
+    "interact": {
+      "enabled": false,
+      "range": 16.0
+    },
+    "text_label": {
+      "text": "티비는 눈 나빠져요!",
+      "size": 2
+    }
   },
   "bed": {
     "path": "images/object/bed.png",
@@ -702,6 +718,7 @@
   },
   "escape01": {
     "path": "images/event/escape01",
+    "height": 80,
     "is_holdable": false,
     "collision": false,
     "category": "건축물류"
@@ -714,6 +731,30 @@
   },
   "escape03": {
     "path": "images/event/escape03",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "mountain01": {
+    "path": "images/object/mountain01.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "mountain02": {
+    "path": "images/object/mountain02.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "mountain03": {
+    "path": "images/object/mountain03.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
+  "mountain04": {
+    "path": "images/object/mountain04.png",
     "is_holdable": false,
     "collision": false,
     "category": "건축물류"
@@ -846,8 +887,27 @@
     "category": "야구장(전광판)",
     "sprite_tilt": 1.0,
     "ysort": "ground",
-    "scoreboard_zoom": 2.0,
-    "baseball_scoreboard": true
+    "scoreboard_zoom": 4.0,
+    "baseball_scoreboard": true,
+    "interact": {
+      "enabled": false,
+      "range": 16.0
+    },
+    "scoreboard_style": {
+      "use_image": false,
+      "show_corner_label": false,
+      "alpha": 255,
+      "border_color": [
+        210,
+        255,
+        220
+      ],
+      "fill_color": [
+        24,
+        48,
+        40
+      ]
+    }
   },
   "merge-fence1-2": {
     "path": "images/object/merge-fence1-2.png",

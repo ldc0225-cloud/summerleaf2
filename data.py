@@ -109,7 +109,7 @@ CONFIG = {
     "HELD_ITEM_FOOT_OFFSET_Y": 6,
 
     # 세이브 없음·merge 기본값 / load_map 플레이어 생성 시 CHAR_ASSETS 키
-    "DEFAULT_PLAYER_CHAR": "c10",
+    "DEFAULT_PLAYER_CHAR": "summer_k",
     "CHAR_SPEED": 1.6, "CURSOR_SPEED": 3.5,
     # 클릭 이동
     "DOUBLE_CLICK_MS": 280,
@@ -153,13 +153,22 @@ CONFIG = {
     "VISUAL_DT_REF_SEC": 1.0 / 60.0,
     # 같은 이벤트 안에서 SAY가 연속일 때: 박스 페이드아웃/인 없이 다음 대사만 갱신
     "SAY_CHAIN_WITHIN_EVENT": True,
-    # 색상
+    # 색상 — 게임 텍스트 통일: 검정 글자 + 흰 테두리 (가독성)
     "SAY_NAME_COLOR": (0, 0, 0),
-    "SAY_TEXT_COLOR": (50, 50, 50),
+    "SAY_TEXT_COLOR": (0, 0, 0),
     # 폰트 테두리(스트로크): 가독성 개선용. (pygame 기본기능 아님 → 여러 번 찍는 방식)
     "SAY_FONT_OUTLINE_ENABLED": True,
     "SAY_FONT_OUTLINE_PX_320": 1,  # 320 기준 두께 (640에서는 2배)
     "SAY_FONT_OUTLINE_COLOR": (255, 255, 255),
+    # 일반 UI(OutlinedUIFont) 채움색. True면 render() 인자색 무시하고 이 색 사용
+    "UI_FONT_FILL_COLOR": (0, 0, 0),
+    "UI_FONT_FORCE_FILL_COLOR": True,
+    # 밝은 외곽선 + 밝은(거의 흰) 채움이 오면 대체할 채움색 (= UI_FONT_FILL_COLOR 권장)
+    "UI_FONT_LIGHT_FILL_COLOR": (0, 0, 0),
+    # 타이틀(logo) 제외 일반 UI 텍스트 테두리 — 대화창과 동일 규칙
+    "UI_FONT_OUTLINE_ENABLED": True,
+    "UI_FONT_OUTLINE_PX_320": 1,
+    "UI_FONT_OUTLINE_COLOR": (255, 255, 255),
 
     # --- SAY 말풍선 (assets/{prefix}_0.png … 연속 번호) ---
     # SAY 스텝에 "bubble": true 및 bubble_target(비우면 who) 가 있을 때만 표시.
@@ -183,6 +192,8 @@ CONFIG = {
     "EDITOR_TOOLTIP_MAX_BODY_WIDTH_PX": 330,
     "EDITOR_TOOLTIP_WIDTH_SIDEBAR_MUL": 1.5,
     "EDITOR_SIDEBAR_WIDTH_PX": 220,
+    # 에디터 OBJECTS: 원본 스프라이트 긴 변 ≥ 이 값이면「큰것」숨김 시 이름 칩으로 표시
+    "EDITOR_HIDE_LARGE_MIN_PX": 160,
     # 배경 알파(낮을수록 반투명 — 아래 리스트 선택이 비침)
     "EDITOR_TOOLTIP_BG_ALPHA": 185,
 
@@ -256,7 +267,11 @@ CONFIG = {
 
 
     # --- 스프라이트 스케일 캐시 ---
-    "SPRITE_SCALE_STEP": 0.1,
+    # STEP: 원근/줌 배율 양자화. 예전에 0.1이면 크기가 10%씩 탁탁 점프(Mode7에서 특히).
+    # 0=끔 → 출력 가로·세로를 픽셀 단위로만 반올림(프레임당 최대 1px 변화).
+    "SPRITE_SCALE_STEP": 0.0,
+    # 픽셀 아트용 nearest scale. True=smoothscale(외곽 흐림) — 원근 크기 점프와는 별개.
+    "SPRITE_SCALE_SMOOTH": False,
     "SPRITE_SCALE_CACHE_MAX_ITEMS": 512,
     "SPRITE_SCALE_CACHE_MB_LIMIT": 96.0,
 
@@ -473,10 +488,45 @@ CONFIG = {
         {"key": "o", "event_id": "ev_hotkey_overlay"},  # 오버레이 토글
         {"key": "l", "event_id": "ev_hotkey_tilt"},  # 틸트 토글
         {"key": "r", "event_id": "ev_hotkey_shear"},  # 쉬어 토글
+        {"key": "q", "event_id": "ev_hotkey_3d_rotate"},  # 3D_ROTATE 토글
         {"key": "F9", "event_id": "ev_hotkey_jump_shadow"},  # 점프 그림자 토글
         {"key": "x", "event_id": "ev_hotkey_zoom_cycle"},  # 줌 순환
         {"key": "y", "event_id": "ev_hotkey_cloud"},  # 구름 효과
     ],
+    # --- 3D_ROTATE / Mode7 (레이싱 전용 맵 원근). 사다리꼴 레거시 키는 사용하지 않음. ---
+    "ROTATE3D_DEFAULT_STRENGTH": 1.0,   # 이벤트/토글 on 시 목표 strength(0~1)
+    "ROTATE3D_DEFAULT_DURATION_SEC": 0.4,  # 이벤트 스텝 기본 보간 시간(초)
+    "ROTATE3D_SPEED": 0.14,            # 핫키 토글 등 duration 없을 때 매 프레임 보간 계수
+    "ROTATE3D_EPS": 0.003,             # strength≈0 판정·각도키 활성 임계
+    "ROTATE3D_ANGLE_SPEED": 2.2,       # Mode7 활성 시 < > 키 회전 속도 (rad/s). activity가 heading을 쓰면 이 키는 옵션
+    # 배경 Mode7: p = CAM_H/(row+NEAR), depth = p*DEPTH_MUL, lat_scale = p*LATERAL_MUL
+    # 스프라이트 크기(SNES 카트): scale = CAMERA_BACK/forward — 앞뒤만. 같은 깊이면 플레이어와 동일 크기.
+    "ROTATE3D_HORIZON_FRAC": 0.30,     # 지평선 높이 = 화면높이×비율×strength
+    "ROTATE3D_CAM_H": 80.0,            # p = CAM_H/(row+NEAR)   80
+    "ROTATE3D_NEAR": 30.0,             # 작을수록 원근 강함(너무 작으면 하단이 광각처럼 보임)   30.0
+    "ROTATE3D_DEPTH_MUL": 165.0,       # depth = p * DEPTH_MUL (PIVOT_FIT 켜면 런타임에 덮어씀) 165
+    "ROTATE3D_LATERAL_MUL": 1.05,      # 도로 위치 샘플용. 스프라이트 크기에는 안 씀
+    "ROTATE3D_CAMERA_BACK": 150.0,      # 플레이어 뒤 카메라 + 스프라이트 scale=1 기준 깊이 250
+    "ROTATE3D_BASE_HEADING": 1.5707963267948966,  # 기본 시선(+y). heading = BASE + ui.rotate3d_angle
+    "ROTATE3D_PLAYER_BOTTOM_PAD": 80,  # 플레이어 하단 고정 여백(px)
+    # Mode7 화면에서 플레이어(투영 중심) X 비율. 0.5=중앙, 1/3≈좌측 — 우측 시야에 트랙 전방이 더 넓게 들어옴
+    "ROTATE3D_PLAYER_SCREEN_X_FRAC": 0.35,
+    # True면 DEPTH_MUL만 맞춰 발이 빌보드 Y에 오게 함(행별 원근 식은 그대로)
+    "ROTATE3D_PIVOT_FIT_PLAYER": True,
+    # 스프라이트: scale = ref_forward/forward (앞뒤만). 호출측에서 ×zoom
+    "ROTATE3D_SPRITE_SCALE_ENABLED": True,
+    "ROTATE3D_SPRITE_SCALE_MIN": 0.05,
+    "ROTATE3D_SPRITE_SCALE_MAX": 8.0,
+    # Mode7 스프라이트 bounds-aware cull 패딩(px). 발점이 아니라 스케일된 사각형이
+    # 화면과 겹치는지 볼 때 좌우·상단(·동일 pad)·하단 여유. 지평선으로 발을 자르지 않음.
+    "ROTATE3D_CULL_PAD_PX": 64,        # 좌우·상단 여유(스프라이트 몸통이 가장자리에 남아 있으면 유지)
+    "ROTATE3D_CULL_BELOW_PAD_PX": 220, # 하단 여유(화면 아래 발·큰 스케일 빌보드)
+    # Mode7 빈 공간 채움: 지평선 위=하늘, 아래(맵 밖)=바닥색. 파노라마 경로가 있으면 하늘만 360 원통 샘플.
+    "ROTATE3D_SKY_COLOR": (135, 206, 235),      # 지평선 위 단색(파노라마 없거나 로드 실패 시)
+    "ROTATE3D_GROUND_FILL_COLOR": (135, 206, 235),    # 지평선 아래·맵 밖 픽셀
+    "ROTATE3D_SKY_PANORAMA": "",                 # 360 하늘 이미지 경로. 빈 문자열=단색. 예: assets/images/bg/sky_360.png
+    "ROTATE3D_SKY_PANORAMA_YAW_OFFSET": 0.0,     # 파노라마 기준 yaw 보정(라디안). 이미지 정면 맞출 때
+    "ROTATE3D_SKY_FOV_RAD": 1.2,                 # 화면 가로가 담는 하늘 시야각(라디안). 클수록 좌우로 더 많이 보임
     # 시작 시 디버그 텍스트 오버레이(HUD) 기본 표시 여부. 런타임 토글은 'O' 키.
     "SHOW_OVERLAY_DEFAULT": False,
     # 오버레이(HUD)를 껐을 때도 RSS 메모리 표시를 남길지 여부.
@@ -650,18 +700,20 @@ def resolve_map_field_defaults(map_id: str) -> dict:
 
 # 야구장 필드 미니게임 — 전역 기본값 (snake_case).
 # 맵별 좌표·밸런스는 world_data.json → [맵ID].baseball 에서 덮어씀.
+# exit_map/exit_pos: 미니게임 맵에서 세이브·강제종료 시 이 장소로 저장/스폰 (flow.resolve_activity_arena_exit).
 BASEBALL_DEFAULTS = {
     "default_map_id": "bg_baseball1",
-    "default_player_char": "c10",
+    "default_player_char": "nachos_a",
     "story_win_flag": "progress_baseball_story",
     "story_seed_flag": "progress_baseball_seed",
     "p2_chars": [       
-        "cc1", "cc2", "cc3", "cc4", "c10", "carrot"
+        "summer_k", "boy2_k", "boy3_k", "girl1_k", "girl2_k", "girl3_k"
     ],
     "exit_map": "bg_jjangpu",
     "exit_pos": [850.0, 2310.0],
     "swings": 5,
     "gauge_time_limit_sec": 5.0,
+    "gauge_sweep_end_speed_mul": 1.5,
     "npc_skill": 0.62,
     "npc_flash_sec": 0.55,
     "tilt_compressed": 0.3,
@@ -669,6 +721,7 @@ BASEBALL_DEFAULTS = {
     "fan_half_deg": 37.0,
     "fan_half_deg_auto": False,
     "fan_half_margin_deg": 1.5,
+    "fan_half_guide_visible": True,
     "dir_sweep_hz": 2.0,
     "pwr_sweep_hz": 2.0,
     "pwr_sweet_spot_half_width": 0.05,
@@ -694,6 +747,18 @@ BASEBALL_DEFAULTS = {
     "pwr_sweet_spot_bonus_mul": 1.1,
     "pwr_power_sweet_spot_bonus_mul": 1.2,
     "pwr_confirm_hold_sec": 1.0,
+    "normal_swing_pause_sec": 0.5,
+    "power_swing_pause_sec": 1.5,
+    "power_swing_zoom_value": 4.0,
+    "power_swing_zoom_in_sec": 0.12,
+    "power_swing_zoom_restore_sec": 0.12,
+    "power_swing_shake_sec": 1.0,
+    "power_swing_shake_amp_px": 50.0,
+    "power_swing_shake_freq_hz": 16.0,
+    "p2_switch_fade_out_sec": 0.25,
+    "p2_switch_fade_hold_sec": 0.08,
+    "p2_switch_fade_in_sec": 0.25,
+    "swing_anim_base_sec": 0.45,
     "swing_speed_mul": 3.0,
     "pwr_trap_half_width": 0.01,
     "swing_dir_spread_ratio": 0.10,
@@ -707,6 +772,7 @@ BASEBALL_DEFAULTS = {
     "max_carry_px": 960.0,
     "carry_distance_mul": 1.3,
     "flight_height_mul": 1.5,
+    "ball_motion_speed_mul": 0.9,
     "px_per_meter": 12.39,
     "tee_height": 16.0,
     "bounce_duration_mul": 1.3,
@@ -756,15 +822,179 @@ BASEBALL_DEFAULTS = {
     "turn_pause_sec": 1.35,
 }
 
+# 레이스 필드 미니게임 — 전역 기본값.
+# 맵별 path·exit 는 world_data.json → [맵ID].racing 에서 덮어씀.
+# exit_map/exit_pos: 서킷 맵 세이브 금지 → 여기(또는 맵별 racing.exit_*)로 저장/스폰.
+# path: 월드 좌표 폴리라인(닫힌 루프 권장). 마스크 경로 대신 가벼움.
+RACING_DEFAULTS = {
+    "default_map_id": "bg_town",
+    "default_player_char": "summer_k",
+    "char_pick": [
+        "summer_k", "boy1_k", "boy2_k", "boy3_k", "girl1_k", "girl2_k", "girl3_k",
+    ],
+    "exit_map": "bg_jjangpu",
+    "exit_pos": [850.0, 2310.0],
+    # bg_town(640x480) 임시 루프 — 도로가 생기면 world_data.racing.path 로 교체
+    "path": [
+        [120.0, 250.0],
+        [220.0, 170.0],
+        [360.0, 150.0],
+        [500.0, 190.0],
+        [560.0, 280.0],
+        [480.0, 360.0],
+        [320.0, 380.0],
+        [180.0, 340.0],
+    ],
+    "closed": True,
+    "start_s": 0.0,
+    "start_spacing": 22.0,   # 스타트 그리드: 플레이어 뒤로 NPC 간격(px along path)
+    "lane_width": 26.0,      # 상/하 차선 오프셋(경로 법선 방향, 월드 px)
+    "laps": 3,
+    "max_speed": 130.0,      # 직선 최고속 (월드 px/s)
+    "min_corner_speed": 42.0,
+    "accel": 52.0,           # 출발·가속 (서서히 붙는 느낌)
+    "brake": 95.0,           # 코너 감속
+    "corner_brake": 1.4,     # 앞 꺾임(rad)에 비례한 목표속도 감소
+    "corner_lookahead_px": 90.0,  # 앞 경로점 chase 거리(클수록 일찍 돌기 시작)
+    "turn_rate_rad": 2.2,    # 헤딩이 목표 방향으로 따라가는 각속도 — 코너 관성
+    "lane_lerp": 4.2,        # 차선 목표로 붙는 속도
+    # 같은 레인에 다른 레이서가 이 경로거리(px) 이내면 진입 불가(겹침 방지)
+    "lane_occupy_s": 40.0,
+    # 네임박스: 발 화면좌표에서 위로 올린 고정 px (Mode7 원근 스케일 없음 · 오버레이급)
+    "namebox_head_off_px": 42.0,
+    # --- 레인 화살표 HUD (화면 왼쪽 · 한 칸씩 A↔B↔C) ---
+    # 에셋이 없으면 삼각형 화살표를 코드로 자동 생성.
+    # 애니 세트(선택): assets/images/ui/racing/<lane_btn_up_anim>/ 폴더 PNG 시퀀스
+    #   또는 assets/images/ui/racing/<name>_0.png … 번호 시퀀스 (_load_numbered_ui_sequence).
+    "lane_btn_up_anim": "lane_up",       # 위 화살표 애니 세트 이름
+    "lane_btn_down_anim": "lane_down",   # 아래 화살표 애니 세트 이름
+    "lane_btn_anim_fps": 8.0,            # 에셋 프레임 재생 속도
+    "lane_btn_size_px_320": 40.0,        # 버튼 한 변(320 설계폭 기준 → 논리 해상도 스케일)
+    "lane_btn_gap_px_320": 10.0,         # 위·아래 버튼 간격
+    "lane_btn_margin_x_frac": 0.03,      # 화면 왼쪽 여백 (폭 비율)
+    "lane_btn_center_y_frac": 0.55,      # 두 버튼 묶음의 세로 중심 (높이 비율)
+    "path_pull": 2.2,        # 경로로 끌어당기는 힘(작을수록 코너에서 바깥으로 더 나감)
+    "path_soft_follow": 0.5, # (레거시·미사용) path_pull 사용
+    "cam_side_sign": -1.0,   # Mode7: heading + sign*π/2 = 진행 방향의 오른쪽에서 비춤
+    "cam_turn_rate_rad": 3.4,  # 카메라가 플레이어 heading을 따라 도는 각속도(스냅 방지)
+    "rotate3d_strength": 1.0,
+    "countdown_sec": 3.0,
+    "finish_hold_sec": 2.2,
+    "debug_draw_path": False,
+    # --- 경로 위 아이템 포인트 ---
+    # items: [{s, lane:"A"|"B"|"C", type, kind?, ...}, ...]
+    # kind: normal | secret | roulette | summon  (기본 normal)
+    #   secret — 시크릿 상자(먹을 때 룰렛 UI 후 speed/slow/swap 중 랜덤)
+    #   roulette — 발판 위 아이템이 A→B→C→A 로 이동 (roulette_period_sec)
+    #   summon — 밟으면 경로 어딘가에 아이템 소환 + 번쩍 표시
+    # s = 경로 누적거리(px). lane A=상단 B=중앙 C=하단.
+    "items": [],
+    "item_pick_radius": 18.0,
+    "item_draw_height": 10.0,
+    "item_random_enabled": False,
+    "item_random_count": 6,
+    # 청정 구간: [[s0,s1], ...] — 날씨·랜덤 소환·번개 등 글로벌 랜덤 무효
+    "clean_zones": [],
+    # 맵별 날씨 (전역 랜덤). enabled=false 면 비활성.
+    # rain: 구간 통과 시 감속 / lightning: 구간 내 확률로 잠깐 정지(최대 패널티)
+    "weather": {
+        "enabled": True,
+        "rain": {"chance_per_lap": 0.45, "zone_len_s": [70.0, 160.0], "slow_mul": 0.72},
+        "lightning": {"chance_per_lap": 0.22, "zone_len_s": [40.0, 90.0], "strike_chance": 0.35, "freeze_sec": 1.15},
+    },
+    # 슬립스트림 — 최고속 90%↑ 앞차 뒤 반투명 에프터 / 뒤차 가속 보너스
+    "slipstream_min_speed_frac": 0.90,
+    "slipstream_follow_s": 38.0,
+    "slipstream_lane_tol": 0.42,
+    "slipstream_accel_bonus": 28.0,
+    "slipstream_bump_s": 22.0,
+    "slipstream_bump_front_boost": 1.35,
+    "slipstream_bump_rear_slow": 0.45,
+    "slipstream_bump_slow_sec": 1.4,
+    # 시크릿 상자 룰렛 UI
+    "secret_spin_sec": 1.35,
+    "roulette_lane_period_sec": 0.55,
+    "summon_flash_sec": 1.6,
+}
+
+# 레이스 아이템/효과 레지스트리 — type 키 → 기본 효과·에셋
+# effect: speed_mul | swap | freeze (freeze 는 날씨 번개 등에도 사용)
+RACING_ITEM_TYPES = {
+    "speed": {
+        "label": "속도 증가",
+        "effect": "speed_mul",
+        "strength": 1.45,
+        "duration_sec": 2.2,
+        "asset": "item_racing001",
+        "placeholder_color": (60, 210, 110),
+        "roulette_color": (80, 230, 130),
+    },
+    "slow": {
+        "label": "속도 감소",
+        "effect": "speed_mul",
+        "strength": 0.55,
+        "duration_sec": 2.0,
+        "asset": "item_racing002",
+        "placeholder_color": (220, 80, 70),
+        "roulette_color": (240, 100, 90),
+    },
+    "swap": {
+        "label": "위치 교환!",
+        "effect": "swap",
+        "strength": 1.0,
+        "duration_sec": 0.0,
+        "asset": "item_racing003",
+        "placeholder_color": (200, 120, 240),
+        "roulette_color": (220, 150, 255),
+    },
+    "secret": {
+        "label": "???",
+        "effect": "secret",
+        "strength": 1.0,
+        "duration_sec": 0.0,
+        "asset": "item_racing_secret",
+        "placeholder_color": (255, 210, 80),
+        "roulette_color": (255, 230, 120),
+    },
+    "roulette_pad": {
+        "label": "룰렛 발판",
+        "effect": "roulette_pad",
+        "strength": 1.0,
+        "duration_sec": 0.0,
+        "asset": "item_racing_roulette",
+        "placeholder_color": (100, 180, 255),
+        "roulette_color": (120, 200, 255),
+    },
+    "summon_pad": {
+        "label": "소환 발판",
+        "effect": "summon_pad",
+        "strength": 1.0,
+        "duration_sec": 0.0,
+        "asset": "item_racing_summon",
+        "placeholder_color": (255, 160, 60),
+        "roulette_color": (255, 190, 90),
+    },
+}
+
+# 시크릿 상자·소환 시 실제로 나올 수 있는 효과 풀
+RACING_MYSTERY_EFFECT_POOL = ("speed", "slow", "swap")
+
+# 차선 문자 → 경로 법선 오프셋 부호 (racing.LANE_*)
+RACING_LANE_LETTERS = {
+    "A": -1.0,  # 상단
+    "B": 0.0,   # 중앙
+    "C": 1.0,   # 하단
+}
+
 # 낚시터 정의 — 물 영역·낚시대 위치(이벤트박스와 별도).
 # 이벤트박스는 world_data.json event_zones, 물가 좌표는 여기서 관리.
 # (에디터: 존은 편집 가능, 물 rect는 추후 전용 레이어 추가 예정)
 FISHING_PONDS = {
     "jjangpu_water1": {
         "map_id": "bg_jjangpu",
-        # 이벤트박스 524,987 — 661,1025 → stand 중심
-        "stand": [592.0, 1012.0],
-        "face": "down",
+        # 왼쪽 물가에 서서 오른쪽으로 찌를 던지도록 시작 위치를 재배치.
+        "stand": [459.0, 1094.0],
+        "face": "right",
         # 물가 491,1049 — 620,1139
         "water_rect": [491.0, 1049.0, 129.0, 90.0],
         "cast_near": 36.0,
@@ -807,10 +1037,159 @@ FISHING_PONDS = {
 
 # UI 폰트 레지스트리: 논리 이름 → 프로젝트 루트 기준 .ttf 경로.
 # 값이 None 이거나 파일이 없으면 런타임에서 pygame 기본 폰트를 씁니다.
+# 에디터 FONT 창의「폰트 종류」는 이 키(default/dialog/logo)를 고릅니다.
 UI_FONT_FILES = {
     "default": "assets/fonts/NanumGothic.ttf",
     "dialog": "assets/fonts/NanumGothic.ttf",
     "logo": "assets/fonts/Pinkfong Baby Shark Font_ Bold.ttf",
+}
+
+
+# ---------------------------------------------------------------------------
+# 용도별 폰트 프로필 — 에디터 FONT 창에서 슬롯마다 수정
+# font_key: UI_FONT_FILES 키
+# size_320: 320 설계 기준 글자 크기 (WIDTH/320 으로 스케일)
+# color / outline_*: 채움·테두리
+# force_color: True면 render() 에 넘긴 색 무시하고 color 사용
+# antialias: True면 글리프 가장자리 부드럽게(SDL_ttf AA). False면 단단한 픽셀 느낌
+# soft_px_320: 테두리 외곽 번짐(글로우). 0=선명, 클수록 테두리가 부드럽게 퍼짐
+# ---------------------------------------------------------------------------
+UI_FONT_PROFILE_DEFAULTS = {
+    "dialog": {
+        "label": "대화 본문",
+        "desc": "SAY 대사 텍스트(텍스트박스 안)",
+        "font_key": "dialog",
+        "size_320": 10,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "dialog_name": {
+        "label": "대화 이름",
+        "desc": "SAY 화자 이름(Who)",
+        "font_key": "dialog",
+        "size_320": 12,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "ui": {
+        "label": "일반 UI / 오버레이",
+        "desc": "OVERLAY_UI 버튼·문구, 나가기 확인 등",
+        "font_key": "default",
+        "size_320": 14,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "object_label": {
+        "label": "오브젝트 라벨",
+        "desc": "맵 오브젝트 text_label (TV 등)",
+        "font_key": "default",
+        "size_320": 16,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "hud_fishing": {
+        "label": "낚시 HUD",
+        "desc": "낚시 미니게임 화면 안내·성공 문구",
+        "font_key": "default",
+        "size_320": 12,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "hud_baseball": {
+        "label": "야구 HUD",
+        "desc": "야구 메뉴·점수판·게이지 안내 등",
+        "font_key": "default",
+        "size_320": 12,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "hud_racing": {
+        "label": "레이스 HUD",
+        "desc": "레이스 메뉴·카운트다운·완주 문구",
+        "font_key": "default",
+        "size_320": 14,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "logo": {
+        "label": "타이틀 / 로고",
+        "desc": "TITLE·홈런 연출 등 logo 폰트",
+        "font_key": "logo",
+        "size_320": 36,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+    "screen_caption": {
+        "label": "화면 전환 자막",
+        "desc": "SCREEN 스텝 hold 텍스트",
+        "font_key": "default",
+        "size_320": 14,
+        "color": (0, 0, 0),
+        "outline_enabled": True,
+        "outline_px_320": 1,
+        "outline_color": (255, 255, 255),
+        "force_color": True,
+        "antialias": True,
+        "soft_px_320": 0,
+    },
+}
+
+# 에디터 슬롯 목록 순서
+UI_FONT_PROFILE_ORDER = (
+    "dialog",
+    "dialog_name",
+    "ui",
+    "object_label",
+    "hud_fishing",
+    "hud_baseball",
+    "hud_racing",
+    "logo",
+    "screen_caption",
+)
+
+# CONFIG 에도 넣어 런타임·저장이 같은 객체를 쓰게 함
+CONFIG["UI_FONT_PROFILES"] = {
+    k: dict(v) for k, v in UI_FONT_PROFILE_DEFAULTS.items()
 }
 
 
@@ -948,3 +1327,438 @@ def apply_android_ram_profile(config=None):
 
 
 apply_android_ram_profile()
+
+
+# ---------------------------------------------------------------------------
+# 게임 UI 통합 상태 — ui.state.json
+#   layout / profiles / say / activities / overlay_defaults
+# 에디터 FONT 창도 여기로 저장. editor_ui_state.json 은 에디터 전용(제외).
+# 구 ui_font_settings.json 은 없으면 무시, 있으면 최초 로드 폴백.
+# ---------------------------------------------------------------------------
+
+UI_STATE_PATH = "ui.state.json"
+UI_FONT_SETTINGS_PATH = "ui_font_settings.json"  # 레거시 폴백(읽기 전용)
+
+# 미니게임·오버레이 글자/레이아웃 기본값 (ui.state.json activities·overlay_defaults 가 덮어씀)
+# *_px_320: 320 설계폭 기준 → scale_ui_text_px 로 스케일
+UI_ACTIVITY_DEFAULTS = {
+    "racing": {
+        "menu_title_px_320": 14,       # 메뉴·캐릭터선택 제목 (구 하드코딩 22 → 과대)
+        "menu_body_px_320": 11,        # 버튼·힌트·랩 HUD
+        "countdown_px_320": 32,        # 3·2·1·GO
+        "finish_px_320": 24,           # 골인
+        "item_msg_px_320": 14,         # 아이템 획득 메시지
+        "menu_button_width_frac": 0.72,
+        "menu_button_height_frac": 0.10,
+    },
+    "baseball": {
+        "menu_title_px_320": 14,
+        "menu_body_px_320": 11,
+    },
+    "fishing": {
+        "hud_max_px": 14,
+        "success_max_px": 18,
+    },
+}
+
+UI_OVERLAY_DEFAULTS = {
+    "game_exit_btn": {"size": 10, "pad_x": 6, "pad_y": 3},
+    "game_exit_confirm": {"text_size": 13, "button_size": 12},
+}
+
+# SAY 레이아웃 키 — ui.state.json say{} 에서 CONFIG 로 반영
+UI_SAY_LAYOUT_KEYS = (
+    "SAY_TEXTBOX_RECT_320",
+    "SAY_LINE_GAP_PX_320",
+    "SAY_NAME_GAP_PX_320",
+    "SAY_BUBBLE_OFFSET_X_PX_320",
+    "SAY_BUBBLE_OFFSET_Y_PX_320",
+)
+
+
+def ensure_ui_activity_settings(config=None) -> dict:
+    """CONFIG.UI_ACTIVITY_SETTINGS 에 미니게임별 UI 수치를 채움."""
+    cfg = CONFIG if config is None else config
+    cur = cfg.get("UI_ACTIVITY_SETTINGS")
+    if not isinstance(cur, dict):
+        cur = {}
+    out = {}
+    for aid, defaults in UI_ACTIVITY_DEFAULTS.items():
+        row = dict(defaults)
+        raw = cur.get(aid)
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if k in row or k.endswith("_px_320") or k.endswith("_frac") or k.endswith("_px"):
+                    try:
+                        if isinstance(defaults.get(k), float) or str(k).endswith("_frac"):
+                            row[k] = float(v)
+                        elif isinstance(defaults.get(k), int) or str(k).endswith("_px") or str(k).endswith("_px_320"):
+                            row[k] = float(v)
+                        else:
+                            row[k] = v
+                    except (TypeError, ValueError):
+                        pass
+        out[aid] = row
+    for aid, raw in cur.items():
+        if aid not in out and isinstance(raw, dict):
+            out[aid] = dict(raw)
+    cfg["UI_ACTIVITY_SETTINGS"] = out
+    return out
+
+
+def ensure_ui_overlay_defaults(config=None) -> dict:
+    """CONFIG.UI_OVERLAY_DEFAULTS 채움."""
+    cfg = CONFIG if config is None else config
+    cur = cfg.get("UI_OVERLAY_DEFAULTS")
+    if not isinstance(cur, dict):
+        cur = {}
+    out = {}
+    for kid, defaults in UI_OVERLAY_DEFAULTS.items():
+        row = dict(defaults)
+        raw = cur.get(kid)
+        if isinstance(raw, dict):
+            row.update(raw)
+        out[kid] = row
+    for kid, raw in cur.items():
+        if kid not in out and isinstance(raw, dict):
+            out[kid] = dict(raw)
+    cfg["UI_OVERLAY_DEFAULTS"] = out
+    return out
+
+
+def get_activity_ui(activity_id: str, key: str, default=None):
+    """
+    ui.state.json activities.<id>.<key> 조회.
+    예: get_activity_ui('racing', 'menu_title_px_320')
+    """
+    ensure_ui_activity_settings()
+    aid = str(activity_id or "").strip().lower()
+    block = (CONFIG.get("UI_ACTIVITY_SETTINGS") or {}).get(aid) or {}
+    if key in block:
+        return block[key]
+    fallback = (UI_ACTIVITY_DEFAULTS.get(aid) or {}).get(key, default)
+    return fallback
+
+
+def _rgb_tuple(value, default=(0, 0, 0)):
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            return (int(value[0]), int(value[1]), int(value[2]))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.replace("(", "").replace(")", "").split(",")]
+        if len(parts) >= 3:
+            try:
+                return (int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
+            except (TypeError, ValueError):
+                pass
+    return (int(default[0]), int(default[1]), int(default[2]))
+
+
+def _normalize_font_profile(slot_id: str, raw: dict | None) -> dict:
+    """기본값 ⊕ raw → 정규 프로필 dict."""
+    base = dict(UI_FONT_PROFILE_DEFAULTS.get(slot_id) or UI_FONT_PROFILE_DEFAULTS["ui"])
+    if not isinstance(raw, dict):
+        return base
+    out = dict(base)
+    if "label" in raw and str(raw.get("label") or "").strip():
+        out["label"] = str(raw["label"]).strip()
+    if "desc" in raw and str(raw.get("desc") or "").strip():
+        out["desc"] = str(raw["desc"]).strip()
+    if "font_key" in raw:
+        out["font_key"] = str(raw.get("font_key") or base["font_key"]).strip() or base["font_key"]
+    for num_key in ("size_320", "outline_px_320", "soft_px_320"):
+        if num_key in raw:
+            try:
+                out[num_key] = float(raw[num_key])
+            except (TypeError, ValueError):
+                pass
+    for col_key in ("color", "outline_color"):
+        if col_key in raw:
+            out[col_key] = _rgb_tuple(raw[col_key], base.get(col_key, (0, 0, 0)))
+    for bkey in ("outline_enabled", "force_color", "antialias"):
+        if bkey in raw:
+            v = raw[bkey]
+            if isinstance(v, str):
+                out[bkey] = v.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                out[bkey] = bool(v)
+    # soft 클램프
+    try:
+        out["soft_px_320"] = max(0.0, min(8.0, float(out.get("soft_px_320", 0) or 0)))
+    except (TypeError, ValueError):
+        out["soft_px_320"] = 0.0
+    return out
+
+
+def ensure_ui_font_profiles(config=None) -> dict:
+    """CONFIG.UI_FONT_PROFILES 가 슬롯을 모두 갖도록 채움."""
+    cfg = CONFIG if config is None else config
+    cur = cfg.get("UI_FONT_PROFILES")
+    if not isinstance(cur, dict):
+        cur = {}
+    out = {}
+    for sid in UI_FONT_PROFILE_ORDER:
+        out[sid] = _normalize_font_profile(sid, cur.get(sid))
+    # 알 수 없는 커스텀 슬롯도 유지
+    for sid, raw in cur.items():
+        if sid not in out and isinstance(raw, dict):
+            out[sid] = _normalize_font_profile(sid, raw)
+    cfg["UI_FONT_PROFILES"] = out
+    return out
+
+
+def sync_legacy_font_keys_from_profiles(config=None) -> None:
+    """프로필 → 레거시 SAY_*/UI_FONT_* 키 (기존 코드 호환)."""
+    cfg = CONFIG if config is None else config
+    profiles = ensure_ui_font_profiles(cfg)
+    d = profiles.get("dialog") or {}
+    n = profiles.get("dialog_name") or {}
+    u = profiles.get("ui") or {}
+    cfg["SAY_FONT_KEY"] = str(d.get("font_key") or "dialog")
+    cfg["SAY_FONT_SIZE_320"] = float(d.get("size_320", 10) or 10)
+    cfg["SAY_NAME_FONT_SIZE_320"] = float(n.get("size_320", 12) or 12)
+    cfg["SAY_TEXT_COLOR"] = _rgb_tuple(d.get("color"), (0, 0, 0))
+    cfg["SAY_NAME_COLOR"] = _rgb_tuple(n.get("color"), (0, 0, 0))
+    cfg["SAY_FONT_OUTLINE_ENABLED"] = bool(d.get("outline_enabled", True))
+    cfg["SAY_FONT_OUTLINE_PX_320"] = float(d.get("outline_px_320", 1) or 1)
+    cfg["SAY_FONT_OUTLINE_COLOR"] = _rgb_tuple(d.get("outline_color"), (255, 255, 255))
+    fill = _rgb_tuple(u.get("color"), (0, 0, 0))
+    cfg["UI_FONT_FILL_COLOR"] = fill
+    cfg["UI_FONT_LIGHT_FILL_COLOR"] = fill
+    cfg["UI_FONT_FORCE_FILL_COLOR"] = bool(u.get("force_color", True))
+    cfg["UI_FONT_OUTLINE_ENABLED"] = bool(u.get("outline_enabled", True))
+    cfg["UI_FONT_OUTLINE_PX_320"] = float(u.get("outline_px_320", 1) or 1)
+    cfg["UI_FONT_OUTLINE_COLOR"] = _rgb_tuple(u.get("outline_color"), (255, 255, 255))
+
+
+def _migrate_flat_font_settings_into_profiles(cfg: dict, raw: dict) -> None:
+    """구 ui_font_settings.json (flat 키) → 프로필 반영."""
+    profiles = ensure_ui_font_profiles(cfg)
+    d = profiles["dialog"]
+    n = profiles["dialog_name"]
+    u = profiles["ui"]
+    if "SAY_FONT_KEY" in raw:
+        d["font_key"] = str(raw["SAY_FONT_KEY"] or "dialog")
+        n["font_key"] = d["font_key"]
+    if "SAY_FONT_SIZE_320" in raw:
+        try:
+            d["size_320"] = float(raw["SAY_FONT_SIZE_320"])
+        except (TypeError, ValueError):
+            pass
+    if "SAY_NAME_FONT_SIZE_320" in raw:
+        try:
+            n["size_320"] = float(raw["SAY_NAME_FONT_SIZE_320"])
+        except (TypeError, ValueError):
+            pass
+    if "SAY_TEXT_COLOR" in raw:
+        d["color"] = _rgb_tuple(raw["SAY_TEXT_COLOR"], d["color"])
+    if "SAY_NAME_COLOR" in raw:
+        n["color"] = _rgb_tuple(raw["SAY_NAME_COLOR"], n["color"])
+    if "SAY_FONT_OUTLINE_ENABLED" in raw:
+        d["outline_enabled"] = bool(raw["SAY_FONT_OUTLINE_ENABLED"])
+        n["outline_enabled"] = d["outline_enabled"]
+    if "SAY_FONT_OUTLINE_PX_320" in raw:
+        try:
+            d["outline_px_320"] = float(raw["SAY_FONT_OUTLINE_PX_320"])
+            n["outline_px_320"] = d["outline_px_320"]
+        except (TypeError, ValueError):
+            pass
+    if "SAY_FONT_OUTLINE_COLOR" in raw:
+        c = _rgb_tuple(raw["SAY_FONT_OUTLINE_COLOR"], (255, 255, 255))
+        d["outline_color"] = c
+        n["outline_color"] = c
+    if "UI_FONT_FILL_COLOR" in raw:
+        u["color"] = _rgb_tuple(raw["UI_FONT_FILL_COLOR"], u["color"])
+    if "UI_FONT_FORCE_FILL_COLOR" in raw:
+        u["force_color"] = bool(raw["UI_FONT_FORCE_FILL_COLOR"])
+    if "UI_FONT_OUTLINE_ENABLED" in raw:
+        u["outline_enabled"] = bool(raw["UI_FONT_OUTLINE_ENABLED"])
+    if "UI_FONT_OUTLINE_PX_320" in raw:
+        try:
+            u["outline_px_320"] = float(raw["UI_FONT_OUTLINE_PX_320"])
+        except (TypeError, ValueError):
+            pass
+    if "UI_FONT_OUTLINE_COLOR" in raw:
+        u["outline_color"] = _rgb_tuple(raw["UI_FONT_OUTLINE_COLOR"], (255, 255, 255))
+    # 다른 슬롯도 ui 스타일로 맞출지 — 최초 이관 시에만 비슷하게
+    for sid in ("object_label", "hud_fishing", "hud_baseball", "hud_racing", "screen_caption"):
+        p = profiles[sid]
+        p["color"] = u["color"]
+        p["outline_enabled"] = u["outline_enabled"]
+        p["outline_px_320"] = u["outline_px_320"]
+        p["outline_color"] = u["outline_color"]
+        p["force_color"] = u["force_color"]
+    cfg["UI_FONT_PROFILES"] = profiles
+
+
+def _apply_ui_state_dict(cfg, raw: dict) -> int:
+    """
+    ui.state / 구 ui_font_settings dict → CONFIG.
+    반환: 적용한 프로필 슬롯 수(대략).
+    """
+    n = 0
+    # layout
+    layout = raw.get("layout") if isinstance(raw.get("layout"), dict) else {}
+    ref_w = raw.get("UI_TEXT_REFERENCE_WIDTH", layout.get("UI_TEXT_REFERENCE_WIDTH"))
+    if ref_w is not None:
+        try:
+            cfg["UI_TEXT_REFERENCE_WIDTH"] = float(ref_w)
+        except (TypeError, ValueError):
+            pass
+
+    # profiles
+    if isinstance(raw.get("profiles"), dict):
+        cur = ensure_ui_font_profiles(cfg)
+        for sid, prow in raw["profiles"].items():
+            cur[sid] = _normalize_font_profile(sid, prow if isinstance(prow, dict) else None)
+            n += 1
+        cfg["UI_FONT_PROFILES"] = cur
+    elif any(k.startswith("SAY_") or k.startswith("UI_FONT_") for k in raw.keys()):
+        _migrate_flat_font_settings_into_profiles(cfg, raw)
+        n = 1
+
+    # say layout → CONFIG
+    say = raw.get("say") if isinstance(raw.get("say"), dict) else {}
+    for k in UI_SAY_LAYOUT_KEYS:
+        if k in say:
+            cfg[k] = say[k]
+        elif k in raw:
+            cfg[k] = raw[k]
+
+    # activities
+    acts = raw.get("activities") if isinstance(raw.get("activities"), dict) else {}
+    if acts:
+        cfg["UI_ACTIVITY_SETTINGS"] = acts
+    ensure_ui_activity_settings(cfg)
+
+    # overlay_defaults
+    od = raw.get("overlay_defaults") if isinstance(raw.get("overlay_defaults"), dict) else {}
+    if od:
+        cfg["UI_OVERLAY_DEFAULTS"] = od
+    ensure_ui_overlay_defaults(cfg)
+
+    sync_legacy_font_keys_from_profiles(cfg)
+    return n
+
+
+def apply_ui_state(config=None, path: str | None = None) -> bool:
+    """
+    ui.state.json → CONFIG (폰트 프로필·SAY 레이아웃·미니게임 UI·오버레이 기본).
+    path 미지정 시 ui.state.json 우선, 없으면 구 ui_font_settings.json 폴백.
+    """
+    import json
+    import os
+
+    cfg = CONFIG if config is None else config
+    ensure_ui_font_profiles(cfg)
+    ensure_ui_activity_settings(cfg)
+    ensure_ui_overlay_defaults(cfg)
+
+    candidates = []
+    if path:
+        candidates.append(path)
+    else:
+        candidates.append(UI_STATE_PATH)
+        candidates.append(UI_FONT_SETTINGS_PATH)
+
+    p_used = None
+    raw = None
+    for p in candidates:
+        if not p or not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8-sig") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                raw = loaded
+                p_used = p
+                break
+        except Exception as e:
+            try:
+                print(f"[CONFIG] ui.state load fail ({p}): {e}")
+            except Exception:
+                pass
+
+    if raw is None:
+        sync_legacy_font_keys_from_profiles(cfg)
+        return False
+
+    n = _apply_ui_state_dict(cfg, raw)
+    if n or p_used:
+        try:
+            print(f"[CONFIG] ui.state: {n} profile slots from {p_used}")
+        except Exception:
+            pass
+    return True
+
+
+def apply_ui_font_settings(config=None, path: str | None = None) -> bool:
+    """하위호환 별칭 → apply_ui_state."""
+    return apply_ui_state(config=config, path=path)
+
+
+def save_ui_state(config=None, path: str | None = None) -> bool:
+    """통합 UI 상태를 ui.state.json 에 저장 (에디터 FONT 저장도 여기로)."""
+    import json
+
+    cfg = CONFIG if config is None else config
+    sync_legacy_font_keys_from_profiles(cfg)
+    profiles = ensure_ui_font_profiles(cfg)
+    activities = ensure_ui_activity_settings(cfg)
+    overlays = ensure_ui_overlay_defaults(cfg)
+
+    out_profiles = {}
+    for sid, prow in profiles.items():
+        row = {}
+        for k, v in prow.items():
+            if isinstance(v, tuple):
+                row[k] = [int(v[0]), int(v[1]), int(v[2])] if len(v) >= 3 else list(v)
+            else:
+                row[k] = v
+        out_profiles[sid] = row
+
+    say_out = {}
+    for k in UI_SAY_LAYOUT_KEYS:
+        if k in cfg:
+            val = cfg[k]
+            if isinstance(val, tuple):
+                say_out[k] = list(val)
+            else:
+                say_out[k] = val
+
+    out = {
+        "version": 1,
+        "layout": {
+            "UI_TEXT_REFERENCE_WIDTH": float(cfg.get("UI_TEXT_REFERENCE_WIDTH", 320) or 320),
+        },
+        "profiles": out_profiles,
+        "say": say_out,
+        "activities": activities,
+        "overlay_defaults": overlays,
+    }
+    p = path or UI_STATE_PATH
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        return True
+    except Exception as e:
+        try:
+            print(f"[CONFIG] ui.state save fail: {e}")
+        except Exception:
+            pass
+        return False
+
+
+def save_ui_font_settings(config=None, path: str | None = None) -> bool:
+    """하위호환 별칭 → save_ui_state (기본 경로 ui.state.json)."""
+    return save_ui_state(config=config, path=path or UI_STATE_PATH)
+
+
+ensure_ui_font_profiles()
+ensure_ui_activity_settings()
+ensure_ui_overlay_defaults()
+sync_legacy_font_keys_from_profiles()
+apply_ui_state()

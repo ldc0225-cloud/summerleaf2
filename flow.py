@@ -1,7 +1,83 @@
 import json, os, pygame, math
 import re
 import copy
-from data import CONFIG, CHAR_ASSETS, OBJ_ASSETS
+from data import CONFIG, CHAR_ASSETS, OBJ_ASSETS, BASEBALL_DEFAULTS, RACING_DEFAULTS
+
+
+def resolve_activity_arena_exit(world_data, map_id, config=None):
+    """
+    야구/레이싱 등 미니게임 전용 맵이면 (exit_map, exit_pos) 반환. 아니면 None.
+
+    [언제 쓰나]
+      - 게임 종료·세이브: 미니게임 맵 좌표를 영속화하지 않음
+      - 세이브 로드: 미니게임 맵에 남아 있으면 exit 장소로 스폰
+
+    [exit 출처 우선순위]
+      1) world_data[map].baseball.exit_*
+      2) world_data[map].racing.exit_*
+      3) world_data[map] 루트 exit_*
+      4) data.py BASEBALL_DEFAULTS / RACING_DEFAULTS
+    """
+    mid = str(map_id or "").strip()
+    if not mid or not isinstance(world_data, dict):
+        return None
+    m = world_data.get(mid)
+    if not isinstance(m, dict):
+        return None
+
+    candidates = []
+    bb = m.get("baseball")
+    if isinstance(bb, dict):
+        candidates.append((bb, BASEBALL_DEFAULTS if isinstance(BASEBALL_DEFAULTS, dict) else {}))
+    rc = m.get("racing")
+    if isinstance(rc, dict):
+        candidates.append((rc, RACING_DEFAULTS if isinstance(RACING_DEFAULTS, dict) else {}))
+    if m.get("exit_map") is not None or m.get("exit_pos") is not None:
+        candidates.append((m, {}))
+
+    for block, defaults in candidates:
+        if not isinstance(block, dict):
+            continue
+        em = str(block.get("exit_map") or defaults.get("exit_map") or "").strip()
+        ep = block.get("exit_pos")
+        if not (isinstance(ep, (list, tuple)) and len(ep) >= 2):
+            ep = defaults.get("exit_pos")
+        if not em or em == mid:
+            continue
+        if not (isinstance(ep, (list, tuple)) and len(ep) >= 2):
+            continue
+        try:
+            pos = [float(ep[0]), float(ep[1])]
+        except (TypeError, ValueError, IndexError):
+            continue
+        return em, pos
+    return None
+
+
+def apply_activity_arena_save_location(world_data, map_id, player_pos, config=None):
+    """세이브용 맵·좌표. 미니게임 전용 맵이면 exit 로 치환."""
+    resolved = resolve_activity_arena_exit(world_data, map_id, config=config)
+    if resolved is None:
+        return str(map_id or ""), player_pos
+    return resolved[0], resolved[1]
+
+
+def normalize_activity_arena_in_save(save_data, world_data, config=None):
+    """
+    디스크/메모리 세이브에 미니게임 맵이 남아 있으면 exit 로 고쳐 씀.
+    MAP 이벤트·의도적 맵 이동에는 쓰지 않는다 (load_map 가로채기 금지).
+    변경했으면 True.
+    """
+    if not isinstance(save_data, dict):
+        return False
+    mid = save_data.get("current_map")
+    resolved = resolve_activity_arena_exit(world_data, mid, config=config)
+    if resolved is None:
+        return False
+    em, ep = resolved
+    save_data["current_map"] = em
+    save_data["player_pos"] = [int(ep[0]), int(ep[1])]
+    return True
 
 def merge_event_catalog(event_data):
     """
@@ -2162,6 +2238,17 @@ class GameFlow:
             migrate_baseball_records_from_save(self.save_data, self.config)
         except Exception:
             pass
+        # 강제 종료로 미니게임 맵이 세이브에 남은 경우만 exit 로 교정 (의도적 MAP 이동은 load_map 그대로)
+        try:
+            if normalize_activity_arena_in_save(self.save_data, self.world_data, self.config):
+                with open(self.save_path, "w", encoding="utf-8") as f:
+                    json.dump(self.save_data, f, ensure_ascii=False, indent=4)
+                print(
+                    "[save] activity arena spawn fixed → "
+                    f"{self.save_data.get('current_map')} @ {self.save_data.get('player_pos')}"
+                )
+        except Exception:
+            pass
         # 매 실행: 0=인트로, 1=데모, 2=본편 (세이브 없음, pick_global 시 session_vars로만 전달)
         self.boot_phase = 0
         # contact_player: 존 안에 머무는 동안 매 프레임 재발동 방지 (진입 엣지에서만)
@@ -2300,6 +2387,12 @@ class GameFlow:
                 row["spawn_state"] = dict(we["spawn_state"])
             if isinstance(we.get("progress_apply"), list) and we["progress_apply"]:
                 row["progress_apply"] = list(we["progress_apply"])
+            if isinstance(we.get("text_label"), dict) and we["text_label"]:
+                row["text_label"] = dict(we["text_label"])
+            if we.get("scoreboard_zoom") is not None:
+                row["scoreboard_zoom"] = float(we["scoreboard_zoom"])
+            if isinstance(we.get("scoreboard_style"), dict) and we["scoreboard_style"]:
+                row["scoreboard_style"] = dict(we["scoreboard_style"])
             bz = we.get("baseball_zone")
             if isinstance(bz, dict) and bz:
                 row["baseball_zone"] = dict(bz)
@@ -2353,6 +2446,13 @@ class GameFlow:
         return None
 
     def save_game(self, map_id, player_pos):
+        # 미니게임 전용 맵(야구장·서킷 등)은 현재 좌표를 저장하지 않고 exit_map/exit_pos 로 저장.
+        try:
+            map_id, player_pos = apply_activity_arena_save_location(
+                self.world_data, map_id, player_pos, self.config
+            )
+        except Exception:
+            pass
         self.save_data["current_map"] = map_id
         self.save_data["player_pos"] = [int(player_pos[0]), int(player_pos[1])]
         
@@ -2366,10 +2466,11 @@ class GameFlow:
 
     def load_map(self, save_data=None):
         # 1. 어떤 맵을 부를지 결정 (세이브 데이터 우선, 없으면 CONFIG 기본값)
+        # 주의: 미니게임 맵(exit) 치환은 save_game / GameFlow 기동 시만 — 여기선 MAP 이벤트 진입을 막지 않음.
         map_id = CONFIG["START_MAP"]
         if save_data and "current_map" in save_data:
             map_id = save_data["current_map"]
-        
+
         m = self.world_data[map_id]
         
         # 2. 자산 로드 (경로도 world_data.json에 정의된 대로)

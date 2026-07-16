@@ -323,26 +323,27 @@ def filter_right_categories(categories: dict) -> dict:
 
 
 def draw_mode_tabs(screen, font, sidebar_w, top_bar_h, edit_mode):
-    """4분할 MAP / EVENT / FLOW / BASEBALL 탭."""
-    band = max(1, top_bar_h // 4)
-    modes = ("MAP", "EVENT", "FLOW", "BASEBALL")
-    colors = ((60, 60, 60), (70, 70, 70), (55, 52, 48), (52, 58, 72))
+    """5분할 MAP / EVENT / FLOW / BASEBALL / RACING 탭."""
+    modes = ("MAP", "EVENT", "FLOW", "BASEBALL", "RACING")
+    band = max(1, top_bar_h // len(modes))
+    colors = ((60, 60, 60), (70, 70, 70), (55, 52, 48), (52, 58, 72), (48, 62, 58))
     for i, col in enumerate(colors):
         pygame.draw.rect(screen, col, (0, i * band, sidebar_w, band))
     ix = modes.index(edit_mode) if edit_mode in modes else 0
     pygame.draw.rect(screen, (255, 215, 0), (0, ix * band, sidebar_w, band), 2)
-    labels = ("MAP", "EVENT", "FLOW", "BB")
+    labels = ("MAP", "EVENT", "FLOW", "BB", "RACE")
     for i, lab in enumerate(labels):
         c = (255, 255, 255) if edit_mode == modes[i] else (100, 100, 100)
-        screen.blit(font.render(lab, True, c), (12, i * band + 2))
+        screen.blit(font.render(lab, True, c), (10, i * band + max(0, (band - 14) // 2)))
 
 
 def mode_from_click(my: int, top_bar_h: int) -> Optional[str]:
     if my <= 0 or my >= top_bar_h:
         return None
-    band = max(1, top_bar_h // 4)
-    idx = min(3, int(my // band))
-    return ("MAP", "EVENT", "FLOW", "BASEBALL")[idx]
+    modes = ("MAP", "EVENT", "FLOW", "BASEBALL", "RACING")
+    band = max(1, top_bar_h // len(modes))
+    idx = min(len(modes) - 1, int(my // band))
+    return modes[idx]
 
 
 def draw_left_panel(

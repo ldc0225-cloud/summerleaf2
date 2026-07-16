@@ -4,21 +4,12 @@
         "history": [
             {
                 "mode": "record_1p",
-                "player": 1081,
-                "opponent": 1130,
-                "won": false
-            },
-            {
-                "mode": "record_1p",
-                "char": "c10",
-                "score": 1027,
-                "player": 1027,
+                "char": "carrot",
+                "score": 175,
+                "player": 175,
                 "distances": [
-                    227,
-                    261,
-                    178,
-                    376,
-                    389
+                    82,
+                    93
                 ]
             },
             {
@@ -49,223 +40,202 @@
             },
             {
                 "mode": "record_1p",
-                "char": "cc1",
-                "score": 754,
-                "player": 754,
+                "char": "cc2",
+                "score": 169,
+                "player": 169,
                 "distances": [
-                    87,
-                    87,
-                    53,
-                    72,
-                    58,
-                    96,
-                    92,
-                    106,
-                    95,
-                    8
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "c10",
-                "score": 569,
-                "player": 569,
-                "distances": [
-                    97,
-                    99,
-                    90,
-                    96,
-                    98,
-                    88
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc3",
-                "score": 300,
-                "player": 300,
-                "distances": [
-                    106,
-                    104,
-                    90
+                    113,
+                    28,
+                    28
                 ]
             },
             {
                 "mode": "record_1p",
                 "char": "cc2",
-                "score": 596,
-                "player": 596,
+                "score": 254,
+                "player": 254,
                 "distances": [
-                    74,
-                    56,
-                    102,
-                    105,
-                    83,
-                    85,
-                    91
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc1",
-                "score": 746,
-                "player": 746,
-                "distances": [
-                    99,
-                    99,
-                    109,
-                    72,
-                    88,
-                    89,
-                    92,
-                    98
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc2",
-                "score": 492,
-                "player": 492,
-                "distances": [
-                    54,
+                    84,
                     86,
-                    86,
-                    80,
-                    47,
-                    86,
-                    54
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "c10",
-                "score": 733,
-                "player": 733,
-                "distances": [
-                    31,
-                    86,
-                    82,
-                    110,
-                    86,
-                    82,
-                    85,
-                    86,
+                    75,
                     85
                 ]
             },
             {
                 "mode": "record_1p",
-                "char": "c10",
-                "score": 257,
-                "player": 257,
-                "distances": [
-                    83,
-                    7,
-                    85,
-                    22,
-                    1,
-                    3,
-                    55
-                ]
-            },
-            {
-                "mode": "record_1p",
                 "char": "cc2",
-                "score": 293,
-                "player": 293,
-                "distances": [
-                    86,
-                    1,
-                    94,
-                    1,
-                    110
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc2",
-                "score": 253,
-                "player": 253,
-                "distances": [
-                    78,
-                    83,
-                    84,
-                    78,
-                    86
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc1",
-                "score": 165,
-                "player": 165,
-                "distances": [
-                    84,
-                    82
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc1",
-                "score": 317,
-                "player": 317,
-                "distances": [
-                    111,
-                    97,
-                    84,
-                    110,
-                    86
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc1",
-                "score": 339,
-                "player": 339,
+                "score": 336,
+                "player": 336,
                 "distances": [
                     85,
-                    86,
-                    109,
-                    112,
                     113,
+                    109,
                     114
                 ]
             },
             {
                 "mode": "record_1p",
                 "char": "cc2",
-                "score": 278,
-                "player": 278,
+                "score": 254,
+                "player": 254,
                 "distances": [
-                    79,
-                    113,
-                    86
+                    86,
+                    112,
+                    2,
+                    56
                 ]
             },
             {
                 "mode": "record_1p",
                 "char": "cc2",
-                "score": 206,
-                "player": 206,
+                "score": 339,
+                "player": 339,
                 "distances": [
+                    79,
+                    114,
+                    112,
+                    74,
+                    113
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 337,
+                "player": 337,
+                "distances": [
+                    112,
+                    113,
+                    112,
+                    109,
+                    93
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 306,
+                "player": 306,
+                "distances": [
+                    86,
                     110,
-                    2,
-                    21,
-                    75
+                    111
                 ]
             },
             {
                 "mode": "record_1p",
                 "char": "carrot",
-                "score": 281,
-                "player": 281,
+                "score": 305,
+                "player": 305,
+                "distances": [
+                    56,
+                    109,
+                    86,
+                    110
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "cc1",
+                "score": 275,
+                "player": 275,
+                "distances": [
+                    80,
+                    109,
+                    86
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "summer_k",
+                "score": 272,
+                "player": 272,
+                "distances": [
+                    78,
+                    82,
+                    112
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "boy2_k",
+                "score": 223,
+                "player": 223,
+                "distances": [
+                    111,
+                    75,
+                    36
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "boy2_k",
+                "score": 181,
+                "player": 181,
                 "distances": [
                     109,
+                    25,
+                    36,
+                    36
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "girl2_k",
+                "score": 275,
+                "player": 275,
+                "distances": [
+                    112,
+                    19,
+                    112,
+                    44,
+                    51
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "boy3_k",
+                "score": 123,
+                "player": 123,
+                "distances": [
+                    5,
+                    2,
+                    33,
+                    85
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "summer_k",
+                "score": 220,
+                "player": 220,
+                "distances": [
+                    86,
                     85,
-                    63,
+                    50
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "summer_k",
+                "score": 248,
+                "player": 248,
+                "distances": [
+                    79,
+                    83,
+                    53,
+                    86
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "girl1_k",
+                "score": 257,
+                "player": 257,
+                "distances": [
                     85,
                     86,
-                    8
+                    86
                 ]
             }
         ]

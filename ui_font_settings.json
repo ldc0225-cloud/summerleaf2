@@ -1,0 +1,194 @@
+{
+  "UI_TEXT_REFERENCE_WIDTH": 320.0,
+  "profiles": {
+    "dialog": {
+      "label": "대화 본문",
+      "desc": "SAY 대사 텍스트(텍스트박스 안)",
+      "font_key": "dialog",
+      "size_320": 10.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "dialog_name": {
+      "label": "대화 이름",
+      "desc": "SAY 화자 이름(Who)",
+      "font_key": "dialog",
+      "size_320": 12.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "ui": {
+      "label": "일반 UI / 오버레이",
+      "desc": "OVERLAY_UI 버튼·문구, 나가기 확인 등",
+      "font_key": "default",
+      "size_320": 12.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "object_label": {
+      "label": "오브젝트 라벨",
+      "desc": "맵 오브젝트 text_label (TV 등)",
+      "font_key": "default",
+      "size_320": 12.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "hud_fishing": {
+      "label": "낚시 HUD",
+      "desc": "낚시 미니게임 화면 안내·성공 문구",
+      "font_key": "default",
+      "size_320": 12.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "hud_baseball": {
+      "label": "야구 HUD",
+      "desc": "야구 메뉴·점수판·게이지 안내 등",
+      "font_key": "default",
+      "size_320": 12.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "hud_racing": {
+      "label": "레이스 HUD",
+      "desc": "레이스 메뉴·카운트다운·완주 문구",
+      "font_key": "default",
+      "size_320": 12.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "logo": {
+      "label": "타이틀 / 로고",
+      "desc": "TITLE·홈런 연출 등 logo 폰트",
+      "font_key": "logo",
+      "size_320": 36.0,
+      "color": [
+        255,
+        255,
+        0
+      ],
+      "outline_enabled": false,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    },
+    "screen_caption": {
+      "label": "화면 전환 자막",
+      "desc": "SCREEN 스텝 hold 텍스트",
+      "font_key": "default",
+      "size_320": 12.0,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outline_enabled": true,
+      "outline_px_320": 1.0,
+      "outline_color": [
+        255,
+        255,
+        255
+      ],
+      "force_color": true,
+      "antialias": false,
+      "soft_px_320": 0.0
+    }
+  }
+}

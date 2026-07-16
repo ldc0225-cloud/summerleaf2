@@ -53,6 +53,13 @@ if _SWING_RESTART_KEY is None:
 _UI_FONT_CACHE = {}
 
 
+def clear_main_ui_font_cache() -> None:
+    try:
+        _UI_FONT_CACHE.clear()
+    except Exception:
+        pass
+
+
 def _find_ui_font_file():
     # 설정으로 지정 가능
     p = str(CONFIG.get("UI_FONT_PATH", "") or "").strip()
@@ -94,32 +101,69 @@ def _find_ui_font_file():
     return None
 
 
-def get_ui_font(size: int):
-    """한글 포함 UI용 폰트(파일 우선) — 없으면 SysFont로 안전 폴백."""
+def get_ui_font(size: int, slot: str = "ui"):
+    """한글 포함 UI용 폰트 — 용도 슬롯(UI_FONT_PROFILES) 스타일 적용.
+
+    slot 예: ui / hud_racing / hud_baseball / hud_fishing / logo …
+    """
     try:
         size_i = int(size)
     except Exception:
         size_i = 14
-    size_i = max(8, min(64, size_i))
+    size_i = max(6, min(256, size_i))
+    sid = str(slot or "ui").strip() or "ui"
+    try:
+        from engine import resolve_font_profile
 
-    key = int(size_i)
+        return resolve_font_profile(sid, size_px=size_i)
+    except Exception:
+        pass
+    key = (sid, int(size_i))
     if key in _UI_FONT_CACHE:
         return _UI_FONT_CACHE[key]
-
     fp = _find_ui_font_file()
     if fp:
         try:
-            f = pygame.font.Font(fp, size_i)
+            from engine import OutlinedUIFont, get_font_profile
+
+            f = OutlinedUIFont(
+                pygame.font.Font(fp, size_i),
+                font_key="default",
+                style=get_font_profile(sid),
+            )
             _UI_FONT_CACHE[key] = f
             return f
         except Exception:
             pass
     try:
-        f = pygame.font.SysFont("malgungothic", size_i)
+        from engine import OutlinedUIFont, get_font_profile
+
+        f = OutlinedUIFont(
+            pygame.font.SysFont("malgungothic", size_i),
+            font_key="default",
+            style=get_font_profile(sid),
+        )
     except Exception:
-        f = pygame.font.SysFont("arial", size_i)
+        from engine import OutlinedUIFont
+
+        f = OutlinedUIFont(pygame.font.SysFont("arial", size_i), font_key="default")
     _UI_FONT_CACHE[key] = f
     return f
+
+
+def activity_font_fn(activity_id: str | None = None):
+    """미니게임별 HUD 슬롯에 묶인 font_fn."""
+    aid = str(activity_id or "").strip().lower()
+    slot = {
+        "racing": "hud_racing",
+        "baseball": "hud_baseball",
+        "fishing": "hud_fishing",
+    }.get(aid, "ui")
+
+    def _fn(size: int, _slot=slot):
+        return get_ui_font(size, _slot)
+
+    return _fn
 
 
 def _log_path():
@@ -547,10 +591,7 @@ def _screen_to_world_field(mx, my, *, cam, cam_x_start, cam_y_start, player, bg_
 def _screen_to_world_from_render_xform(mx, my, *, xf):
     """
     렌더 루프에서 '실제로 사용한' 변환 파라미터(xf)를 이용해 screen(px) → world(px) 역변환.
-    - 월드 후처리 줌(world_zoom_off/draw)
-    - 틸트 y_transform(하단 보정 포함)
-    - 쉬어 x_offset_fn
-    를 렌더와 동일한 기준으로 되돌린다.
+    순서: 월드 후처리 줌 해제 → (Mode7이면 즉시 월드) 또는 틸트/쉬어 → cam_draw.
     """
     if not xf:
         return None
@@ -573,6 +614,17 @@ def _screen_to_world_from_render_xform(mx, my, *, xf):
         off_x, off_y = 0.0, 0.0
     mx = (mx - off_x) / zf
     my = (my - off_y) / zf
+
+    # Mode7: world_surf 좌표 → 월드 직행 (틸트/쉬어/cam_draw 경로와 혼합하지 않음)
+    if bool(xf.get("rotate3d_on", False)) and bool(xf.get("rotate3d_mode7", False)):
+        ctx = xf.get("mode7_ctx")
+        if isinstance(ctx, dict):
+            try:
+                from engine import rotate3d_mode7_screen_to_world
+
+                return rotate3d_mode7_screen_to_world(mx, my, ctx)
+            except Exception:
+                pass
 
     # 2) 틸트 y 역변환 (렌더 y_transform의 역)
     try:
@@ -676,29 +728,50 @@ def _auto_res_compensate_follow_offset(cam, prev_scale_factor, new_scale_factor)
         pass
 
 
-def _player_feet_screen_xy_like_draw(px, py, cam_draw_x, cam_draw_y, z, y_transform, x_offset_fn):
+def _player_feet_screen_xy_like_draw(px, py, cam_draw_x, cam_draw_y, z, y_transform, x_offset_fn, x_scale_fn=None, x_shift_fn=None, pivot_xy=None, cam_angle_rad=0.0, mode7_ctx=None, view_w=None):
     """
-    FieldItem.draw와 동일: cam_draw(렌더 스냅·쉬어 중앙 보정 반영) + 틸트 y_transform + 쉬어 x_offset_fn.
+    FieldItem.draw와 동일: cam_draw(렌더 스냅·쉬어 중앙 보정 반영) + 3D_ROTATE/틸트 좌표 보정.
     cam.to_screen(cam.pos 기준)과 달라서, 월드 후처리 줌 앵커는 반드시 이 경로를 써야 쉬어 시 튐이 없다.
     """
-    dx_base = (float(px) - float(cam_draw_x)) * float(z)
-    dy_base = (float(py) - float(cam_draw_y)) * float(z)
-    if callable(y_transform):
-        try:
-            dy_base = float(y_transform(dy_base))
-        except Exception:
-            pass
-    dy_q = float(int(round(float(dy_base))))
-    if callable(x_offset_fn):
-        try:
-            dx_base = float(dx_base) + float(x_offset_fn(float(dy_q)))
-        except Exception:
-            pass
-    return float(dx_base), float(dy_base)
+    from engine import map_feet_screen_xy, rotate3d_mode7_entity_screen
+
+    if mode7_ctx:
+        return rotate3d_mode7_entity_screen(
+            float(px),
+            float(py),
+            mode7_ctx,
+            height_off=0.0,
+            zoom=float(z),
+        )
+
+    flat_x = (float(px) - float(cam_draw_x)) * float(z)
+    flat_y = (float(py) - float(cam_draw_y)) * float(z)
+    try:
+        vw = float(view_w if view_w is not None else CONFIG.get("WIDTH", 640))
+    except Exception:
+        vw = 640.0
+    return map_feet_screen_xy(
+        flat_x,
+        flat_y,
+        y_transform=y_transform,
+        x_scale_fn=x_scale_fn,
+        x_shift_fn=x_shift_fn,
+        pivot_xy=pivot_xy,
+        cam_angle_rad=float(cam_angle_rad),
+        x_offset_fn=x_offset_fn,
+        anchor_x=0.5,
+        view_w=vw,
+        height_off=0.0,
+        zoom=float(z),
+    )
 
 
 def _save_game_with_activity_anchor(flow, field_activities, map_id, player_pos):
-    """야구 return_map 세션 중에는 bg_baseball1 좌표 대신 복귀 맵·좌표로 저장."""
+    """
+    필드 미니게임 중 세이브/종료 위치.
+    1) activity 세션의 save_location_override (entry/return 좌표 우선)
+    2) 없으면 flow.save_game — 미니게임 전용 맵이면 exit_map/exit_pos 로 자동 치환
+    """
     ov = None
     try:
         ov = field_activities.get_save_location_override()
@@ -745,6 +818,15 @@ def _should_start_baseball_exit_event(act_res):
     )
 
 
+def _should_start_racing_exit_event(act_res):
+    return (
+        isinstance(act_res, dict)
+        and str(act_res.get("activity") or "").strip() == "racing"
+        and bool(act_res.get("quit"))
+        and bool(act_res.get("return_map"))
+    )
+
+
 def _queue_baseball_exit_transition(flow, act_res):
     target_map = str(act_res.get("return_map") or "").strip()
     target_pos = act_res.get("return_pos")
@@ -755,6 +837,19 @@ def _queue_baseball_exit_transition(flow, act_res):
     pos = [float(target_pos[0]), float(target_pos[1])]
     flow.save_data["baseball_exit_map"] = target_map
     flow.save_data["baseball_exit_pos"] = list(pos)
+    return True
+
+
+def _queue_racing_exit_transition(flow, act_res):
+    target_map = str(act_res.get("return_map") or "").strip()
+    target_pos = act_res.get("return_pos")
+    if not target_map:
+        return False
+    if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
+        return False
+    pos = [float(target_pos[0]), float(target_pos[1])]
+    flow.save_data["racing_exit_map"] = target_map
+    flow.save_data["racing_exit_pos"] = list(pos)
     return True
 
 
@@ -790,6 +885,38 @@ def _try_start_baseball_exit_event(
     return True
 
 
+def _try_start_racing_exit_event(
+    flow,
+    ev_mgr,
+    events_catalog,
+    act_res,
+    *,
+    field_tilt_snapshot=None,
+):
+    if not _should_start_racing_exit_event(act_res):
+        return False
+    if not _queue_racing_exit_transition(flow, act_res):
+        return False
+    from flow import start_system_event
+
+    event_id = str(act_res.get("exit_event_id") or "ev_racing_exit").strip()
+    if not start_system_event(
+        ev_mgr,
+        events_catalog,
+        event_id,
+        field_tilt_snapshot=field_tilt_snapshot,
+    ):
+        flow.save_data.pop("racing_exit_map", None)
+        flow.save_data.pop("racing_exit_pos", None)
+        return False
+    try:
+        ev_mgr.remove_ui_overlay("racing_exit")
+    except Exception:
+        pass
+    print(f"[racing] exit event started: {event_id}")
+    return True
+
+
 def _process_activity_finished(
     flow,
     ev_mgr,
@@ -819,6 +946,14 @@ def _process_activity_finished(
         except Exception:
             pass
     if _try_start_baseball_exit_event(
+        flow,
+        ev_mgr,
+        events_catalog,
+        act_res,
+        field_tilt_snapshot=field_tilt_snapshot,
+    ):
+        return None
+    if _try_start_racing_exit_event(
         flow,
         ev_mgr,
         events_catalog,
@@ -994,13 +1129,13 @@ def main():
     is_fullscreen = False
 
     # --- 온보딩 / 스폰 분기용: 실행 시점에 디스크에 세이브 파일이 있었는지 ---
+    # GameFlow.__init__ 에서 미니게임 맵 세이브는 이미 exit 로 교정됨 → flow.save_data 를 스냅샷으로 씀.
     had_save_at_launch = os.path.isfile(flow.save_path)
-    save_file = flow.load_save_data()
     save_spawn_snapshot = None
-    if had_save_at_launch and isinstance(save_file, dict):
+    if had_save_at_launch and isinstance(flow.save_data, dict) and flow.save_data.get("current_map"):
         save_spawn_snapshot = {
-            "current_map": save_file.get("current_map"),
-            "player_pos": save_file.get("player_pos"),
+            "current_map": flow.save_data.get("current_map"),
+            "player_pos": flow.save_data.get("player_pos"),
         }
 
     # 매 실행 인트로→데모까지는 START_MAP만; 본편 맵/좌표는 데모 종료 후 스폰 블록에서 적용
@@ -1212,6 +1347,7 @@ def main():
 
     tilt_current = 1.0
     shear_smoothed = 0.0  # 쉬어 픽셀 목표에 서서히 수렴
+    rotate3d_current = 0.0
     _apply_map_field_visuals(map_id, instant=True)
 
     # --- 새 월드 줌(후처리) 컨트롤러 ---
@@ -1249,6 +1385,10 @@ def main():
     world_zoom_off_y = 0.0
     world_zoom_draw = 1.0
     world_zoom_tmp = None  # 스케일 결과 재사용 버퍼
+    rotate3d_tmp = None
+    rotate3d_mask_tmp = None
+    x_scale_fn = None
+    x_shift_fn = None
     # 입력 역변환을 위한 "렌더 변환 캐시"(전 프레임)
     render_xform_for_input = None
     # 통합 변환 캐시(LRU + MB 상한): tilt/shear 결과(및 일부 스케일 결과)를 한 곳에서 관리
@@ -1497,6 +1637,57 @@ def main():
             pass
         last_auto_switch_ms = int(now_ms)
 
+    def _sync_screen_hi_res_output():
+        """SCREEN hi_res 활성 시 NATIVE_640(640x480), 종료 후 이전 출력 모드 복구."""
+        nonlocal output_mode, auto_res_zoom_mul, world_zoom_current, world_zoom_target, last_auto_switch_ms
+        scr = getattr(ev_mgr, "active_screen", None)
+        wants = bool(scr and scr.get("hi_res"))
+        snap = getattr(ev_mgr, "screen_hi_res_snapshot", None)
+        if wants:
+            need_native = (
+                str(output_mode).strip().upper() != "NATIVE_640"
+                or float(auto_res_zoom_mul) > 1.0
+            )
+            if need_native:
+                if snap is None:
+                    ev_mgr.screen_hi_res_snapshot = {
+                        "output_mode": output_mode,
+                        "auto_res_zoom_mul": float(auto_res_zoom_mul),
+                        "world_zoom_current": float(world_zoom_current),
+                        "world_zoom_target": float(world_zoom_target),
+                    }
+                prev_sf = float(scale_factor)
+                _apply_output_mode(mode="NATIVE_640", fullscreen=fullscreen_on)
+                _after_resolution_change(prev_scale_factor=prev_sf)
+                auto_res_zoom_mul = 1.0
+                try:
+                    _preserve_cam_world_center(cam, bg_w, bg_h)
+                except Exception:
+                    pass
+                last_auto_switch_ms = int(pygame.time.get_ticks())
+            return
+        if snap is not None:
+            prev_sf = float(scale_factor)
+            restore_mode = str(snap.get("output_mode") or "UPSCALE_320").strip().upper()
+            if restore_mode not in ("UPSCALE_320", "NATIVE_640"):
+                restore_mode = "UPSCALE_320"
+            _apply_output_mode(mode=restore_mode, fullscreen=fullscreen_on)
+            _after_resolution_change(prev_scale_factor=prev_sf)
+            auto_res_zoom_mul = float(snap.get("auto_res_zoom_mul", 1.0))
+            try:
+                world_zoom_current = float(snap.get("world_zoom_current", world_zoom_current))
+                world_zoom_target = float(snap.get("world_zoom_target", world_zoom_target))
+            except (TypeError, ValueError):
+                pass
+            try:
+                if restore_mode == "UPSCALE_320" and float(auto_res_zoom_mul) > 1.0:
+                    _auto_res_compensate_follow_offset(cam, prev_sf, float(scale_factor))
+                _preserve_cam_world_center(cam, bg_w, bg_h)
+            except Exception:
+                pass
+            ev_mgr.screen_hi_res_snapshot = None
+            last_auto_switch_ms = int(pygame.time.get_ticks())
+
     def _after_resolution_change(*, prev_scale_factor=1):
         """해상도 전환 후: 카메라/커서/캐시·서피스 정리 + 커서/카메라 오프셋 스케일 보정."""
         nonlocal fade_overlay_surf, world_zoom_tmp, font, screen_fx_overlay_surf, screen_shake_tmp, screen_rain_surf
@@ -1649,6 +1840,20 @@ def main():
 
     def _is_primary_action_key(key):
         return key in (pygame.K_a, pygame.K_SPACE, pygame.K_RETURN)
+
+    def _fishing_input_lock_active() -> bool:
+        try:
+            if str(field_activities.active_id or "").strip().lower() == "fishing":
+                return True
+        except Exception:
+            pass
+        try:
+            for ov in list(getattr(ev_mgr, "_ui_overlays", None) or []):
+                if ov.get("id") == "fishing_exit" and ov.get("phase") != "done":
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _field_activity_world_at_screen(mx, my):
         ww_fa = None
@@ -2010,6 +2215,8 @@ def main():
     def _clear_transform_caches(*, run_gc: bool = True):
         nonlocal tilt_bg_tmp, shear_bg_tmp, tilt_mask_tmp, shear_mask_tmp, vp_bg_scale_tmp
         nonlocal shear_bg_strip_tmp, shear_mask_strip_tmp
+        nonlocal rotate3d_tmp, rotate3d_mask_tmp
+        nonlocal _render_cache_mb
         try:
             _render_cache.clear()
         except Exception:
@@ -2020,7 +2227,6 @@ def main():
             pass
         try:
             # mb counter reset
-            nonlocal _render_cache_mb
             _render_cache_mb = 0.0
         except Exception:
             pass
@@ -2042,6 +2248,8 @@ def main():
         shear_bg_strip_tmp = None
         shear_mask_strip_tmp = None
         vp_bg_scale_tmp = None
+        rotate3d_tmp = None
+        rotate3d_mask_tmp = None
         if run_gc:
             try:
                 gc.collect()
@@ -2248,6 +2456,14 @@ def main():
                     ui.tilt_target = max(tilt_factor_min, min(1.0, float(_btt)))
                 except (TypeError, ValueError):
                     pass
+            # 레이스 등 — Mode7 strength 오버라이드
+            _r3t = getattr(_sess, "field_rotate3d_target", None)
+            if _r3t is not None:
+                try:
+                    ui.rotate3d_target = max(0.0, min(1.0, float(_r3t)))
+                    ui.rotate3d_on = float(ui.rotate3d_target) > 0.05
+                except (TypeError, ValueError):
+                    pass
 
         _tilt_tc = getattr(ev_mgr, "tilt_control", None)
         if isinstance(_tilt_tc, dict) and _tilt_tc.get("duration_sec") is not None:
@@ -2274,7 +2490,83 @@ def main():
         else:
             alpha = visual_smooth_step(float(tilt_speed), dt_visual_sec)
             tilt_current = float(tilt_current) + (float(ui.tilt_target) - float(tilt_current)) * alpha
-        
+
+        try:
+            rotate3d_speed = float(CONFIG.get("ROTATE3D_SPEED", 0.14) or 0.14)
+        except Exception:
+            rotate3d_speed = 0.14
+        rotate3d_speed = max(0.0, min(1.0, rotate3d_speed))
+        try:
+            rotate3d_eps = float(CONFIG.get("ROTATE3D_EPS", 0.003) or 0.003)
+        except Exception:
+            rotate3d_eps = 0.003
+
+        if isinstance(getattr(ev_mgr, "rotate3d_control", None), dict):
+            rc = ev_mgr.rotate3d_control
+            try:
+                ui.rotate3d_target = float(rc.get("target", 0.0))
+            except (TypeError, ValueError):
+                ui.rotate3d_target = 0.0
+            ui.rotate3d_target = max(0.0, min(1.0, float(ui.rotate3d_target)))
+            if rc.get("instant_once"):
+                rotate3d_current = float(ui.rotate3d_target)
+                rc["instant_once"] = False
+
+        _r3_tc = getattr(ev_mgr, "rotate3d_control", None)
+        if isinstance(_r3_tc, dict) and _r3_tc.get("duration_sec") is not None:
+            try:
+                _r3_dur = float(_r3_tc.get("duration_sec"))
+            except (TypeError, ValueError):
+                _r3_dur = None
+            if _r3_dur is not None and _r3_dur > 0.0 and "start" not in _r3_tc:
+                timed_effect_init(
+                    _r3_tc,
+                    float(rotate3d_current),
+                    float(ui.rotate3d_target),
+                    _r3_dur,
+                    now_ms=_r3_tc.get("t0_ms"),
+                )
+            if _r3_dur is not None and _r3_dur > 0.0:
+                rotate3d_current = timed_effect_value(_r3_tc, float(rotate3d_current))
+            elif abs(float(ui.rotate3d_target) - float(rotate3d_current)) <= rotate3d_eps:
+                rotate3d_current = float(ui.rotate3d_target)
+            else:
+                rotate3d_current = float(ui.rotate3d_target)
+        elif abs(float(ui.rotate3d_target) - float(rotate3d_current)) <= rotate3d_eps:
+            rotate3d_current = float(ui.rotate3d_target)
+        else:
+            alpha = visual_smooth_step(float(rotate3d_speed), dt_visual_sec)
+            rotate3d_current = float(rotate3d_current) + (float(ui.rotate3d_target) - float(rotate3d_current)) * alpha
+
+        # 3D_ROTATE 시험: < > 키로 시점 회전 (Mode7 cam_angle)
+        # 레이스 등 activity 가 mode7_cam_heading 을 소유하면 핫키 회전 무시
+        _r3_heading_owned = False
+        try:
+            _fa_h = getattr(getattr(field_activities, "_session", None), "mode7_cam_heading", None)
+            _r3_heading_owned = _fa_h is not None
+        except Exception:
+            _r3_heading_owned = False
+        if abs(float(rotate3d_current)) > float(rotate3d_eps) and (not _r3_heading_owned):
+            try:
+                _r3_ang_spd = float(CONFIG.get("ROTATE3D_ANGLE_SPEED", 2.2) or 2.2)
+            except (TypeError, ValueError):
+                _r3_ang_spd = 2.2
+            _r3_ang_spd = max(0.05, min(12.0, float(_r3_ang_spd)))
+            _r3_keys = pygame.key.get_pressed()
+            _r3_turn_l = bool(_r3_keys[pygame.K_COMMA])
+            _r3_turn_r = bool(_r3_keys[pygame.K_PERIOD])
+            try:
+                if hasattr(pygame, "K_LESS"):
+                    _r3_turn_l = _r3_turn_l or bool(_r3_keys[pygame.K_LESS])
+                if hasattr(pygame, "K_GREATER"):
+                    _r3_turn_r = _r3_turn_r or bool(_r3_keys[pygame.K_GREATER])
+            except Exception:
+                pass
+            if _r3_turn_l:
+                ui.rotate3d_angle = float(getattr(ui, "rotate3d_angle", 0.0)) - _r3_ang_spd * float(dt_visual_sec)
+            if _r3_turn_r:
+                ui.rotate3d_angle = float(getattr(ui, "rotate3d_angle", 0.0)) + _r3_ang_spd * float(dt_visual_sec)
+
         # --- 1. 카메라 및 매니저 업데이트 ---
         bg_w, bg_h = map_bg_w, map_bg_h
         t0 = _pnow() if perf_enabled else None
@@ -2284,14 +2576,14 @@ def main():
             float(tilt_current),
             bool(ui.shear_debug_on),
         )
-        # --- 미니게임 (로직은 minigames/ 패키지, 여기서는 ev_mgr 브릿지만) ---
+        # --- 외부 minigames/ 는 본체 비포함(no-op 훅만 호환) ---
         _tick_mg = getattr(ev_mgr, "tick_minigame", None)
         if callable(_tick_mg):
             _tick_mg(dt_visual_sec)
         _fa_sess = getattr(field_activities, "_session", None)
         if _fa_sess is not None:
             try:
-                field_activities.tick(dt_visual_sec, player, int(pygame.time.get_ticks()))
+                field_activities.tick(dt_visual_sec, player, int(pygame.time.get_ticks()), npcs=npcs, objs=objs)
             except Exception:
                 pass
             if not ev_mgr.active_event:
@@ -2385,6 +2677,7 @@ def main():
             except Exception:
                 pass
         ev_mgr.update(player, cam, objs, npcs, mask_img=mask, dt_sec=dt_visual_sec)
+        _sync_screen_hi_res_output()
         if getattr(ev_mgr, "_progress_refresh_pending", False):
             from char_behavior import apply_map_progress_states
 
@@ -2536,7 +2829,11 @@ def main():
         # --- 자동 가변 해상도 전환 (640 기준 world_zoom) ---
         # zoom=2.0 완료 → 320 출력(UPSCALE_320, mul=2, draw=1.0)
         # zoom=1.0 완료 → 640 출력(NATIVE_640)
-        if auto_res_enabled:
+        _screen_hi_res_active = bool(
+            getattr(ev_mgr, "active_screen", None)
+            and ev_mgr.active_screen.get("hi_res")
+        )
+        if auto_res_enabled and not _screen_hi_res_active:
             now_ms = pygame.time.get_ticks()
             can_switch = (now_ms - int(last_auto_switch_ms)) >= int(auto_switch_cooldown_ms)
             zoom_done = abs(float(world_zoom_current) - float(world_zoom_target)) <= 1e-6
@@ -2696,6 +2993,7 @@ def main():
                 npcs=npcs,
                 mask=mask,
                 world_data=flow.world_data,
+                ev_mgr=ev_mgr,
             ):
                 try:
                     ev_mgr.remove_ui_overlay("baseball_exit")
@@ -2769,6 +3067,8 @@ def main():
                     )
                     if field_activities.blocks_field_move():
                         continue
+                if _fishing_input_lock_active():
+                    continue
             if not ev_mgr.active_event and bool(getattr(ev_mgr, "is_talking", False)):
                 if event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
                     try:
@@ -2779,7 +3079,7 @@ def main():
                     continue
 
             if ev_mgr.active_event:
-                # 미니게임 입력: 필드 클릭과 분리 (minigames 세션 handle_event)
+                # 외부 minigames/ 비사용 — 활성일 때만 입력 가로채기(항상 False)
                 if getattr(ev_mgr, "is_minigame_active", lambda: False)():
                     _push_mg = getattr(ev_mgr, "minigame_push_event", None)
                     if callable(_push_mg):
@@ -2875,8 +3175,8 @@ def main():
                 mx_a, my_a = _embed_phys_to_logical_xy(
                     event.pos[0], event.pos[1], scale_factor=scale_factor
                 )
-                # 필드 활동 중 이동 클릭 무시 (야구장 등)
-                if field_activities.blocks_field_move():
+                # 필드 활동/낚시 종료 오버레이 중 이동 클릭 무시
+                if field_activities.blocks_field_move() or _fishing_input_lock_active():
                     continue
                 # 그네 타기 중: approach/mount는 클릭 이동 막기. ride는 점프 드래그를 위해 클릭을 받는다.
                 if swing_ride_mode in ("approach", "mount"):
@@ -2989,12 +3289,20 @@ def main():
                 last_click_ms = int(now_ms)
                 last_click_world = (float(world_x), float(world_y))
 
+                move_mode = "run" if is_double else "walk"
+                if not is_double:
+                    try:
+                        if str(getattr(player, "_move_mode", "walk")) == "run" and bool(getattr(player, "path", None)):
+                            move_mode = "run"
+                    except Exception:
+                        move_mode = "walk"
+
                 action, target = player.handle_input(
                     [world_x, world_y],
                     mask,
                     objs,
                     npcs,
-                    move_mode=("run" if is_double else "walk"),
+                    move_mode=move_mode,
                 )
                 
                 # [추가] 클릭 피드백 (이동 가능한 곳인지 체크)
@@ -3055,7 +3363,7 @@ def main():
                         pass
 
                 if _is_primary_action_key(event.key):
-                    if field_activities.blocks_field_move():
+                    if field_activities.blocks_field_move() or _fishing_input_lock_active():
                         continue
                     if swing_ride_mode in ("approach", "mount"):
                         continue
@@ -3397,7 +3705,7 @@ def main():
                     player.target = list(player.pos)
                 except Exception:
                     pass
-            elif field_activities.blocks_field_move():
+            elif field_activities.blocks_field_move() or _fishing_input_lock_active():
                 try:
                     player.stop_moving()
                     player.path = []
@@ -3982,6 +4290,12 @@ def main():
             shear_render = float(shear_render) / sf
         except Exception:
             pass
+        try:
+            rotate3d_eps = float(CONFIG.get("ROTATE3D_EPS", 0.003) or 0.003)
+        except Exception:
+            rotate3d_eps = 0.003
+        rotate3d_active = abs(float(rotate3d_current)) > float(rotate3d_eps)
+
         cam.update(
             player, npcs, objs, bg_w, bg_h, shear_screen_px=float(shear_render), dt_sec=dt_visual_sec
         )
@@ -3992,6 +4306,14 @@ def main():
             except Exception:
                 pass
             auto_res_hold_cam_pos = None
+        # Mode7 활성 시: 필드 follow 카메라와 Mode7 카메라 이원화 방지 — cam은 플레이어에 고정(앵커만).
+        # 실제 시야/heading 은 ui.rotate3d_angle(+ activity) → Mode7 cam_heading 만 사용.
+        if rotate3d_active:
+            try:
+                cam.pos[0] = float(player.pos[0])
+                cam.pos[1] = float(player.pos[1])
+            except Exception:
+                pass
         if perf_enabled and t0 is not None:
             _padd("cam_update", _pnow() - t0)
 
@@ -3999,6 +4321,12 @@ def main():
         # 새 줌 시스템: 월드(오버레이 제외)를 world_surf에 렌더한 뒤, 그 결과물만 통째로 스케일해 draw_surf에 합성한다.
         t_render0 = _pnow() if perf_enabled else None
         now_s = time.time()
+        rotate3d_cfg = engine_mod.rotate3d_config_from_data() if rotate3d_active else None
+        rotate3d_horizon = 0
+        rotate3d_cam_angle = float(getattr(ui, "rotate3d_angle", 0.0) or 0.0)
+        rotate3d_mode7_ctx = None
+        x_scale_fn = None
+        x_shift_fn = None
         world_surf.fill((30, 30, 30))
         render_surf = world_surf
         # [1. 공통 카메라 시작점] — 부동소수 원점으로 틸트 앵커를 계산하고, 타일 정렬만 int로 맞춤
@@ -4027,7 +4355,7 @@ def main():
         except Exception:
             sh_br = 0.02
         shear_eff = max(0, int(round(float(shear_render))))
-        use_perspective_branch = tilt_active or float(shear_render) > sh_br
+        use_perspective_branch = (tilt_active or float(shear_render) > sh_br) and (not rotate3d_active)
         try:
             is_zooming = abs(float(cam.current_zoom) - float(cam.target_zoom)) > 1e-9
         except Exception:
@@ -4054,7 +4382,21 @@ def main():
         bg_blit_dx = 0
         bg_blit_dy = 0
 
-        if bg_direct_fallback:
+        # Mode7: 일반 크롭/틸트/쉬어 배경을 그리지 않는다(아래에서 Mode7만 샘플링).
+        if rotate3d_active:
+            bg_dx = 0
+            bg_dy = 0
+            cam_draw_x = float(cam_origin_x)
+            cam_draw_y = float(cam_origin_y)
+            y_transform = None
+            x_offset_fn = None
+            use_perspective_branch = False
+            f_q = 1.0
+            shear_eff = 0
+            bg_blit_dx, bg_blit_dy = 0, 0
+            flat_vp_ok = True
+            s_bg = None
+        elif bg_direct_fallback:
             # emergency: 화면(view)만 잘라 스케일해 그린다(대형 Surface 생성 회피).
             # 이 프레임은 tilt/shear를 생략(메모리 안정 우선).
             _blit_bg_view_scaled(render_surf, bg, cam_origin_x, cam_origin_y, z)
@@ -4527,6 +4869,69 @@ def main():
             if anim_ts:
                 _padd("bg_anim", _dt_bg)
 
+        # --- 3D_ROTATE Mode7: 플레이어 뒤 카메라로 맵만 원근 샘플링 (일반 bg 와 이중 블릿 없음) ---
+        if rotate3d_active and rotate3d_cfg is not None and bg is not None:
+            try:
+                lw_i = int(CONFIG["WIDTH"])
+                lh_i = int(CONFIG["HEIGHT"])
+            except Exception:
+                lw_i, lh_i = 640, 480
+            lw_i = max(1, int(lw_i))
+            lh_i = max(1, int(lh_i))
+            if rotate3d_tmp is None or rotate3d_tmp.get_width() != lw_i or rotate3d_tmp.get_height() != lh_i:
+                rotate3d_tmp = pygame.Surface((lw_i, lh_i))
+            try:
+                px_w = float(player.pos[0])
+                py_w = float(player.pos[1])
+            except Exception:
+                px_w, py_w = 0.0, 0.0
+            # heading: activity mode7_cam_heading 우선, 없으면 base + ui.rotate3d_angle
+            base_heading = float(rotate3d_cfg.get("base_heading", math.pi * 0.5))
+            cam_heading = base_heading + float(rotate3d_cam_angle)
+            try:
+                _fa_sess_m7 = getattr(field_activities, "_session", None)
+                _m7h = getattr(_fa_sess_m7, "mode7_cam_heading", None)
+                if _m7h is not None:
+                    cam_heading = float(_m7h)
+            except (TypeError, ValueError):
+                pass
+            mode7_cfg = rotate3d_cfg
+            try:
+                _m7x = getattr(_fa_sess_m7, "mode7_player_x_frac", None)
+                if _m7x is not None:
+                    mode7_cfg = dict(rotate3d_cfg or {})
+                    mode7_cfg["player_screen_x_frac"] = float(_m7x)
+            except (TypeError, ValueError, UnboundLocalError):
+                mode7_cfg = rotate3d_cfg
+            cam_back = float(rotate3d_cfg.get("camera_back", 26.0)) * float(rotate3d_current)
+            cam_wx = px_w - math.cos(cam_heading) * cam_back
+            cam_wy = py_w - math.sin(cam_heading) * cam_back
+            t_r3 = _pnow() if perf_enabled else None
+            rotate3d_mode7_ctx = engine_mod.apply_rotate3d_mode7(
+                rotate3d_tmp,
+                bg,
+                cam_wx,
+                cam_wy,
+                cam_heading,
+                float(rotate3d_current),
+                mode7_cfg,
+                ref_forward=float(cam_back),
+                player_wx=px_w,
+                player_wy=py_w,
+            )
+            render_surf.blit(rotate3d_tmp, (0, 0))
+            if perf_enabled and t_r3 is not None:
+                _padd("rotate3d_bg", _pnow() - t_r3)
+            if isinstance(rotate3d_mode7_ctx, dict):
+                y_transform = None
+                x_scale_fn = None
+                rotate3d_horizon = int(rotate3d_mode7_ctx.get("horizon", 0))
+                rotate3d_mode7_ctx["player_wx"] = px_w
+                rotate3d_mode7_ctx["player_wy"] = py_w
+
+            x_offset_fn = None
+            shear_eff = 0
+
         # --- 입력 역변환용: "렌더에서 실제로 사용한" 변환 파라미터 캐시 ---
         # 다음 프레임 입력에서 사용(줌+틸트에서도 클릭 좌표가 흔들리지 않게)
         # 입력 역변환에서 shear의 rel(y) 계산에 쓰는 높이.
@@ -4554,6 +4959,12 @@ def main():
                 "world_zoom_draw": float(world_zoom_draw) if world_zoom_enabled else 1.0,
                 "world_zoom_off_x": float(world_zoom_off_x),
                 "world_zoom_off_y": float(world_zoom_off_y),
+                "rotate3d_on": bool(rotate3d_active),
+                "rotate3d_strength": float(rotate3d_current),
+                "rotate3d_mode7": bool(rotate3d_mode7_ctx),
+                "mode7_ctx": rotate3d_mode7_ctx,
+                "screen_w": int(CONFIG.get("WIDTH", 320) or 320),
+                "screen_h": int(CONFIG.get("HEIGHT", 240) or 240),
             }
         except Exception:
             pass
@@ -4588,6 +4999,7 @@ def main():
                 # 변화 중이거나(zoom/tilt/shear 보간 중), 기능 토글이 켜져 있으면(FX 활성) 낮은 FPS 캡을 사용
                 fx_enabled = bool(
                     bool(use_perspective_branch)
+                    or bool(rotate3d_active)
                     or bool(getattr(ui, "tilt_bg_demo", False))
                     or bool(getattr(ui, "shear_debug_on", False))
                     or (
@@ -4613,6 +5025,12 @@ def main():
         cull_pad = max(0, min(600, cull_pad))
         scr_w = int(CONFIG.get("WIDTH", 640) or 640)
         scr_h = int(CONFIG.get("HEIGHT", 480) or 480)
+        _r3_draw_kw = {}
+        if rotate3d_active and isinstance(rotate3d_mode7_ctx, dict):
+            _r3_draw_kw = {
+                "mode7_ctx": rotate3d_mode7_ctx,
+                "view_w": scr_w,
+            }
 
         def _rough_screen_xy(ent):
             try:
@@ -4621,7 +5039,9 @@ def main():
             except Exception:
                 return None
             try:
-                return _player_feet_screen_xy_like_draw(wx, wy, cam_draw_x, cam_draw_y, z, y_transform, x_offset_fn)
+                return _player_feet_screen_xy_like_draw(
+                    wx, wy, cam_draw_x, cam_draw_y, z, y_transform, x_offset_fn, **_r3_draw_kw
+                )
             except Exception:
                 try:
                     sx, sy = cam.to_screen(wx, wy)
@@ -4686,8 +5106,9 @@ def main():
                             player=player,
                             y_transform=y_transform,
                             x_offset_fn=x_offset_fn,
-                            sprite_perspective_q=float(f_q) if callable(y_transform) else None,
+                            sprite_perspective_q=None if rotate3d_active else (float(f_q) if callable(y_transform) else None),
                             shear_lod=True,  # 원경은 저비용 우선
+                            **_r3_draw_kw,
                         )
                     else:
                         item.draw(
@@ -4698,7 +5119,8 @@ def main():
                             jump_shadow_mode=flow.save_data.get("jump_shadow_mode", "ground"),
                             y_transform=y_transform,
                             x_offset_fn=x_offset_fn,
-                            sprite_perspective_q=float(f_q) if callable(y_transform) else None,
+                            sprite_perspective_q=None if rotate3d_active else (float(f_q) if callable(y_transform) else None),
+                            **_r3_draw_kw,
                         )
 
         if perf_detail and t_bg_z is not None:
@@ -4733,9 +5155,17 @@ def main():
 
         def _ysort_y(ent):
             try:
-                y = float(ent.pos[1])
+                wx = float(ent.pos[0])
+                wy = float(ent.pos[1])
             except Exception:
                 return 0.0
+            # Mode7: 화면 feet Y(멀리=작음)로 정렬 — 시선 회전 후에도 앞/뒤가 맞음
+            if isinstance(rotate3d_mode7_ctx, dict):
+                try:
+                    return float(engine_mod.rotate3d_mode7_sort_key(wx, wy, rotate3d_mode7_ctx))
+                except Exception:
+                    pass
+            y = wy
             mode = str(getattr(ent, "ysort_mode", "ground") or "ground").strip().lower()
             if mode == "visual":
                 try:
@@ -4745,16 +5175,16 @@ def main():
                 y = y - h
             return y
 
-        # 2. 통합 정렬 (핵심!)
-        # - 1순위: layer 숫자 (낮은 게 먼저/아래에 그려짐)
-        # - 2순위: pos[1] (Y좌표가 작은 게 먼저/뒤에 그려짐)
+        # 2. 통합 정렬
+        # - 1순위: layer
+        # - 2순위: Mode7이면 화면 깊이(feet Y), 아니면 월드 Y
         render_list = sorted(render_pool, key=lambda x: (getattr(x, 'layer', 0), _ysort_y(x)))
 
         if perf_detail and t_ps is not None:
             _padd("obj_pool_sort", _pnow() - t_ps)
 
         jshadow = flow.save_data.get("jump_shadow_mode", "ground")
-        sprite_perspective_q = float(f_q) if callable(y_transform) else None
+        sprite_perspective_q = float(f_q) if callable(y_transform) and (not rotate3d_active) else None
         # 스프라이트 쉬어 LOD: 원근(줌/틸트/쉬어)이 변하는 동안엔 비용을 크게 줄인다.
         sprite_shear_lod = bool(is_zooming or anim_tilt_draw or anim_shear_draw)
         # 3. 순서대로 그리기
@@ -4777,6 +5207,7 @@ def main():
                     x_offset_fn=x_offset_fn,
                     sprite_perspective_q=sprite_perspective_q,
                     shear_lod=sprite_shear_lod,
+                    **_r3_draw_kw,
                 )
             else:
                 item.draw(
@@ -4789,6 +5220,7 @@ def main():
                     x_offset_fn=x_offset_fn,
                     sprite_perspective_q=sprite_perspective_q,
                     shear_lod=sprite_shear_lod,
+                    **_r3_draw_kw,
                 )
             if do_topn and topn_left > 0:
                 dt_ms = (_pnow() - t_item0) * 1000.0
@@ -4822,186 +5254,220 @@ def main():
         # --- [위치 변경] 마스크를 모든 오브젝트보다 위에 그리기 ---
         if ui.show_mask:
             t0 = _pnow() if perf_enabled else None
-            # 원래 방식: 전체 마스크를 스케일하여 항상 전부 그린다(캐시 사용)
-            mask_direct_fallback = False
-            try:
-                mw0, mh0 = mask.get_size()
-                est_full_mb = _est_rgba_mb(int(round(float(mw0) * float(z))), int(round(float(mh0) * float(z))))
-                if est_full_mb > _tmp_surf_mb_limit:
-                    mask_direct_fallback = True
-            except Exception:
-                mask_direct_fallback = False
-
-            mask_no_cache = False
-
-            if mask_direct_fallback:
-                # emergency: mask는 생략(보기용 디버그이므로 안전 우선)
-                s_mask = None
-            else:
-                # 주의: _rc_get_full_scale는 공유 캐시 Surface를 돌려줄 수 있으므로 set_alpha로 직접 변형하면 안 된다.
-                s_mask0 = _rc_get_full_scale("mask", mask, z, is_zooming=is_zooming)
-                akey = ("mask_alpha", id(mask), float(z), 120)
-                s_mask = _rc_get(akey)
-                if s_mask is None:
-                    try:
-                        s_mask = s_mask0.copy()
-                        s_mask.set_alpha(120)
-                    except Exception:
-                        s_mask = s_mask0
-                    if cache_write_ok and s_mask is not None:
-                        _rc_put(akey, s_mask)
-
-            if (s_mask is not None) and (not mask_direct_fallback) and use_perspective_branch and callable(y_transform):
+            # 3D_ROTATE(Mode7) 활성 시: 배경과 같은 시점·원근으로 마스크도 샘플링
+            if rotate3d_active and isinstance(rotate3d_mode7_ctx, dict) and mask is not None and rotate3d_cfg is not None:
                 try:
-                    zk = _rc_zkey(z)
-                    try:
-                        tq = float(CONFIG.get("RENDER_TILT_STEP", 0.01))
-                    except Exception:
-                        tq = 0.01
-                    tq = max(0.001, min(0.1, tq))
-                    # 배경과 동일하게 변환 중엔 f_q 양자화를 굵게 → 배경/마스크 정렬 유지 + 캐시 키 축소.
-                    if fast_ts and anim_ts:
+                    lw_m = int(rotate3d_mode7_ctx.get("w", CONFIG.get("WIDTH", 640)) or 640)
+                    lh_m = int(rotate3d_mode7_ctx.get("h", CONFIG.get("HEIGHT", 480)) or 480)
+                except Exception:
+                    lw_m, lh_m = 640, 480
+                lw_m = max(1, int(lw_m))
+                lh_m = max(1, int(lh_m))
+                if (
+                    rotate3d_mask_tmp is None
+                    or rotate3d_mask_tmp.get_width() != lw_m
+                    or rotate3d_mask_tmp.get_height() != lh_m
+                ):
+                    rotate3d_mask_tmp = pygame.Surface((lw_m, lh_m))
+                engine_mod.apply_rotate3d_mode7(
+                    rotate3d_mask_tmp,
+                    mask,
+                    float(rotate3d_mode7_ctx.get("cam_x", 0.0)),
+                    float(rotate3d_mode7_ctx.get("cam_y", 0.0)),
+                    float(rotate3d_mode7_ctx.get("cam_angle", 0.0)),
+                    float(rotate3d_current),
+                    rotate3d_cfg,
+                    ctx=rotate3d_mode7_ctx,
+                    clear_color=(0, 0, 0),
+                    fill_sky=False,  # 마스크는 하늘/바닥 채움 없이 검정만
+                )
+                try:
+                    rotate3d_mask_tmp.set_colorkey((0, 0, 0))
+                    rotate3d_mask_tmp.set_alpha(120)
+                except Exception:
+                    pass
+                render_surf.blit(rotate3d_mask_tmp, (0, 0))
+            else:
+                # 원래 방식: 전체 마스크를 스케일하여 항상 전부 그린다(캐시 사용)
+                mask_direct_fallback = False
+                try:
+                    mw0, mh0 = mask.get_size()
+                    est_full_mb = _est_rgba_mb(int(round(float(mw0) * float(z))), int(round(float(mh0) * float(z))))
+                    if est_full_mb > _tmp_surf_mb_limit:
+                        mask_direct_fallback = True
+                except Exception:
+                    mask_direct_fallback = False
+
+                mask_no_cache = False
+
+                if mask_direct_fallback:
+                    # emergency: mask는 생략(보기용 디버그이므로 안전 우선)
+                    s_mask = None
+                else:
+                    # 주의: _rc_get_full_scale는 공유 캐시 Surface를 돌려줄 수 있으므로 set_alpha로 직접 변형하면 안 된다.
+                    s_mask0 = _rc_get_full_scale("mask", mask, z, is_zooming=is_zooming)
+                    akey = ("mask_alpha", id(mask), float(z), 120)
+                    s_mask = _rc_get(akey)
+                    if s_mask is None:
                         try:
-                            tq_anim_m = float(CONFIG.get("RENDER_TILT_STEP_ANIM", 0.05))
+                            s_mask = s_mask0.copy()
+                            s_mask.set_alpha(120)
                         except Exception:
-                            tq_anim_m = 0.05
-                        tq = max(tq, max(0.02, tq_anim_m))
-                    if tilt_active:
-                        f = max(tilt_factor_min, min(1.0, float(tilt_current)))
-                        f_q = max(tilt_factor_min, min(1.0, round(round(f / tq) * tq, 4)))
-                    else:
-                        f_q = 1.0
+                            s_mask = s_mask0
+                        if cache_write_ok and s_mask is not None:
+                            _rc_put(akey, s_mask)
 
-                    key = ("mask_tilt", id(mask), zk, float(f_q))
-                    s_mask2 = _rc_get(key)
-                    if s_mask2 is None:
-                        sw, sh = s_mask.get_width(), s_mask.get_height()
-                        nh = max(1, int(sh * f_q))
-                        # 임시 대형 Surface 생성 방지: 너무 크면 마스크 틸트/쉬어는 그 프레임만 생략(안정 우선)
-                        if _est_rgba_mb(sw, nh) > _tmp_surf_mb_limit:
-                            render_surf.blit(s_mask, (bg_dx, bg_dy))
-                            raise RuntimeError("skip_tilt_mask_large_surface")
-                        s_mask2 = pygame.transform.scale(s_mask, (sw, nh))
-                        s_mask2.set_alpha(120)
-                        if tilt_cache_ok:
-                            _rc_put(key, s_mask2)
+                if (s_mask is not None) and (not mask_direct_fallback) and use_perspective_branch and callable(y_transform):
+                    try:
+                        zk = _rc_zkey(z)
+                        try:
+                            tq = float(CONFIG.get("RENDER_TILT_STEP", 0.01))
+                        except Exception:
+                            tq = 0.01
+                        tq = max(0.001, min(0.1, tq))
+                        # 배경과 동일하게 변환 중엔 f_q 양자화를 굵게 → 배경/마스크 정렬 유지 + 캐시 키 축소.
+                        if fast_ts and anim_ts:
+                            try:
+                                tq_anim_m = float(CONFIG.get("RENDER_TILT_STEP_ANIM", 0.05))
+                            except Exception:
+                                tq_anim_m = 0.05
+                            tq = max(tq, max(0.02, tq_anim_m))
+                        if tilt_active:
+                            f = max(tilt_factor_min, min(1.0, float(tilt_current)))
+                            f_q = max(tilt_factor_min, min(1.0, round(round(f / tq) * tq, 4)))
+                        else:
+                            f_q = 1.0
 
-                    # 앵커는 렌더 스냅 줌(z) 기준 — 마스크 blit Y는 bg_dy 기준(기존 동작 유지)
-                    player_sy = float((player.pos[1] - cam_draw_y) * float(z))
-                    shift_y = float((player_sy - float(bg_dy)) * (1.0 - float(f_q)))
+                        key = ("mask_tilt", id(mask), zk, float(f_q))
+                        s_mask2 = _rc_get(key)
+                        if s_mask2 is None:
+                            sw, sh = s_mask.get_width(), s_mask.get_height()
+                            nh = max(1, int(sh * f_q))
+                            # 임시 대형 Surface 생성 방지: 너무 크면 마스크 틸트/쉬어는 그 프레임만 생략(안정 우선)
+                            if _est_rgba_mb(sw, nh) > _tmp_surf_mb_limit:
+                                render_surf.blit(s_mask, (bg_dx, bg_dy))
+                                raise RuntimeError("skip_tilt_mask_large_surface")
+                            s_mask2 = pygame.transform.scale(s_mask, (sw, nh))
+                            s_mask2.set_alpha(120)
+                            if tilt_cache_ok:
+                                _rc_put(key, s_mask2)
 
-                    if tilt_mask_tmp is None or tilt_mask_tmp.get_width() != s_mask2.get_width() or tilt_mask_tmp.get_height() != s_mask2.get_height():
-                        tilt_mask_tmp = pygame.Surface((s_mask2.get_width(), s_mask2.get_height()), pygame.SRCALPHA)
+                        # 앵커는 렌더 스냅 줌(z) 기준 — 마스크 blit Y는 bg_dy 기준(기존 동작 유지)
+                        player_sy = float((player.pos[1] - cam_draw_y) * float(z))
+                        shift_y = float((player_sy - float(bg_dy)) * (1.0 - float(f_q)))
 
-                    sw = int(s_mask2.get_width())
-                    sh2 = int(s_mask2.get_height())
-                    mask_shear_blit_row0 = 0
-                    use_mask_strip = bool(
-                        frame_shear_strip is not None
-                        and shear_eff > 0
-                    )
-                    if use_mask_strip:
-                        strip_r0, strip_r1 = frame_shear_strip
-                    if shear_eff > 0:
+                        if tilt_mask_tmp is None or tilt_mask_tmp.get_width() != s_mask2.get_width() or tilt_mask_tmp.get_height() != s_mask2.get_height():
+                            tilt_mask_tmp = pygame.Surface((s_mask2.get_width(), s_mask2.get_height()), pygame.SRCALPHA)
+
+                        sw = int(s_mask2.get_width())
+                        sh2 = int(s_mask2.get_height())
+                        mask_shear_blit_row0 = 0
+                        use_mask_strip = bool(
+                            frame_shear_strip is not None
+                            and shear_eff > 0
+                        )
                         if use_mask_strip:
-                            skey = (
-                                "mask_shear_strip",
-                                id(mask),
-                                zk,
-                                float(f_q),
-                                int(shear_eff),
-                                int(slice_h),
-                                int(strip_r0),
-                                int(strip_r1),
+                            strip_r0, strip_r1 = frame_shear_strip
+                        if shear_eff > 0:
+                            if use_mask_strip:
+                                skey = (
+                                    "mask_shear_strip",
+                                    id(mask),
+                                    zk,
+                                    float(f_q),
+                                    int(shear_eff),
+                                    int(slice_h),
+                                    int(strip_r0),
+                                    int(strip_r1),
+                                )
+                            else:
+                                skey = ("mask_shear", id(mask), zk, float(f_q), int(shear_eff), int(slice_h))
+                            s_mask3 = _shear_pin_get(skey)
+                            if s_mask3 is None:
+                                s_mask3 = _rc_get(skey)
+                            if s_mask3 is None:
+                                tilt_mask_tmp.fill((0, 0, 0, 0))
+                                tilt_mask_tmp.blit(s_mask2, (0, 0))
+                                if use_mask_strip:
+                                    strip_h = int(strip_r1) - int(strip_r0)
+                                    out_w = sw + shear_eff
+                                    if _est_rgba_mb(out_w, strip_h) > _tmp_surf_mb_limit:
+                                        render_surf.blit(
+                                            tilt_mask_tmp,
+                                            (int(bg_dx), int(round(float(bg_dy) + float(shift_y) + float(strip_r0)))),
+                                            area=pygame.Rect(0, strip_r0, sw, strip_h),
+                                        )
+                                        raise RuntimeError("skip_shear_mask_large_surface")
+                                    if (
+                                        shear_mask_strip_tmp is None
+                                        or shear_mask_strip_tmp.get_width() != out_w
+                                        or shear_mask_strip_tmp.get_height() != strip_h
+                                    ):
+                                        shear_mask_strip_tmp = pygame.Surface((out_w, strip_h), pygame.SRCALPHA)
+                                    mplan = frame_shear_plan
+                                    if mplan is None:
+                                        mplan = engine_mod.vertical_top_shear_merged_plan_region(
+                                            sh2, shear_eff, slice_h, strip_r0, strip_r1
+                                        )
+                                    engine_mod.apply_vertical_top_shear_region(
+                                        shear_mask_strip_tmp,
+                                        tilt_mask_tmp,
+                                        shear_eff,
+                                        slice_h,
+                                        strip_r0,
+                                        strip_r1,
+                                        sh2,
+                                        plan=mplan,
+                                        clear_dst=True,
+                                    )
+                                    shear_mask_strip_tmp.set_alpha(120)
+                                    s_out = shear_mask_strip_tmp
+                                    mask_shear_blit_row0 = int(strip_r0)
+                                else:
+                                    out_w = sw + shear_eff
+                                    if _est_rgba_mb(out_w, sh2) > _tmp_surf_mb_limit:
+                                        render_surf.blit(tilt_mask_tmp, (int(bg_dx), int(round(float(bg_dy) + float(shift_y)))))
+                                        raise RuntimeError("skip_shear_mask_large_surface")
+                                    if shear_mask_tmp is None or shear_mask_tmp.get_width() != out_w or shear_mask_tmp.get_height() != sh2:
+                                        shear_mask_tmp = pygame.Surface((out_w, sh2), pygame.SRCALPHA)
+                                    mplan = frame_shear_plan
+                                    if mplan is None:
+                                        mplan = engine_mod.vertical_top_shear_merged_plan(sh2, shear_eff, slice_h)
+                                    engine_mod.apply_vertical_top_shear(
+                                        shear_mask_tmp,
+                                        tilt_mask_tmp,
+                                        shear_eff,
+                                        slice_h,
+                                        plan=mplan,
+                                        clear_dst=True,
+                                    )
+                                    shear_mask_tmp.set_alpha(120)
+                                    s_out = shear_mask_tmp
+                                if tilt_cache_ok:
+                                    s_mask3 = s_out.copy()
+                                    _shear_pin_put(skey, s_mask3)
+                                    _rc_put(skey, s_mask3)
+                                else:
+                                    s_mask3 = s_out
+                            elif use_mask_strip:
+                                mask_shear_blit_row0 = int(strip_r0)
+                            render_surf.blit(
+                                s_mask3,
+                                (
+                                    int(bg_dx),
+                                    int(round(float(bg_dy) + float(shift_y) + float(mask_shear_blit_row0))),
+                                ),
                             )
                         else:
-                            skey = ("mask_shear", id(mask), zk, float(f_q), int(shear_eff), int(slice_h))
-                        s_mask3 = _shear_pin_get(skey)
-                        if s_mask3 is None:
-                            s_mask3 = _rc_get(skey)
-                        if s_mask3 is None:
                             tilt_mask_tmp.fill((0, 0, 0, 0))
                             tilt_mask_tmp.blit(s_mask2, (0, 0))
-                            if use_mask_strip:
-                                strip_h = int(strip_r1) - int(strip_r0)
-                                out_w = sw + shear_eff
-                                if _est_rgba_mb(out_w, strip_h) > _tmp_surf_mb_limit:
-                                    render_surf.blit(
-                                        tilt_mask_tmp,
-                                        (int(bg_dx), int(round(float(bg_dy) + float(shift_y) + float(strip_r0)))),
-                                        area=pygame.Rect(0, strip_r0, sw, strip_h),
-                                    )
-                                    raise RuntimeError("skip_shear_mask_large_surface")
-                                if (
-                                    shear_mask_strip_tmp is None
-                                    or shear_mask_strip_tmp.get_width() != out_w
-                                    or shear_mask_strip_tmp.get_height() != strip_h
-                                ):
-                                    shear_mask_strip_tmp = pygame.Surface((out_w, strip_h), pygame.SRCALPHA)
-                                mplan = frame_shear_plan
-                                if mplan is None:
-                                    mplan = engine_mod.vertical_top_shear_merged_plan_region(
-                                        sh2, shear_eff, slice_h, strip_r0, strip_r1
-                                    )
-                                engine_mod.apply_vertical_top_shear_region(
-                                    shear_mask_strip_tmp,
-                                    tilt_mask_tmp,
-                                    shear_eff,
-                                    slice_h,
-                                    strip_r0,
-                                    strip_r1,
-                                    sh2,
-                                    plan=mplan,
-                                    clear_dst=True,
-                                )
-                                shear_mask_strip_tmp.set_alpha(120)
-                                s_out = shear_mask_strip_tmp
-                                mask_shear_blit_row0 = int(strip_r0)
-                            else:
-                                out_w = sw + shear_eff
-                                if _est_rgba_mb(out_w, sh2) > _tmp_surf_mb_limit:
-                                    render_surf.blit(tilt_mask_tmp, (int(bg_dx), int(round(float(bg_dy) + float(shift_y)))))
-                                    raise RuntimeError("skip_shear_mask_large_surface")
-                                if shear_mask_tmp is None or shear_mask_tmp.get_width() != out_w or shear_mask_tmp.get_height() != sh2:
-                                    shear_mask_tmp = pygame.Surface((out_w, sh2), pygame.SRCALPHA)
-                                mplan = frame_shear_plan
-                                if mplan is None:
-                                    mplan = engine_mod.vertical_top_shear_merged_plan(sh2, shear_eff, slice_h)
-                                engine_mod.apply_vertical_top_shear(
-                                    shear_mask_tmp,
-                                    tilt_mask_tmp,
-                                    shear_eff,
-                                    slice_h,
-                                    plan=mplan,
-                                    clear_dst=True,
-                                )
-                                shear_mask_tmp.set_alpha(120)
-                                s_out = shear_mask_tmp
-                            if tilt_cache_ok:
-                                s_mask3 = s_out.copy()
-                                _shear_pin_put(skey, s_mask3)
-                                _rc_put(skey, s_mask3)
-                            else:
-                                s_mask3 = s_out
-                        elif use_mask_strip:
-                            mask_shear_blit_row0 = int(strip_r0)
-                        render_surf.blit(
-                            s_mask3,
-                            (
-                                int(bg_dx),
-                                int(round(float(bg_dy) + float(shift_y) + float(mask_shear_blit_row0))),
-                            ),
-                        )
-                    else:
-                        tilt_mask_tmp.fill((0, 0, 0, 0))
-                        tilt_mask_tmp.blit(s_mask2, (0, 0))
-                        render_surf.blit(tilt_mask_tmp, (int(bg_dx), int(round(float(bg_dy) + float(shift_y)))))
-                except Exception:
+                            render_surf.blit(tilt_mask_tmp, (int(bg_dx), int(round(float(bg_dy) + float(shift_y)))))
+                    except Exception:
+                        if s_mask is not None:
+                            render_surf.blit(s_mask, (bg_dx, bg_dy))
+                else:
                     if s_mask is not None:
                         render_surf.blit(s_mask, (bg_dx, bg_dy))
-            else:
-                if s_mask is not None:
-                    render_surf.blit(s_mask, (bg_dx, bg_dy))
             if perf_enabled and t0 is not None:
                 _dt_mask = _pnow() - t0
                 _padd("mask", _dt_mask)
@@ -5067,6 +5533,7 @@ def main():
             x_offset_fn=x_offset_fn,
             f_q=float(f_q),
             map_size=(bg_w, bg_h),
+            mode7_ctx=rotate3d_mode7_ctx if rotate3d_active else None,
         )
         if perf_enabled and t0 is not None:
             _padd("cloud", _pnow() - t0)
@@ -5083,6 +5550,7 @@ def main():
                 x_offset_fn=x_offset_fn,
                 sprite_perspective_q=sprite_perspective_q,
                 shear_lod=sprite_shear_lod,
+                **_r3_draw_kw,
             )
         if perf_enabled and t0 is not None:
             _padd("effects", _pnow() - t0)
@@ -5106,15 +5574,13 @@ def main():
                         wx0, wy0 = float(click_feedback["pos"][0]), float(click_feedback["pos"][1])
                     except Exception:
                         wx0, wy0 = click_feedback["pos"][0], click_feedback["pos"][1]
-                    fx = (float(wx0) - float(cam_draw_x)) * zmk
-                    fy = (float(wy0) - float(cam_draw_y)) * zmk
                     try:
-                        if callable(y_transform):
-                            fy = float(y_transform(float(fy)))
-                        if callable(x_offset_fn):
-                            fx = float(fx) + float(x_offset_fn(float(fy)))
+                        fx, fy = _player_feet_screen_xy_like_draw(
+                            wx0, wy0, cam_draw_x, cam_draw_y, zmk, y_transform, x_offset_fn, **_r3_draw_kw
+                        )
                     except Exception:
-                        pass
+                        fx = (float(wx0) - float(cam_draw_x)) * zmk
+                        fy = (float(wy0) - float(cam_draw_y)) * zmk
                     # 줌 배율에 맞춰 크기 조절
                     radius = int(6 * cam.current_zoom)
                     pygame.draw.circle(render_surf, click_feedback["color"], (int(fx), int(fy)), radius, 2)
@@ -5161,17 +5627,9 @@ def main():
                 except Exception:
                     zmk = 1.0
                 zmk = max(1e-6, float(zmk))
-                fx = (float(wx0) - float(cam_draw_x)) * zmk
-                fy = (float(wy0) - float(cam_draw_y)) * zmk
-                try:
-                    if callable(y_transform):
-                        fy = float(y_transform(float(fy)))
-                    if callable(x_offset_fn):
-                        fx = float(fx) + float(x_offset_fn(float(fy)))
-                except Exception:
-                    pass
-
-                # lazy load frames (루프 밖 swing_jump_arrow_frames 재사용)
+                fx, fy = _player_feet_screen_xy_like_draw(
+                    wx0, wy0, cam_draw_x, cam_draw_y, zmk, y_transform, x_offset_fn, **_r3_draw_kw
+                )
                 if swing_jump_arrow_frames is None:
                     try:
                         pdir = str(CONFIG.get("SWING_JUMP_ARROW_FX_DIR", "assets/images/fx/swingjumparrow") or "").strip()
@@ -5342,15 +5800,9 @@ def main():
                         except Exception:
                             zmk = 1.0
                         zmk = max(1e-6, float(zmk))
-                        fx = (float(cxw) - float(cam_draw_x)) * zmk
-                        fy = (float(cyw) - float(cam_draw_y)) * zmk
-                        try:
-                            if callable(y_transform):
-                                fy = float(y_transform(float(fy)))
-                            if callable(x_offset_fn):
-                                fx = float(fx) + float(x_offset_fn(float(fy)))
-                        except Exception:
-                            pass
+                        fx, fy = _player_feet_screen_xy_like_draw(
+                            cxw, cyw, cam_draw_x, cam_draw_y, zmk, y_transform, x_offset_fn, **_r3_draw_kw
+                        )
                         # 존 클릭 FX: 말풍선과 동일하게 논리 px = 에셋 px (이중 스케일 없음)
                         try:
                             sc = float(ui_layout_scale())
@@ -5463,15 +5915,9 @@ def main():
                     eimg = eframes[eidx]
                 except Exception:
                     eimg = eframes[0]
-                fx = (float(cxw) - float(cam_draw_x)) * zmk_ep
-                fy = (float(cyw) - float(cam_draw_y)) * zmk_ep
-                try:
-                    if callable(y_transform):
-                        fy = float(y_transform(float(fy)))
-                    if callable(x_offset_fn):
-                        fx = float(fx) + float(x_offset_fn(float(fy)))
-                except Exception:
-                    pass
+                fx, fy = _player_feet_screen_xy_like_draw(
+                    cxw, cyw, cam_draw_x, cam_draw_y, zmk_ep, y_transform, x_offset_fn, **_r3_draw_kw
+                )
                 try:
                     iw, ih = eimg.get_width(), eimg.get_height()
                     if abs(sc_ep - 1.0) > 1e-6:
@@ -5489,9 +5935,14 @@ def main():
                 render_surf.blit(eimg2, (eox, eoy))
                 ep_shown += 1
 
-        # --- 필드 활동 오버레이 (낚시 찌·물고기 등 — 월드 줌 직전) ---
+        # --- 필드 활동 오버레이 (낚시 찌·물고기 / 야구·레이스 월드 기즈모) ---
         if field_activities.is_active:
             try:
+                _aid = None
+                try:
+                    _aid = getattr(getattr(field_activities, "_session", None), "activity_id", None)
+                except Exception:
+                    _aid = None
                 _fa_ctx = FieldDrawContext(
                     surf=world_surf,
                     cam_draw_x=float(cam_draw_x),
@@ -5499,14 +5950,13 @@ def main():
                     z=float(z),
                     y_transform=y_transform,
                     x_offset_fn=x_offset_fn,
-                    font_fn=get_ui_font,
+                    font_fn=activity_font_fn(_aid),
+                    mode7_ctx=rotate3d_mode7_ctx if rotate3d_active else None,
                 )
-                if field_activities.active_id == "baseball":
-                    field_activities.draw_world(_fa_ctx)
-                else:
-                    field_activities.draw(_fa_ctx)
+                field_activities.draw_world(_fa_ctx)
             except Exception:
                 pass
+
 
         # --- 월드 줌(후처리) 합성: world_surf -> draw_surf ---
         # 오버레이(UI)는 줌 영향을 받지 않으므로, 여기서만 스케일한다.
@@ -5555,6 +6005,7 @@ def main():
                     float(z),
                     y_transform,
                     x_offset_fn,
+                    **_r3_draw_kw,
                 )
             except Exception:
                 ax, ay = float(lw_i) * 0.5, float(lh_i) * 0.5
@@ -5577,9 +6028,15 @@ def main():
         if perf_enabled and t_wz0 is not None:
             _padd("world_zoom", _pnow() - t_wz0)
 
-        # 야구 등 화면 고정 UI — 월드 줌 이후 논리 해상도에 그림 (클릭 좌표와 일치)
-        if field_activities.is_active and field_activities.active_id == "baseball":
+
+        # 야구·레이스 등 화면 고정 UI — 월드 줌 이후 논리 해상도에 그림 (클릭 좌표와 일치)
+        if field_activities.is_active:
             try:
+                _aid2 = None
+                try:
+                    _aid2 = getattr(getattr(field_activities, "_session", None), "activity_id", None)
+                except Exception:
+                    _aid2 = None
                 field_activities.draw_screen(
                     FieldDrawContext(
                         surf=render_surf,
@@ -5588,23 +6045,64 @@ def main():
                         z=float(z),
                         y_transform=y_transform,
                         x_offset_fn=x_offset_fn,
-                        font_fn=get_ui_font,
+                        font_fn=activity_font_fn(_aid2),
+                        mode7_ctx=rotate3d_mode7_ctx if rotate3d_active else None,
                     )
                 )
             except Exception:
                 pass
 
-        # --- 미니게임 전체 화면 (minigames/*.py 세션 draw) ---
+        # --- 외부 minigames/ 전체화면 경로 (비사용, no-op) ---
         if getattr(ev_mgr, "is_minigame_active", lambda: False)():
             _draw_mg = getattr(ev_mgr, "draw_minigame", None)
             if callable(_draw_mg):
                 _draw_mg(render_surf, get_ui_font)
 
-        # [추가] SCREEN 오버레이 (인트로/슬라이드)
-        t0 = _pnow() if perf_enabled else None
-        ev_mgr.draw_screen_overlay(render_surf)
-        if perf_enabled and t0 is not None:
-            _padd("overlay", _pnow() - t0)
+        # --- 화면 전체 FX (비·구름 톤 등) — SCREEN·exit 아래 ---
+        t_sfx0 = _pnow() if perf_enabled else None
+        try:
+            draw_screen_fx_tone(
+                render_surf,
+                screen_fx_overlay_surf,
+                getattr(ev_mgr, "screen_fx_tone", None),
+            )
+        except Exception:
+            pass
+        try:
+            draw_screen_fx_vignette(
+                render_surf,
+                screen_rain_surf,
+                getattr(ev_mgr, "screen_fx_vignette", None),
+            )
+        except Exception:
+            pass
+        flash_fx = getattr(ev_mgr, "screen_fx_flash", None)
+        flash_a = screen_fx_flash_alpha(flash_fx)
+        if flash_a > 0:
+            try:
+                rgb = (255, 255, 255)
+                if isinstance(flash_fx, dict) and flash_fx.get("color"):
+                    c = flash_fx.get("color")
+                    if isinstance(c, (list, tuple)) and len(c) >= 3:
+                        rgb = (int(c[0]), int(c[1]), int(c[2]))
+            except Exception:
+                rgb = (255, 255, 255)
+            screen_fx_overlay_surf.fill(rgb)
+            screen_fx_overlay_surf.set_alpha(flash_a)
+            render_surf.blit(screen_fx_overlay_surf, (0, 0))
+        try:
+            draw_screen_fx_rain(
+                render_surf,
+                screen_rain_surf,
+                getattr(ev_mgr, "screen_fx_rain", None),
+                cam_draw_x=float(cam_draw_x),
+                cam_draw_y=float(cam_draw_y),
+                zoom=float(cam.current_zoom),
+            )
+        except Exception:
+            pass
+        if perf_enabled and t_sfx0 is not None:
+            _padd("screen_fx", _pnow() - t_sfx0)
 
         t_ui = _pnow() if perf_enabled else None
         try:
@@ -5624,9 +6122,20 @@ def main():
             }
         except Exception:
             head_ctx = None
-        ev_mgr.draw_ui_overlays(render_surf, head_ctx)
+        ev_mgr.draw_ui_overlays(render_surf, head_ctx, layer="chrome")
         if perf_enabled and t_ui is not None:
-            _padd("ui_overlay", _pnow() - t_ui)
+            _padd("ui_overlay_chrome", _pnow() - t_ui)
+
+        # [추가] SCREEN 오버레이 (인트로/슬라이드) — 비·exit 위, 대화 아래
+        t0 = _pnow() if perf_enabled else None
+        ev_mgr.draw_screen_overlay(render_surf)
+        if perf_enabled and t0 is not None:
+            _padd("overlay", _pnow() - t0)
+
+        t_ui = _pnow() if perf_enabled else None
+        ev_mgr.draw_ui_overlays(render_surf, head_ctx, layer="dialog")
+        if perf_enabled and t_ui is not None:
+            _padd("ui_overlay_dialog", _pnow() - t_ui)
 
         # 월드 후단: 대화·디버그 블릿·존 박스·커서 등(페이드는 screen FX 뒤 — 최상단)
         t_wtail0 = _pnow() if perf_detail else None
@@ -5891,49 +6400,7 @@ def main():
         if perf_detail and t_wtail0 is not None:
             _padd("world_tail", _pnow() - t_wtail0)
 
-        # --- 화면 전체 FX: 톤 · 비네팅 · 번쩍 · 비 · 흔들림 ---
-        t_sfx0 = _pnow() if perf_enabled else None
-        try:
-            draw_screen_fx_tone(
-                render_surf,
-                screen_fx_overlay_surf,
-                getattr(ev_mgr, "screen_fx_tone", None),
-            )
-        except Exception:
-            pass
-        try:
-            draw_screen_fx_vignette(
-                render_surf,
-                screen_rain_surf,
-                getattr(ev_mgr, "screen_fx_vignette", None),
-            )
-        except Exception:
-            pass
-        flash_fx = getattr(ev_mgr, "screen_fx_flash", None)
-        flash_a = screen_fx_flash_alpha(flash_fx)
-        if flash_a > 0:
-            try:
-                rgb = (255, 255, 255)
-                if isinstance(flash_fx, dict) and flash_fx.get("color"):
-                    c = flash_fx.get("color")
-                    if isinstance(c, (list, tuple)) and len(c) >= 3:
-                        rgb = (int(c[0]), int(c[1]), int(c[2]))
-            except Exception:
-                rgb = (255, 255, 255)
-            screen_fx_overlay_surf.fill(rgb)
-            screen_fx_overlay_surf.set_alpha(flash_a)
-            render_surf.blit(screen_fx_overlay_surf, (0, 0))
-        try:
-            draw_screen_fx_rain(
-                render_surf,
-                screen_rain_surf,
-                getattr(ev_mgr, "screen_fx_rain", None),
-                cam_draw_x=float(cam_draw_x),
-                cam_draw_y=float(cam_draw_y),
-                zoom=float(cam.current_zoom),
-            )
-        except Exception:
-            pass
+        # 화면 흔들림 — 연출 전체(대화·SCREEN 포함)에 적용
         shake_dx, shake_dy = screen_fx_shake_offset(getattr(ev_mgr, "screen_fx_shake", None))
         if shake_dx or shake_dy:
             tmp_sh = screen_shake_tmp[0]
@@ -5944,8 +6411,6 @@ def main():
                 tmp_sh.blit(render_surf, (0, 0))
             render_surf.fill((0, 0, 0))
             render_surf.blit(tmp_sh, (shake_dx, shake_dy))
-        if perf_enabled and t_sfx0 is not None:
-            _padd("screen_fx", _pnow() - t_sfx0)
 
         # 페이드 — screen FX(비·번쩍·흔들림) 포함 모든 연출 위에 덮음 (UI 오버레이 아래)
         if ev_mgr.fade_alpha > 0:

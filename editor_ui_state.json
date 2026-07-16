@@ -19,5 +19,7 @@
     "자연/식물",
     "타일류"
   ],
-  "map_right_collapsed": []
+  "map_right_collapsed": [],
+  "map_hide_large": true,
+  "map_view_hidden_keys": []
 }
