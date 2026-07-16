@@ -5,7 +5,8 @@ package.domain = org.test
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,ttf,otf,ttc,wav,mp3,json
 version = 0.1
-requirements = python3==3.10.12,hostpython3==3.10.12,pygame,sdl2_image,sdl2_mixer,sdl2_ttf
+# numpy: Mode7(3d_rotate / 레이싱)이 pygame.surfarray 픽셀 샘플에 필요. 없으면 apply_rotate3d_mode7 이 조용히 실패.
+requirements = python3==3.10.12,hostpython3==3.10.12,pygame,sdl2_image,sdl2_mixer,sdl2_ttf,numpy
 orientation = landscape
 osx.kivy_version = 2.1.0
 fullscreen = 1
