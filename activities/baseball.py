@@ -3717,8 +3717,11 @@ class BaseballActivity(BaseFieldActivity):
             self._draw_menu_back_button(surf, back_r, small)
             return
 
-        title = font.render("어린이 야구 — 홈런 대결", True, (255, 248, 220))
-        surf.blit(title, (w // 2 - title.get_width() // 2, int(h * 0.08)))
+        # 상위 메뉴 제목은 메인 메뉴(·2P 시작)에서만 — 서브메뉴(난이도·캐릭터 선택)는
+        # 자기 제목을 그리므로 여기서 같이 그리면 글자가 겹친다
+        if self.state in (ST_MENU, ST_PICK_P2):
+            title = font.render("어린이 야구 — 홈런 대결", True, (255, 248, 220))
+            surf.blit(title, (w // 2 - title.get_width() // 2, int(h * 0.08)))
 
         self._layout_menu_rects(w, h)
         items = []
@@ -3777,34 +3780,34 @@ class BaseballActivity(BaseFieldActivity):
             phase_title = self._char_pick_phase_title()
             pt = font.render(phase_title, True, (255, 248, 220))
             surf.blit(pt, (w // 2 - pt.get_width() // 2, int(h * 0.06)))
-            hint = small.render("캐릭터를 탭하세요", True, (180, 200, 220))
-            surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.13)))
-            self._layout_char_pick_rects(w, h)
-            grid_sprite_h = _CHAR_PICK_IDLE_GRID_H
-            for rect, ix in self._char_pick_rects:
-                cid = str(self._char_opts[ix])
-                frames = self._idle_frames_for_direction(cid, "right")
-                sprite_h = min(grid_sprite_h, max(16, int(rect.height * 0.55)))
-                sy = rect.centery - int(sprite_h * 0.15)
-                self._blit_idle_frame(surf, frames, (rect.centerx, sy), sprite_h)
-                locked = cid in (self._char_locked or set())
-                if locked:
-                    dim2 = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-                    dim2.fill((0, 0, 0, 130))
-                    surf.blit(dim2, (rect.left, rect.top))
-                lbl_txt = "???" if locked else self._char_label(cid)
-                lbl = small.render(lbl_txt, True, (210, 225, 245))
-                ly = rect.bottom - lbl.get_height() - 2
-                if ly >= rect.top:
-                    surf.blit(lbl, (rect.centerx - lbl.get_width() // 2, ly))
+            if self._char_pending_ix is None:
+                # 선택 그리드 — 확인창(서브메뉴)이 떠 있으면 그리지 않는다 (겹침 방지)
+                hint = small.render("캐릭터를 탭하세요", True, (180, 200, 220))
+                surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.13)))
+                self._layout_char_pick_rects(w, h)
+                grid_sprite_h = _CHAR_PICK_IDLE_GRID_H
+                for rect, ix in self._char_pick_rects:
+                    cid = str(self._char_opts[ix])
+                    frames = self._idle_frames_for_direction(cid, "right")
+                    sprite_h = min(grid_sprite_h, max(16, int(rect.height * 0.55)))
+                    sy = rect.centery - int(sprite_h * 0.15)
+                    self._blit_idle_frame(surf, frames, (rect.centerx, sy), sprite_h)
+                    locked = cid in (self._char_locked or set())
+                    if locked:
+                        dim2 = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+                        dim2.fill((0, 0, 0, 130))
+                        surf.blit(dim2, (rect.left, rect.top))
+                    lbl_txt = "???" if locked else self._char_label(cid)
+                    lbl = small.render(lbl_txt, True, (210, 225, 245))
+                    ly = rect.bottom - lbl.get_height() - 2
+                    if ly >= rect.top:
+                        surf.blit(lbl, (rect.centerx - lbl.get_width() // 2, ly))
             back_r = self._menu_back_button_rect(w, h)
             self._draw_menu_back_button(surf, back_r, small)
             if self._char_pending_ix is not None:
+                # 선택 확인창 — 상위(그리드)는 숨긴 상태로 확인 UI만 표시
                 ix = int(self._char_pending_ix)
                 cid = str(self._char_opts[ix]) if self._char_opts else ""
-                dim = pygame.Surface((w, h), pygame.SRCALPHA)
-                dim.fill((0, 0, 0, 150))
-                surf.blit(dim, (0, 0))
                 frames = self._idle_frames_for_direction(cid, "right")
                 full_h = min(int(h * 0.30), _CHAR_PICK_IDLE_CONFIRM_H)
                 cy = int(h * 0.40)

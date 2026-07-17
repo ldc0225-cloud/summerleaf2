@@ -5,29 +5,6 @@
             {
                 "mode": "record_1p",
                 "char": "carrot",
-                "score": 175,
-                "player": 175,
-                "distances": [
-                    82,
-                    93
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "c10",
-                "score": 1293,
-                "player": 1293,
-                "distances": [
-                    445,
-                    185,
-                    523,
-                    325,
-                    93
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "carrot",
                 "score": 1603,
                 "player": 1603,
                 "distances": [
@@ -236,6 +213,28 @@
                     85,
                     86,
                     86
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "boy3_k",
+                "score": 307,
+                "player": 307,
+                "distances": [
+                    109,
+                    2,
+                    86,
+                    85,
+                    112
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "summer_k",
+                "score": 84,
+                "player": 84,
+                "distances": [
+                    84
                 ]
             }
         ]

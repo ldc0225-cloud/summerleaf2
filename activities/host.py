@@ -44,7 +44,7 @@ class FieldActivityHost:
             return True
 
     def consume_request(
-        self, request: dict, *, player, objs=None, npcs=None, mask=None, world_data=None, ev_mgr=None
+        self, request: dict, *, player, objs=None, npcs=None, mask=None, world_data=None, ev_mgr=None, bg=None
     ) -> bool:
         """ev_mgr.field_activity_request 소비."""
         if not isinstance(request, dict):
@@ -66,6 +66,8 @@ class FieldActivityHost:
             params["npcs"] = npcs
         if mask is not None:
             params["mask"] = mask
+        if bg is not None:
+            params["bg"] = bg
         if world_data is not None:
             params["world_data"] = world_data
         if ev_mgr is not None:

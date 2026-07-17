@@ -506,9 +506,9 @@ CONFIG = {
     "ROTATE3D_NEAR": 30.0,             # 작을수록 원근 강함(너무 작으면 하단이 광각처럼 보임)   30.0
     "ROTATE3D_DEPTH_MUL": 165.0,       # depth = p * DEPTH_MUL (PIVOT_FIT 켜면 런타임에 덮어씀) 165
     "ROTATE3D_LATERAL_MUL": 1.05,      # 도로 위치 샘플용. 스프라이트 크기에는 안 씀
-    "ROTATE3D_CAMERA_BACK": 150.0,      # 플레이어 뒤 카메라 + 스프라이트 scale=1 기준 깊이 250
+    "ROTATE3D_CAMERA_BACK": 250.0,      # 플레이어 뒤 카메라 + 스프라이트 scale=1 기준 깊이 250
     "ROTATE3D_BASE_HEADING": 1.5707963267948966,  # 기본 시선(+y). heading = BASE + ui.rotate3d_angle
-    "ROTATE3D_PLAYER_BOTTOM_PAD": 80,  # 플레이어 하단 고정 여백(px)
+    "ROTATE3D_PLAYER_BOTTOM_PAD": 50,  # 플레이어 하단 고정 여백(px)
     # Mode7 화면에서 플레이어(투영 중심) X 비율. 0.5=중앙, 1/3≈좌측 — 우측 시야에 트랙 전방이 더 넓게 들어옴
     "ROTATE3D_PLAYER_SCREEN_X_FRAC": 0.35,
     # True면 DEPTH_MUL만 맞춰 발이 빌보드 Y에 오게 함(행별 원근 식은 그대로)
@@ -523,7 +523,7 @@ CONFIG = {
     "ROTATE3D_CULL_BELOW_PAD_PX": 220, # 하단 여유(화면 아래 발·큰 스케일 빌보드)
     # Mode7 빈 공간 채움: 지평선 위=하늘, 아래(맵 밖)=바닥색. 파노라마 경로가 있으면 하늘만 360 원통 샘플.
     "ROTATE3D_SKY_COLOR": (135, 206, 235),      # 지평선 위 단색(파노라마 없거나 로드 실패 시)
-    "ROTATE3D_GROUND_FILL_COLOR": (135, 206, 235),    # 지평선 아래·맵 밖 픽셀
+    "ROTATE3D_GROUND_FILL_COLOR": (37, 159, 235),    # 지평선 아래·맵 밖 픽셀
     "ROTATE3D_SKY_PANORAMA": "",                 # 360 하늘 이미지 경로. 빈 문자열=단색. 예: assets/images/bg/sky_360.png
     "ROTATE3D_SKY_PANORAMA_YAW_OFFSET": 0.0,     # 파노라마 기준 yaw 보정(라디안). 이미지 정면 맞출 때
     "ROTATE3D_SKY_FOV_RAD": 1.2,                 # 화면 가로가 담는 하늘 시야각(라디안). 클수록 좌우로 더 많이 보임
@@ -848,7 +848,18 @@ RACING_DEFAULTS = {
     "closed": True,
     "start_s": 0.0,
     "start_spacing": 22.0,   # 스타트 그리드: 플레이어 뒤로 NPC 간격(px along path)
-    "lane_width": 26.0,      # 상/하 차선 오프셋(경로 법선 방향, 월드 px)
+    "lane_width": 30.0,      # 상/하 차선 오프셋(경로 법선 방향, 월드 px) = 도로 레인 1개 폭
+    # --- 경로 기반 도로 자동 그리기 ---
+    # 레이스 시작 시 경로를 중심으로 bg에 3레인 도로를 덧그린다 (맵에 직접 그릴 필요 없음).
+    # 레인 순서: 1=A(상) / 2=B(중) / 3=C(하). 색은 맵별 racing.road_lane_colors 로 덮어쓰기 가능.
+    "road_draw_enabled": True,
+    "road_lane_colors": [
+        [210, 60, 60],    # 1번 레인(A) 빨강
+        [235, 205, 70],   # 2번 레인(B) 노랑
+        [70, 115, 230],   # 3번 레인(C) 파랑
+    ],
+    "road_border_color": [40, 40, 46],  # 도로 가장자리 테두리색
+    "road_border_px": 3.0,              # 테두리 두께(월드 px)
     "laps": 3,
     "max_speed": 130.0,      # 직선 최고속 (월드 px/s)
     "min_corner_speed": 42.0,
@@ -881,6 +892,13 @@ RACING_DEFAULTS = {
     "countdown_sec": 3.0,
     "finish_hold_sec": 2.2,
     "debug_draw_path": False,
+    # --- 미니맵 오버레이 (마리오카트식) ---
+    # 오른쪽 위 exit 버튼 밑에 전체 맵 축소판 + 레이서 위치 점 + 경과 시간 표시
+    "minimap_enabled": True,
+    "minimap_scale": 0.0625,     # 전체 맵 대비 축소 비율 (1/16 → 면적 기준 1/8의 1/4)
+    "minimap_alpha": 215,        # 축소맵 투명도 (0~255)
+    "minimap_margin_x_frac": 0.015,  # 화면 오른쪽 여백 (폭 비율)
+    "minimap_top_frac": 0.075,   # exit 버튼 바로 밑 시작 y (높이 비율)
     # --- 경로 위 아이템 포인트 ---
     # items: [{s, lane:"A"|"B"|"C", type, kind?, ...}, ...]
     # kind: normal | secret | roulette | summon  (기본 normal)

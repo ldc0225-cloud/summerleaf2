@@ -60,7 +60,7 @@ def new_state() -> dict:
 
 RACING_EDITOR_SCALAR_KEYS = [
     ("laps", "랩 수", "int", 3),
-    ("lane_width", "차선 폭(px)", "float", 26.0),
+    ("lane_width", "차선 폭(px)", "float", 30.0),
     ("start_s", "스타트 s", "float", 0.0),
     ("start_spacing", "스타트 간격", "float", 22.0),
     ("max_speed", "최고속", "float", 130.0),
@@ -347,7 +347,10 @@ def _item_world_xy(state, item: dict) -> Optional[Tuple[float, float]]:
         lane = str(item.get("lane") or "B").upper()
         off = float(RACING_LANE_LETTERS.get(lane, 0.0))
         fields = state.get("settings_fields") or {}
-        lane_w = _parse_float(fields.get("lane_width", RACING_DEFAULTS.get("lane_width", 26.0)), 26.0)
+        lane_w = _parse_float(
+            fields.get("lane_width", RACING_DEFAULTS.get("lane_width", 30.0)),
+            30.0,
+        )
         nx = -math.sin(tang)
         ny = math.cos(tang)
         return float(x) + nx * off * lane_w, float(y) + ny * off * lane_w
@@ -372,6 +375,19 @@ def load_path_into_state(state, flow, map_id: str) -> None:
     state["dragging"] = False
     state["dirty"] = False
     state["settings_fields"] = load_settings_fields(flow, map_id)
+    # 게임에서 실제로 생성할 도로 설정을 에디터 미리보기에 그대로 사용.
+    state["_road_preview_cfg"] = {
+        "road_draw_enabled": bool(cfg.get("road_draw_enabled", True)),
+        "road_lane_colors": cfg.get(
+            "road_lane_colors", RACING_DEFAULTS.get("road_lane_colors")
+        ),
+        "road_border_color": cfg.get(
+            "road_border_color", RACING_DEFAULTS.get("road_border_color")
+        ),
+        "road_border_px": cfg.get(
+            "road_border_px", RACING_DEFAULTS.get("road_border_px", 3.0)
+        ),
+    }
     state["hint"] = f"경로 {len(pts)}점 · 아이템 {len(state['items'])}개"
 
 
@@ -440,6 +456,17 @@ def racing_config_to_world_row(cfg: dict) -> dict:
     w = cfg.get("weather")
     if isinstance(w, dict):
         row["weather"] = w
+    # 에디터 저장 시 맵별 자동 도로 설정이 유실되지 않도록 보존.
+    row["road_draw_enabled"] = bool(cfg.get("road_draw_enabled", True))
+    row["road_lane_colors"] = cfg.get(
+        "road_lane_colors", RACING_DEFAULTS.get("road_lane_colors")
+    )
+    row["road_border_color"] = cfg.get(
+        "road_border_color", RACING_DEFAULTS.get("road_border_color")
+    )
+    row["road_border_px"] = float(
+        cfg.get("road_border_px", RACING_DEFAULTS.get("road_border_px", 3.0))
+    )
     row["items"] = [_normalize_item(it) for it in (cfg.get("items") or [])]
     return row
 
@@ -1139,6 +1166,126 @@ def delete_selected_item(state) -> bool:
 
 # --- overlay draw ----------------------------------------------------------
 
+def _parse_rgb(raw, default) -> Tuple[int, int, int]:
+    try:
+        return (
+            max(0, min(255, int(raw[0]))),
+            max(0, min(255, int(raw[1]))),
+            max(0, min(255, int(raw[2]))),
+        )
+    except (TypeError, ValueError, IndexError):
+        return tuple(default[:3])  # type: ignore
+
+
+def _draw_generated_road_preview(map_surf, state, world_to_xy) -> None:
+    """
+    게임의 RacingActivity._paint_road_on_bg 와 같은 경로·법선·lane_width 식으로
+    생성 예정인 3레인 도로를 반투명 미리보기한다.
+
+    도로 테두리 → A(-1) / B(0) / C(+1) 레인 순서로 그리고,
+    편집용 경로선·포인트·아이템은 draw_map_overlay 가 그 위에 표시한다.
+    """
+    path_pts = state.get("path") or []
+    if len(path_pts) < 2:
+        return
+    cfg = state.get("_road_preview_cfg") or {}
+    if not bool(cfg.get("road_draw_enabled", True)):
+        return
+    fields = state.get("settings_fields") or {}
+    lane_w = max(
+        6.0,
+        _parse_float(
+            fields.get("lane_width", RACING_DEFAULTS.get("lane_width", 30.0)),
+            30.0,
+        ),
+    )
+    border_px = max(
+        0.0,
+        _parse_float(
+            cfg.get("road_border_px", RACING_DEFAULTS.get("road_border_px", 3.0)),
+            3.0,
+        ),
+    )
+    raw_cols = (
+        cfg.get("road_lane_colors")
+        or RACING_DEFAULTS.get("road_lane_colors")
+        or []
+    )
+    defaults = ((210, 60, 60), (235, 205, 70), (70, 115, 230))
+    lane_cols = [
+        _parse_rgb(raw_cols[i] if i < len(raw_cols) else None, defaults[i])
+        for i in range(3)
+    ]
+    border_col = _parse_rgb(
+        cfg.get("road_border_color"),
+        RACING_DEFAULTS.get("road_border_color", (40, 40, 46)),
+    )
+
+    try:
+        # 경로/줌/팬/설정이 그대로면 매 프레임 다시 만들지 않고 캐시를 블릿한다.
+        tr0 = world_to_xy(0.0, 0.0)
+        trx = world_to_xy(1.0, 0.0)
+        try_ = world_to_xy(0.0, 1.0)
+        cache_key = (
+            tuple((round(float(p[0]), 2), round(float(p[1]), 2)) for p in path_pts),
+            bool(state.get("closed", True)),
+            round(lane_w, 3),
+            round(border_px, 3),
+            tuple(lane_cols),
+            border_col,
+            map_surf.get_size(),
+            tuple(round(float(v), 3) for pair in (tr0, trx, try_) for v in pair),
+        )
+        cached = state.get("_road_preview_cache")
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == cache_key:
+            map_surf.blit(cached[1], (0, 0))
+            return
+
+        rp = _race_path_from_state(state)
+        # 월드 1px이 현재 map_surf에서 차지하는 픽셀 수.
+        x0, y0, _, _ = rp.sample(0.0)
+        sx0, sy0 = world_to_xy(x0, y0)
+        sx1, sy1 = world_to_xy(x0 + 1.0, y0)
+        zoom = max(
+            0.01,
+            math.hypot(float(sx1) - float(sx0), float(sy1) - float(sy0)),
+        )
+        step = max(2.0, lane_w * 0.25)
+        count = max(2, int(math.ceil(rp.length / step)))
+        lane_lines = [[], [], []]
+        center_line = []
+        for i in range(count + 1):
+            x, y, tang, _ = rp.sample(rp.length * (i / float(count)))
+            csx, csy = world_to_xy(x, y)
+            center_line.append((int(round(csx)), int(round(csy))))
+            nx, ny = -math.sin(tang), math.cos(tang)
+            for li, off in enumerate((-1.0, 0.0, 1.0)):
+                sx, sy = world_to_xy(
+                    x + nx * off * lane_w,
+                    y + ny * off * lane_w,
+                )
+                lane_lines[li].append((int(round(sx)), int(round(sy))))
+    except Exception:
+        return
+
+    preview = pygame.Surface(map_surf.get_size(), pygame.SRCALPHA)
+    closed = bool(state.get("closed", True))
+    border_w = max(
+        1, int(round((lane_w * 3.0 + border_px * 2.0) * zoom))
+    )
+    lane_px = max(1, int(round(lane_w * zoom)) + 1)
+    try:
+        pygame.draw.lines(
+            preview, (*border_col, 210), closed, center_line, border_w
+        )
+        for pts, col in zip(lane_lines, lane_cols):
+            pygame.draw.lines(preview, (*col, 190), closed, pts, lane_px)
+        state["_road_preview_cache"] = (cache_key, preview)
+        map_surf.blit(preview, (0, 0))
+    except Exception:
+        pass
+
+
 def draw_map_overlay(
     map_surf,
     state,
@@ -1159,6 +1306,9 @@ def draw_map_overlay(
             except Exception:
                 pass
         return
+
+    # 경로를 편집하는 동안 게임에서 생성될 도로를 즉시 확인한다.
+    _draw_generated_road_preview(map_surf, state, world_to_xy)
 
     pts_s = []
     for p in path:

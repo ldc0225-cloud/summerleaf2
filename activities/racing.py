@@ -249,6 +249,16 @@ _CHAR_PICK_COLS = 4
 _CHAR_PICK_ROWS = 2
 
 _ITEM_SURF_CACHE: Dict[str, pygame.Surface] = {}
+_ITEM_SYMBOL_SURF_CACHE: Dict[Tuple[str, int], pygame.Surface] = {}
+
+_ITEM_SYMBOLS = {
+    "speed": "△",
+    "slow": "▽",
+    "secret": "?",
+    "summon_pad": "☆",
+    "swap": "↕",
+    "roulette_pad": "↔",
+}
 
 
 def _placeholder_item_surf(color, size=24) -> pygame.Surface:
@@ -657,11 +667,19 @@ class RacingActivity(BaseFieldActivity):
         self._won = False
         self._stop_btn_rect: Optional[pygame.Rect] = None
         self._option_btn_rect: Optional[pygame.Rect] = None
+        # 레이스 중 왼쪽 위 옵션 버튼 팝업 (카메라·미니맵·게임 중지)
+        self._race_options_open = False
+        self._race_opt_rects: List[Tuple[pygame.Rect, str]] = []
+        # 게임 중지 확인창 (예/아니오)
+        self._race_quit_confirm = False
+        self._race_confirm_rects: List[Tuple[pygame.Rect, str]] = []
         self._camera_popup_rect: Optional[pygame.Rect] = None
         self._camera_side_rect: Optional[pygame.Rect] = None
         self._camera_back_rect: Optional[pygame.Rect] = None
+        self._minimap_toggle_rect: Optional[pygame.Rect] = None
         self._options_open = False
         self._camera_mode = "side"  # side | back
+        self._minimap_user_enabled = True  # 옵션 팝업 토글 (세션 단위)
         self.mode7_player_x_frac: Optional[float] = None
         # main.py 가 읽는 Mode7 / 틸트 오버라이드
         self.field_rotate3d_target: Optional[float] = None
@@ -685,6 +703,13 @@ class RacingActivity(BaseFieldActivity):
             anim_name=str(_cfg("lane_btn_down_anim", "lane_down") or "lane_down"),
         )
         self._lane_btns: List[RaceLaneHudButton] = [self._lane_btn_up, self._lane_btn_down]
+        # 경로 기반 도로 자동 그리기 (bg에 직접 덧그림 → Mode7·미니맵에 그대로 반영)
+        self._bg_ref: Optional[pygame.Surface] = None
+        self._road_painted = False
+        # 미니맵 오버레이 (전체 맵 1/8 축소 + 레이서 위치 + 경과 시간)
+        self._world_data: dict = {}
+        self._minimap_bg: Optional[pygame.Surface] = None
+        self._minimap_map_wh: Tuple[float, float] = (1.0, 1.0)
         # 날씨·청정·시크릿 룰렛·소환 번쩍
         self._clean_zones: List[Tuple[float, float]] = []
         self._weather_zones: List[dict] = []
@@ -712,6 +737,9 @@ class RacingActivity(BaseFieldActivity):
             params.get("map") or params.get("map_id") or _cfg("default_map_id", "bg_town")
         ).strip()
         self.field = _field_cfg(self.map_id, params.get("world_data"))
+        wd = params.get("world_data")
+        self._world_data = wd if isinstance(wd, dict) else {}
+        self._minimap_bg = None  # 맵이 바뀌었을 수 있으니 미니맵 캐시 초기화
         save = params.get("save_data") or {}
         self._save_data = dict(save) if isinstance(save, dict) else {}
 
@@ -758,7 +786,13 @@ class RacingActivity(BaseFieldActivity):
         self.mode7_player_x_frac = None
         self._cam_heading = None
         self._options_open = False
+        self._race_options_open = False
+        self._race_opt_rects = []
+        self._option_btn_rect = None
+        self._race_quit_confirm = False
+        self._race_confirm_rects = []
         self._camera_mode = "side"
+        self._minimap_user_enabled = bool(self._p("minimap_enabled", True))
         self.field_tilt_target = 1.0
         try:
             player.stop_moving()
@@ -768,6 +802,11 @@ class RacingActivity(BaseFieldActivity):
             pass
         lw, lh = self._logical_screen_size()
         self._layout_menu_rects(lw, lh)
+        # 경로 기반 3레인 도로를 bg에 덧그림 (맵에 레인을 직접 그릴 필요 없음)
+        bg = params.get("bg")
+        self._bg_ref = bg if isinstance(bg, pygame.Surface) else None
+        self._road_painted = False
+        self._paint_road_on_bg()
         print(f"[racing] begin map={self.map_id} path_len={self._path.length:.0f}")
         return True
 
@@ -843,6 +882,11 @@ class RacingActivity(BaseFieldActivity):
         self._should_return = True
         self.state = ST_QUIT
         self._options_open = False
+        self._race_options_open = False
+        self._option_btn_rect = None
+        self._race_opt_rects = []
+        self._race_quit_confirm = False
+        self._race_confirm_rects = []
         self.field_rotate3d_target = 0.0
         self.mode7_cam_heading = None
         self.mode7_player_x_frac = None
@@ -1264,6 +1308,8 @@ class RacingActivity(BaseFieldActivity):
             who.pos[0] = x + nx * who.lane * lane_w
             who.pos[1] = y + ny * who.lane * lane_w
             who.heading = tang
+            # 아이템 소환과 같은 링 효과를 두 레이서의 교환 도착점에 표시.
+            self._add_spawn_flash(who.pos[0], who.pos[1])
 
     def _start_secret_spin(self, r: RacerState) -> None:
         """시크릿 상자 — 마리오카트식 아이콘 룰렛 후 효과 적용."""
@@ -1278,7 +1324,6 @@ class RacingActivity(BaseFieldActivity):
         self._secret_spin = {
             "racer": r,
             "pool": pool,
-            "scroll": 0.0,
             "t": 0.0,
             "dur": max(0.6, dur),
             "final": final,
@@ -1293,7 +1338,6 @@ class RacingActivity(BaseFieldActivity):
         if not sp or sp.get("applied"):
             return
         sp["t"] = float(sp.get("t", 0.0)) + max(0.0, float(dt))
-        sp["scroll"] = float(sp.get("scroll", 0.0)) + dt * 9.0
         if float(sp["t"]) >= float(sp.get("dur", 1.0)):
             r = sp.get("racer")
             if r is not None and not sp.get("applied"):
@@ -1642,11 +1686,19 @@ class RacingActivity(BaseFieldActivity):
 
         look = float(self._p("corner_lookahead_px", 90.0))
         turn_ahead = path.lookahead_turn(r.s, look)
+        lane_w = float(self._p("lane_width", 30.0))
+        lane_off = float(r.lane) * lane_w
         # 목표: 앞 경로점 chase (세그먼트 접선 스냅 대신 → 관성 코너)
+        # ★ 자기 레인 중심선을 chase — 중심선을 chase 하면 1·3레인 발 위치가
+        #   레인 중앙보다 안쪽으로 치우친다 (pull과의 평형점이 어긋남)
         lx, ly, look_tang, _ = path.sample(r.s + look)
+        lx += -math.sin(look_tang) * lane_off
+        ly += math.cos(look_tang) * lane_off
         desired = math.atan2(ly - r.pos[1], lx - r.pos[0])
-        # 경로에서 많이 벗어나면 룩어헤드 접선 비중↑ (트랙 복귀)
-        cx, cy, _, _ = path.sample(r.s)
+        # 자기 레인 중심선에서 많이 벗어나면 룩어헤드 접선 비중↑ (트랙 복귀)
+        cx, cy, tang0, _ = path.sample(r.s)
+        cx += -math.sin(tang0) * lane_off
+        cy += math.cos(tang0) * lane_off
         off = math.hypot(r.pos[0] - cx, r.pos[1] - cy)
         blend = max(0.0, min(0.55, off / 70.0))
         err_to_pt = _angle_wrap(desired - r.heading)
@@ -1834,14 +1886,44 @@ class RacingActivity(BaseFieldActivity):
             act = self._menu_hit(screen_xy)
             return self._apply_menu_action(act)
         if self.state in (ST_RACE, ST_COUNTDOWN, ST_FINISH):
-            # 경기 중지 버튼
-            if self._stop_btn_rect and screen_xy:
+            px_py = None
+            if screen_xy:
                 try:
-                    if self._stop_btn_rect.collidepoint(int(screen_xy[0]), int(screen_xy[1])):
-                        self._quit_session()
+                    px_py = (int(screen_xy[0]), int(screen_xy[1]))
+                except (TypeError, ValueError, IndexError):
+                    px_py = None
+            # 게임 중지 확인창이 떠 있으면 예/아니오만 받는다
+            if self._race_quit_confirm:
+                if px_py:
+                    for rrect, act in self._race_confirm_rects:
+                        if not rrect.collidepoint(px_py):
+                            continue
+                        self._race_quit_confirm = False
+                        if act == "yes":
+                            self._quit_session()
                         return True
-                except Exception:
-                    pass
+                return True
+            # 왼쪽 위 옵션 버튼 (기존 '경기 중지' 오버레이 대체)
+            if px_py and self._option_btn_rect and self._option_btn_rect.collidepoint(px_py):
+                self._race_options_open = not bool(self._race_options_open)
+                return True
+            if self._race_options_open:
+                if px_py:
+                    for rrect, act in self._race_opt_rects:
+                        if not rrect.collidepoint(px_py):
+                            continue
+                        if act == "camera":
+                            self._camera_mode = "back" if str(self._camera_mode or "side") == "side" else "side"
+                            self._cam_heading = None
+                        elif act == "minimap":
+                            self._minimap_user_enabled = not bool(self._minimap_user_enabled)
+                        elif act == "stop":
+                            self._race_options_open = False
+                            self._race_quit_confirm = True
+                        return True
+                # 팝업 밖 클릭 → 닫기
+                self._race_options_open = False
+                return True
             # 레인 화살표 (카운트다운·레이스 중 한 칸씩)
             if self.state in (ST_RACE, ST_COUNTDOWN):
                 if self._handle_lane_button(screen_xy):
@@ -1852,12 +1934,24 @@ class RacingActivity(BaseFieldActivity):
     def on_primary_key(self, key: int) -> bool:
         if key == pygame.K_ESCAPE:
             if self.state in (ST_RACE, ST_COUNTDOWN):
-                self._quit_session()
+                if self._race_quit_confirm:
+                    self._race_quit_confirm = False
+                else:
+                    self._race_options_open = False
+                    self._race_quit_confirm = True
                 return True
             if self.state == ST_PICK_CHAR:
+                if self._char_pending_ix is not None:
+                    # 확인창(서브메뉴)이 떠 있으면 ESC = 확인 취소
+                    self._char_pending_ix = None
+                    return True
                 self.state = ST_MENU
                 return True
             if self.state == ST_MENU:
+                if self._options_open:
+                    # 옵션 서브메뉴가 열려 있으면 ESC = 팝업 닫기
+                    self._options_open = False
+                    return True
                 self._quit_session()
                 return True
         # 데스크톱: 위/아래 키로도 한 칸 이동
@@ -1964,24 +2058,95 @@ class RacingActivity(BaseFieldActivity):
             return True
         return False
 
-    def _layout_option_button(self, w: int, h: int) -> None:
-        self._option_btn_rect = None
+    def _draw_race_options(self, surf: pygame.Surface, w: int, h: int, small) -> None:
+        """레이스 중 왼쪽 위 '옵션' 버튼 + 팝업 (카메라 옆/뒤 · 미니맵 켬/끔 · 게임 중지)."""
+        label = small.render("옵션", True, (240, 248, 255))
+        pad_x, pad_y = 8, 4
+        rect = pygame.Rect(8, 8, label.get_width() + pad_x * 2, label.get_height() + pad_y * 2)
+        self._option_btn_rect = rect
+        pygame.draw.rect(surf, (40, 58, 88), rect, border_radius=6)
+        pygame.draw.rect(surf, (120, 160, 220), rect, 1, border_radius=6)
+        surf.blit(label, (rect.x + pad_x, rect.y + pad_y))
+
+        self._race_opt_rects = []
+        if not self._race_options_open:
+            return
+        cam_back = str(self._camera_mode or "side") == "back"
+        rows = [
+            ("camera", f"카메라 : {'뒤' if cam_back else '옆'}", (46, 52, 70)),
+            ("minimap", f"미니맵 : {'켬' if self._minimap_user_enabled else '끔'}", (46, 52, 70)),
+            ("stop", "게임 중지", (70, 40, 40)),
+        ]
+        pw = max(140, int(round(w * 0.22)))
+        row_h = max(24, int(round(h * 0.05)))
+        gap = 6
+        ph = len(rows) * row_h + (len(rows) - 1) * gap + 16
+        px, py = rect.x, rect.bottom + 6
+        popup_rect = pygame.Rect(px, py, pw, ph)
+        popup = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        popup.fill((24, 28, 40, 230))
+        surf.blit(popup, popup_rect.topleft)
+        pygame.draw.rect(surf, (180, 200, 235), popup_rect, 2, border_radius=8)
+        ry = py + 8
+        for act, text, bg in rows:
+            rrect = pygame.Rect(px + 8, ry, pw - 16, row_h)
+            pygame.draw.rect(surf, bg, rrect, border_radius=6)
+            pygame.draw.rect(surf, (120, 140, 170), rrect, 1, border_radius=6)
+            t = small.render(text, True, (240, 248, 255))
+            surf.blit(t, (rrect.x + 8, rrect.centery - t.get_height() // 2))
+            self._race_opt_rects.append((rrect, act))
+            ry += row_h + gap
+        # 팝업 밖 클릭 판정용으로 팝업 영역도 저장
+        self._race_opt_rects.append((popup_rect, "popup"))
+
+    def _draw_race_quit_confirm(self, surf: pygame.Surface, w: int, h: int, small) -> None:
+        """'게임 중지' 확인창 — 화면 중앙 딤 + 예/아니오."""
+        self._race_confirm_rects = []
+        if not self._race_quit_confirm:
+            return
+        dim = pygame.Surface((w, h), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 130))
+        surf.blit(dim, (0, 0))
+        msg = small.render("정말 게임을 중지할까요?", True, (245, 245, 250))
+        bw = max(60, int(round(w * 0.14)))
+        bh = max(26, int(round(h * 0.06)))
+        gap = max(10, int(round(w * 0.03)))
+        pw = max(msg.get_width() + 32, bw * 2 + gap + 32)
+        ph = msg.get_height() + bh + 16 * 2 + 10
+        px = w // 2 - pw // 2
+        py = h // 2 - ph // 2
+        box_rect = pygame.Rect(px, py, pw, ph)
+        box = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        box.fill((24, 28, 40, 235))
+        surf.blit(box, box_rect.topleft)
+        pygame.draw.rect(surf, (180, 200, 235), box_rect, 2, border_radius=8)
+        surf.blit(msg, (px + pw // 2 - msg.get_width() // 2, py + 16))
+        by = py + 16 + msg.get_height() + 10
+        for i, (act, text, bg) in enumerate((
+            ("yes", "예", (70, 40, 40)),
+            ("no", "아니오", (40, 58, 88)),
+        )):
+            bx = px + pw // 2 - (bw * 2 + gap) // 2 + i * (bw + gap)
+            rrect = pygame.Rect(bx, by, bw, bh)
+            pygame.draw.rect(surf, bg, rrect, border_radius=6)
+            pygame.draw.rect(surf, (120, 140, 170), rrect, 1, border_radius=6)
+            t = small.render(text, True, (240, 248, 255))
+            surf.blit(t, (rrect.centerx - t.get_width() // 2, rrect.centery - t.get_height() // 2))
+            self._race_confirm_rects.append((rrect, act))
 
     def _layout_camera_popup(self, w: int, h: int) -> None:
-        self._layout_menu_rects(w, h)
-        btn = next((r for r, act in self._menu_rects if act == "options"), None)
-        if btn is None:
-            btn = pygame.Rect(w // 2 - 120, int(h * 0.48), 240, 40)
-        pw = max(132, int(round(w * 0.20)))
-        ph = max(86, int(round(h * 0.16)))
-        px = max(8, btn.right - pw)
-        py = btn.bottom + 6
+        """옵션 서브메뉴 팝업 — 열리는 동안 상위 메뉴는 숨기므로 화면 중앙에 배치."""
+        pw = max(160, int(round(w * 0.34)))
+        row_h = max(24, int(round(h * 0.16 * 0.28)))
+        ph = 28 + row_h * 3 + 8 * 2 + 10  # 제목 + 3행(카메라 옆/뒤 + 미니맵) + 간격
+        px = w // 2 - pw // 2
+        py = max(8, int(round(h * 0.32)))
         self._camera_popup_rect = pygame.Rect(px, py, pw, ph)
         inner_x = px + 10
         inner_w = pw - 20
-        row_h = max(24, int(round(ph * 0.28)))
         self._camera_side_rect = pygame.Rect(inner_x, py + 28, inner_w, row_h)
         self._camera_back_rect = pygame.Rect(inner_x, py + 28 + row_h + 8, inner_w, row_h)
+        self._minimap_toggle_rect = pygame.Rect(inner_x, py + 28 + (row_h + 8) * 2, inner_w, row_h)
 
     # --- menu UI -----------------------------------------------------------
 
@@ -2066,10 +2231,15 @@ class RacingActivity(BaseFieldActivity):
                     return "camera_side"
                 if self._camera_back_rect and self._camera_back_rect.collidepoint(px, py):
                     return "camera_back"
+                if self._minimap_toggle_rect and self._minimap_toggle_rect.collidepoint(px, py):
+                    return "minimap_toggle"
                 if self._camera_popup_rect and self._camera_popup_rect.collidepoint(px, py):
                     return "popup"
             except Exception:
                 pass
+            # 팝업이 열려 있는 동안엔 뒤의 상위 메뉴 버튼으로 클릭이 통과하지 않게
+            # 팝업 밖 클릭 = 팝업 닫기만 수행
+            return "popup_close"
         for rect, action in self._menu_rects:
             if rect.collidepoint(px, py):
                 return action
@@ -2106,7 +2276,13 @@ class RacingActivity(BaseFieldActivity):
                 self._cam_heading = None
                 self._options_open = False
                 return True
+            if act == "minimap_toggle":
+                self._minimap_user_enabled = not bool(self._minimap_user_enabled)
+                return True
             if act == "popup":
+                return True
+            if act == "popup_close":
+                self._options_open = False
                 return True
             if act == "exit":
                 self._quit_session()
@@ -2403,7 +2579,26 @@ class RacingActivity(BaseFieldActivity):
                     pass
             dx, dy = blit_topleft_bottom_center(int(sx), int(sy), img2.get_width(), img2.get_height())
             try:
+                # 바닥 그림자: 아이템 높이와 분리된 월드 발점에 그려 입체감을 준다.
+                ground_x, ground_y = self._world_to_draw_xy(ctx, it.wx, it.wy, 0.0)
+                if ground_x is not None and ground_y is not None:
+                    shadow_w = max(6, int(round(img2.get_width() * 0.72)))
+                    shadow_h = max(2, int(round(img2.get_height() * 0.20)))
+                    shadow = pygame.Surface((shadow_w, shadow_h), pygame.SRCALPHA)
+                    pygame.draw.ellipse(
+                        shadow,
+                        (0, 0, 0, 105),
+                        shadow.get_rect(),
+                    )
+                    ctx.surf.blit(
+                        shadow,
+                        (
+                            int(round(ground_x - shadow_w * 0.5)),
+                            int(round(ground_y - shadow_h * 0.5)),
+                        ),
+                    )
                 ctx.surf.blit(img2, (dx, dy))
+                self._draw_item_symbol(ctx.surf, it, dx, dy, img2.get_width(), img2.get_height())
             except Exception:
                 pass
 
@@ -2464,6 +2659,50 @@ class RacingActivity(BaseFieldActivity):
             except Exception:
                 pass
 
+    def _item_symbol_for(self, item_or_type) -> str:
+        if isinstance(item_or_type, RaceItemPoint):
+            if item_or_type.kind == "secret":
+                tid = "secret"
+            elif item_or_type.kind == "summon":
+                tid = "summon_pad"
+            elif item_or_type.kind == "roulette":
+                tid = "roulette_pad"
+            else:
+                tid = item_or_type.type_id
+        else:
+            tid = str(item_or_type or "").strip().lower()
+        return _ITEM_SYMBOLS.get(tid, "?")
+
+    def _item_symbol_surface(self, symbol: str, size_px: int) -> pygame.Surface:
+        size = max(8, min(72, int(size_px)))
+        key = (str(symbol), size)
+        hit = _ITEM_SYMBOL_SURF_CACHE.get(key)
+        if hit is not None:
+            return hit
+        font = self._plain_hud_font(size)
+        # 검은 외곽 8방향 + 밝은 본문. 어떤 에셋 색에서도 읽히게 한다.
+        core = font.render(symbol, True, (255, 255, 245))
+        outline = font.render(symbol, True, (18, 20, 28))
+        surf = pygame.Surface((core.get_width() + 4, core.get_height() + 4), pygame.SRCALPHA)
+        for ox, oy in ((0, 1), (2, 1), (1, 0), (1, 2), (0, 0), (2, 0), (0, 2), (2, 2)):
+            surf.blit(outline, (ox, oy))
+        surf.blit(core, (1, 1))
+        _ITEM_SYMBOL_SURF_CACHE[key] = surf
+        return surf
+
+    def _draw_item_symbol(
+        self, surf: pygame.Surface, item_or_type, x: int, y: int, width: int, height: int
+    ) -> None:
+        symbol = self._item_symbol_for(item_or_type)
+        sym = self._item_symbol_surface(symbol, max(8, int(round(height * 0.48))))
+        surf.blit(
+            sym,
+            (
+                int(x + width * 0.5 - sym.get_width() * 0.5),
+                int(y + height * 0.5 - sym.get_height() * 0.5),
+            ),
+        )
+
     def _draw_secret_roulette_ui(self, surf: pygame.Surface, w: int, h: int) -> None:
         sp = self._secret_spin
         if not sp or sp.get("applied") or surf is None:
@@ -2471,33 +2710,38 @@ class RacingActivity(BaseFieldActivity):
         pool = list(sp.get("pool") or [])
         if not pool:
             return
-        dim = pygame.Surface((w, h), pygame.SRCALPHA)
-        dim.fill((0, 0, 0, 100))
-        surf.blit(dim, (0, 0))
         cx, cy = w // 2, int(h * 0.36)
-        box_w = min(w - 40, int(scale_ui_text_px(200)))
-        box_h = int(scale_ui_text_px(52))
-        rect = pygame.Rect(cx - box_w // 2, cy - box_h // 2, box_w, box_h)
-        pygame.draw.rect(surf, (40, 48, 70), rect, border_radius=8)
-        pygame.draw.rect(surf, (200, 220, 255), rect, 2, border_radius=8)
-        scroll = float(sp.get("scroll", 0.0))
-        ix = int(scroll) % len(pool)
+        slot = max(40, int(scale_ui_text_px(52)))
+        rect = pygame.Rect(cx - slot // 2 - 6, cy - slot // 2 - 6, slot + 12, slot + 12)
+        pygame.draw.rect(surf, (40, 48, 70, 220), rect, border_radius=10)
+        pygame.draw.rect(surf, (200, 220, 255), rect, 2, border_radius=10)
+        t = float(sp.get("t", 0.0))
+        dur = max(0.1, float(sp.get("dur", 1.0)))
+        hold = min(0.45, dur * 0.30)
+        spin_end = max(0.1, dur - hold)
         final = str(sp.get("final") or pool[0])
-        slot = int(scale_ui_text_px(40))
-        for k in range(-2, 3):
-            tid = pool[(ix + k) % len(pool)]
-            info = _item_type_info(tid)
-            col = info.get("roulette_color") or info.get("placeholder_color") or (200, 200, 200)
-            chip = pygame.Surface((slot, slot), pygame.SRCALPHA)
-            chip.fill((*col, 220))
-            ox = cx + k * (slot + 8) - int((scroll % 1.0) * (slot + 8))
-            surf.blit(chip, (ox - slot // 2, cy - slot // 2))
-        if float(sp.get("t", 0.0)) > float(sp.get("dur", 1.0)) * 0.82:
+        # 화면 중앙 아이템 하나만 빠르게 바뀌고, 마지막 hold 동안 최종 아이템에 멈춘다.
+        if t >= spin_end:
+            tid = final
+        else:
+            interval = 0.075 + 0.14 * max(0.0, min(1.0, t / spin_end)) ** 2
+            tid = pool[int(t / interval) % len(pool)]
+        info = _item_type_info(tid)
+        col = info.get("roulette_color") or info.get("placeholder_color") or (200, 200, 200)
+        chip = _load_racing_item_surface(
+            str(info.get("asset") or ""),
+            placeholder_color=col,
+        )
+        chip = pygame.transform.smoothscale(chip, (slot, slot))
+        chip_x, chip_y = cx - slot // 2, cy - slot // 2
+        surf.blit(chip, (chip_x, chip_y))
+        self._draw_item_symbol(surf, tid, chip_x, chip_y, slot, slot)
+        if t >= spin_end:
             finfo = _item_type_info(final)
             lbl = self._plain_hud_font(int(round(scale_ui_text_px(14)))).render(
                 str(finfo.get("label") or final), True, (255, 248, 200)
             )
-            surf.blit(lbl, (cx - lbl.get_width() // 2, cy + box_h // 2 + 8))
+            surf.blit(lbl, (cx - lbl.get_width() // 2, rect.bottom + 8))
 
     def _draw_weather_hud(self, surf: pygame.Surface, w: int, h: int) -> None:
         pr = next((x for x in self._racers if x.is_player), None)
@@ -2634,6 +2878,166 @@ class RacingActivity(BaseFieldActivity):
         sy -= float(height_off) * float(ctx.z)
         return sx, sy
 
+    # --- 경로 기반 도로 자동 그리기 ----------------------------------------
+
+    def _road_lane_colors(self) -> List[Tuple[int, int, int]]:
+        """1=A(상) 빨강 / 2=B(중) 노랑 / 3=C(하) 파랑 기본. racing.road_lane_colors 로 덮어씀."""
+        defaults = [(210, 60, 60), (235, 205, 70), (70, 115, 230)]
+        raw = self._p("road_lane_colors") or []
+        out: List[Tuple[int, int, int]] = []
+        for i in range(3):
+            try:
+                c = raw[i]
+                out.append((int(c[0]), int(c[1]), int(c[2])))
+            except (TypeError, ValueError, IndexError):
+                out.append(defaults[i])
+        return out
+
+    def _paint_road_on_bg(self) -> None:
+        """
+        레이서 배치와 같은 식(경로점 + 법선*lane*lane_width)으로 bg에 3레인 도로를 굽는다.
+        bg 자체를 수정하므로 Mode7 배경·미니맵에 자동으로 반영된다 (맵 파일은 그대로).
+        """
+        bg = self._bg_ref
+        path = self._path
+        if bg is None or path is None or self._road_painted:
+            return
+        if not bool(self._p("road_draw_enabled", True)):
+            return
+        try:
+            lane_w = float(self._p("lane_width", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            lane_w = 30.0
+        lane_w = max(6.0, lane_w)
+        colors = self._road_lane_colors()
+        try:
+            bc = self._p("road_border_color") or [40, 40, 46]
+            border_color = (int(bc[0]), int(bc[1]), int(bc[2]))
+        except (TypeError, ValueError, IndexError):
+            border_color = (40, 40, 46)
+        try:
+            border_px = max(0.0, float(self._p("road_border_px", 3.0) or 3.0))
+        except (TypeError, ValueError):
+            border_px = 3.0
+
+        # 경로를 촘촘히 샘플해 원을 이어 굵은 줄무늬를 만든다 (두꺼운 lines의 꺾임 아티팩트 방지)
+        step = max(2.0, lane_w * 0.25)
+        n = max(2, int(math.ceil(path.length / step)))
+        samples: List[Tuple[float, float, float, float]] = []
+        for i in range(n + 1):
+            x, y, tang, _ = path.sample(path.length * (i / float(n)))
+            samples.append((x, y, -math.sin(tang), math.cos(tang)))
+
+        lane_r = int(math.ceil(lane_w * 0.5))
+        # 1) 도로 전체 테두리 (반폭 1.5레인 + 테두리)
+        if border_px > 0.0:
+            br = int(math.ceil(lane_w * 1.5 + border_px))
+            for x, y, nx, ny in samples:
+                pygame.draw.circle(bg, border_color, (int(round(x)), int(round(y))), br)
+        # 2) 레인 줄무늬: A(-1) → B(0) → C(+1)
+        for lane_i, off in enumerate((LANE_UPPER, LANE_CENTER, LANE_LOWER)):
+            col = colors[lane_i]
+            d = off * lane_w
+            for x, y, nx, ny in samples:
+                pygame.draw.circle(bg, col, (int(round(x + nx * d)), int(round(y + ny * d))), lane_r)
+        self._road_painted = True
+        print(f"[racing] road painted: lane_w={lane_w:.0f} samples={len(samples)}")
+
+    # --- 미니맵 오버레이 (마리오카트식) ------------------------------------
+
+    _MINIMAP_DOT_COLORS = {
+        "player": (255, 70, 70),
+        "npc1": (90, 160, 255),
+        "npc2": (255, 215, 80),
+    }
+
+    def _ensure_minimap(self) -> Optional[pygame.Surface]:
+        """전체 맵 bg를 minimap_scale(기본 1/16)로 축소한 캐시 서피스 (+트랙 경로선)."""
+        if not bool(self._p("minimap_enabled", True)) or not bool(self._minimap_user_enabled):
+            return None
+        if self._minimap_bg is not None:
+            return self._minimap_bg
+        img = self._bg_ref  # 도로가 덧그려진 실제 bg 우선 (미니맵에도 도로 반영)
+        if img is None:
+            try:
+                m = (self._world_data or {}).get(self.map_id) or {}
+                bg_name = str(m.get("bg_img") or "").strip()
+                if not bg_name:
+                    return None
+                img = pygame.image.load(os.path.join("assets", "images", "bg", bg_name)).convert()
+            except Exception:
+                return None
+        try:
+            scale = float(self._p("minimap_scale", 0.0625) or 0.0625)
+        except (TypeError, ValueError):
+            scale = 0.0625
+        scale = max(0.02, min(0.5, scale))
+        mw = max(16, int(round(img.get_width() * scale)))
+        mh = max(16, int(round(img.get_height() * scale)))
+        try:
+            mini = pygame.transform.smoothscale(img, (mw, mh)).convert_alpha()
+        except Exception:
+            mini = pygame.transform.scale(img, (mw, mh)).convert_alpha()
+        self._minimap_map_wh = (float(max(1, img.get_width())), float(max(1, img.get_height())))
+        # 트랙 경로선을 살짝 얹어 코스 파악을 돕는다
+        path = self._path
+        if path is not None and len(path.points) >= 2:
+            fx = mw / self._minimap_map_wh[0]
+            fy = mh / self._minimap_map_wh[1]
+            pts = [(int(round(x * fx)), int(round(y * fy))) for x, y in path.points]
+            try:
+                pygame.draw.lines(mini, (255, 255, 255), path.closed, pts, 1)
+            except Exception:
+                pass
+        pygame.draw.rect(mini, (24, 28, 40), mini.get_rect(), 1)
+        try:
+            mini.set_alpha(max(0, min(255, int(self._p("minimap_alpha", 215)))))
+        except (TypeError, ValueError):
+            mini.set_alpha(215)
+        self._minimap_bg = mini
+        return mini
+
+    def _format_race_time(self) -> str:
+        t = max(0.0, float(self._race_time))
+        m, s = divmod(t, 60.0)
+        return f"{int(m)}:{s:05.2f}"
+
+    def _draw_minimap(self, surf: pygame.Surface, w: int, h: int, small) -> Optional[int]:
+        """오른쪽 위 exit 버튼 밑 미니맵 + 레이서 점 + 경과 시간. 반환: 시간 텍스트 하단 y."""
+        mini = self._ensure_minimap()
+        if mini is None:
+            return None
+        mw, mh = mini.get_width(), mini.get_height()
+        margin = int(round(w * float(self._p("minimap_margin_x_frac", 0.015) or 0.015)))
+        mx = w - mw - max(2, margin)
+        my = int(round(h * float(self._p("minimap_top_frac", 0.075) or 0.075)))
+        surf.blit(mini, (mx, my))
+        # 레이서 위치 점 (플레이어 빨강 / NPC 파랑·노랑)
+        fx = mw / self._minimap_map_wh[0]
+        fy = mh / self._minimap_map_wh[1]
+        rdot = max(2, int(round(mw * 0.022)))
+        for r in self._racers:
+            try:
+                px = mx + int(round(float(r.pos[0]) * fx))
+                py = my + int(round(float(r.pos[1]) * fy))
+            except (TypeError, ValueError, IndexError):
+                continue
+            px = max(mx, min(mx + mw - 1, px))
+            py = max(my, min(my + mh - 1, py))
+            col = self._MINIMAP_DOT_COLORS.get(r.hud_role, (200, 200, 200))
+            pygame.draw.circle(surf, (10, 10, 16), (px, py), rdot + 1)
+            pygame.draw.circle(surf, col, (px, py), rdot)
+        # 경과 시간 (미니맵 바로 밑, 오른쪽 정렬)
+        tt = small.render(self._format_race_time(), True, (255, 248, 220))
+        pad = 3
+        box = pygame.Surface((tt.get_width() + pad * 2, tt.get_height() + pad * 2), pygame.SRCALPHA)
+        box.fill((16, 20, 30, 170))
+        bx = mx + mw - box.get_width()
+        by = my + mh + 2
+        surf.blit(box, (bx, by))
+        surf.blit(tt, (bx + pad, by + pad))
+        return by + box.get_height()
+
     def draw_screen(self, ctx: FieldDrawContext) -> None:
         if ctx is None or ctx.surf is None:
             return
@@ -2651,30 +3055,35 @@ class RacingActivity(BaseFieldActivity):
             dim = pygame.Surface((w, h), pygame.SRCALPHA)
             dim.fill((0, 0, 0, 150))
             surf.blit(dim, (0, 0))
-            title = font.render("레이스", True, (255, 248, 220))
-            surf.blit(title, (w // 2 - title.get_width() // 2, int(h * 0.08)))
+            # 상위 메뉴 제목은 메인 메뉴에서만 — 캐릭터 선택(서브메뉴)은 자기 제목을
+            # 그리므로 여기서 같이 그리면 글자가 겹친다
+            if self.state == ST_MENU:
+                title = font.render("레이스", True, (255, 248, 220))
+                surf.blit(title, (w // 2 - title.get_width() // 2, int(h * 0.08)))
             self._layout_menu_rects(w, h)
             if self.state == ST_MENU:
-                labels = [
-                    ("1인 플레이 (기록 갱신용)", "1p"),
-                    ("1인 플레이 (경쟁)", "1p_vs"),
-                    ("옵션", "options"),
-                    ("나가기", "exit"),
-                ]
-                for rect, act in self._menu_rects:
-                    label = next((lb for lb, a in labels if a == act), act)
-                    col = (70, 50, 50) if act == "exit" else (40, 58, 88)
-                    if act == "1p_vs":
-                        col = (40, 70, 55)
-                    elif act == "options":
-                        col = (60, 64, 96)
-                    pygame.draw.rect(surf, col, rect, border_radius=6)
-                    pygame.draw.rect(surf, (120, 160, 220), rect, 2, border_radius=6)
-                    t = small.render(label, True, (240, 248, 255))
-                    surf.blit(
-                        t,
-                        (rect.centerx - t.get_width() // 2, rect.centery - t.get_height() // 2),
-                    )
+                # 옵션 서브메뉴가 열려 있으면 상위 메뉴 버튼은 그리지 않는다 (겹침 방지)
+                if not self._options_open:
+                    labels = [
+                        ("1인 플레이 (기록 갱신용)", "1p"),
+                        ("1인 플레이 (경쟁)", "1p_vs"),
+                        ("옵션", "options"),
+                        ("나가기", "exit"),
+                    ]
+                    for rect, act in self._menu_rects:
+                        label = next((lb for lb, a in labels if a == act), act)
+                        col = (70, 50, 50) if act == "exit" else (40, 58, 88)
+                        if act == "1p_vs":
+                            col = (40, 70, 55)
+                        elif act == "options":
+                            col = (60, 64, 96)
+                        pygame.draw.rect(surf, col, rect, border_radius=6)
+                        pygame.draw.rect(surf, (120, 160, 220), rect, 2, border_radius=6)
+                        t = small.render(label, True, (240, 248, 255))
+                        surf.blit(
+                            t,
+                            (rect.centerx - t.get_width() // 2, rect.centery - t.get_height() // 2),
+                        )
                 if self._options_open:
                     self._layout_camera_popup(w, h)
                     if self._camera_popup_rect:
@@ -2685,15 +3094,16 @@ class RacingActivity(BaseFieldActivity):
                         popup.fill((24, 28, 40, 230))
                         surf.blit(popup, self._camera_popup_rect.topleft)
                         pygame.draw.rect(surf, (180, 200, 235), self._camera_popup_rect, 2, border_radius=8)
-                        ttl = small.render("카메라 모드", True, (255, 248, 220))
+                        ttl = small.render("옵션", True, (255, 248, 220))
                         surf.blit(ttl, (self._camera_popup_rect.x + 10, self._camera_popup_rect.y + 8))
-                        for rect, mode, label in (
-                            (self._camera_side_rect, "side", "옆"),
-                            (self._camera_back_rect, "back", "뒤"),
+                        mm_on = bool(self._minimap_user_enabled)
+                        for rect, active, label in (
+                            (self._camera_side_rect, str(self._camera_mode or "side") == "side", "카메라 모드 : 옆"),
+                            (self._camera_back_rect, str(self._camera_mode or "side") == "back", "카메라 모드 : 뒤"),
+                            (self._minimap_toggle_rect, mm_on, f"미니맵 : {'켬' if mm_on else '끔'}"),
                         ):
                             if rect is None:
                                 continue
-                            active = str(self._camera_mode or "side") == mode
                             pygame.draw.rect(
                                 surf,
                                 (64, 92, 122) if active else (46, 52, 70),
@@ -2707,36 +3117,30 @@ class RacingActivity(BaseFieldActivity):
                                 2,
                                 border_radius=6,
                             )
-                            txt = small.render(f"카메라 모드 : {label}", True, (240, 248, 255))
+                            txt = small.render(label, True, (240, 248, 255))
                             surf.blit(txt, (rect.x + 10, rect.centery - txt.get_height() // 2))
                 return
             # pick char
             versus = str(self._race_mode or "record").strip().lower() == "versus"
             pt = font.render("캐릭터 선택", True, (255, 248, 220))
             surf.blit(pt, (w // 2 - pt.get_width() // 2, int(h * 0.06)))
-            if versus:
-                hint = small.render("경쟁: A레인 NPC · B레인 나 · C레인 NPC (나란히)", True, (180, 200, 220))
+            if self._char_pending_ix is None:
+                # 선택 그리드 — 확인창(서브메뉴)이 떠 있으면 그리지 않는다 (겹침 방지)
+                if versus:
+                    hint = small.render("경쟁: A레인 NPC · B레인 나 · C레인 NPC (나란히)", True, (180, 200, 220))
+                else:
+                    hint = small.render("고르면 나머지 2명은 랜덤 NPC", True, (180, 200, 220))
+                surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.13)))
+                self._layout_char_pick_rects(w, h)
+                for rect, ix in self._char_pick_rects:
+                    cid = self._char_opts[ix]
+                    frames = self._idle_frames(cid, "right")
+                    self._blit_idle(surf, frames, (rect.centerx, rect.centery), max(16, int(rect.height * 0.55)))
+                    lbl = small.render(self._char_label(cid), True, (210, 225, 245))
+                    surf.blit(lbl, (rect.centerx - lbl.get_width() // 2, rect.bottom - lbl.get_height() - 2))
+                    pygame.draw.rect(surf, (100, 140, 200), rect, 1, border_radius=4)
             else:
-                hint = small.render("고르면 나머지 2명은 랜덤 NPC", True, (180, 200, 220))
-            surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.13)))
-            self._layout_char_pick_rects(w, h)
-            for rect, ix in self._char_pick_rects:
-                cid = self._char_opts[ix]
-                frames = self._idle_frames(cid, "right")
-                self._blit_idle(surf, frames, (rect.centerx, rect.centery), max(16, int(rect.height * 0.55)))
-                lbl = small.render(self._char_label(cid), True, (210, 225, 245))
-                surf.blit(lbl, (rect.centerx - lbl.get_width() // 2, rect.bottom - lbl.get_height() - 2))
-                pygame.draw.rect(surf, (100, 140, 200), rect, 1, border_radius=4)
-            # back
-            for rect, act in self._menu_rects:
-                if act == "menu_back":
-                    pygame.draw.rect(surf, (50, 50, 70), rect, border_radius=6)
-                    t = small.render("뒤로", True, (220, 220, 240))
-                    surf.blit(t, (rect.centerx - t.get_width() // 2, rect.centery - t.get_height() // 2))
-            if self._char_pending_ix is not None:
-                dim2 = pygame.Surface((w, h), pygame.SRCALPHA)
-                dim2.fill((0, 0, 0, 150))
-                surf.blit(dim2, (0, 0))
+                # 선택 확인창 — 상위(그리드)는 숨긴 상태로 확인 UI만 표시
                 cid = self._char_opts[int(self._char_pending_ix)]
                 frames = self._idle_frames(cid, "right")
                 self._blit_idle(surf, frames, (w // 2, int(h * 0.40)), int(h * 0.28))
@@ -2748,18 +3152,28 @@ class RacingActivity(BaseFieldActivity):
                         lab = "예" if act == "char_yes" else "아니오"
                         t = small.render(lab, True, (240, 248, 255))
                         surf.blit(t, (rect.centerx - t.get_width() // 2, rect.centery - t.get_height() // 2))
+            # back (그리드/확인창 공통 — 확인창에서는 '뒤로'가 확인 취소)
+            for rect, act in self._menu_rects:
+                if act == "menu_back":
+                    pygame.draw.rect(surf, (50, 50, 70), rect, border_radius=6)
+                    t = small.render("뒤로", True, (220, 220, 240))
+                    surf.blit(t, (rect.centerx - t.get_width() // 2, rect.centery - t.get_height() // 2))
             return
 
-        # HUD (경기 중지는 events OVERLAY_UI racing_exit / click_action stop_racing)
+        # HUD (게임 중지는 왼쪽 위 옵션 버튼 팝업에서 — _draw_race_options)
         self._stop_btn_rect = None
-        self._option_btn_rect = None
+        # 미니맵 오버레이 (exit 버튼 밑) — 표시 시 랩·버프 텍스트는 그 아래로 내림
+        mm_bottom = None
+        if self.state in (ST_COUNTDOWN, ST_RACE, ST_FINISH):
+            mm_bottom = self._draw_minimap(surf, w, h, small)
         pr = next((x for x in self._racers if x.is_player), None)
         lap_i = int(pr.lap) + 1 if pr else 1
         lap_txt = small.render(f"랩 {min(lap_i, self._lap_goal)}/{self._lap_goal}", True, (240, 248, 255))
-        surf.blit(lap_txt, (w - lap_txt.get_width() - int(w * 0.04), int(h * 0.04)))
+        lap_y = (mm_bottom + 4) if mm_bottom is not None else int(h * 0.04)
+        surf.blit(lap_txt, (w - lap_txt.get_width() - int(w * 0.04), lap_y))
         if pr is not None and pr.buff_t > 0.0 and pr.buff_label:
             bt = small.render(f"{pr.buff_label} {pr.buff_t:.1f}s", True, (255, 240, 160))
-            surf.blit(bt, (w - bt.get_width() - int(w * 0.04), int(h * 0.04) + lap_txt.get_height() + 4))
+            surf.blit(bt, (w - bt.get_width() - int(w * 0.04), lap_y + lap_txt.get_height() + 4))
         if self._item_msg_t > 0.0 and self._item_msg:
             msg_px = float(get_activity_ui("racing", "item_msg_px_320", title_px) or title_px)
             msg_font = self._plain_hud_font(int(round(scale_ui_text_px(msg_px))))
@@ -2793,3 +3207,7 @@ class RacingActivity(BaseFieldActivity):
         self._draw_lane_buttons(surf, w, h)
         # 레인 네임박스: 월드/오브젝트 위 · 오버레이급(원근 크기 고정)
         self._draw_racer_lane_nameboxes(ctx)
+        # 왼쪽 위 옵션 버튼 + 팝업 (맨 위에 그려 다른 HUD에 가리지 않게)
+        self._draw_race_options(surf, w, h, small)
+        # 게임 중지 확인창 (최상단)
+        self._draw_race_quit_confirm(surf, w, h, small)

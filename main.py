@@ -2994,6 +2994,7 @@ def main():
                 mask=mask,
                 world_data=flow.world_data,
                 ev_mgr=ev_mgr,
+                bg=bg,
             ):
                 try:
                     ev_mgr.remove_ui_overlay("baseball_exit")

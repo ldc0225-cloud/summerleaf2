@@ -534,9 +534,9 @@
                 { "type": "WAIT", "val": 0.35 },
                 { "type": "MAP", "target": "bg_circurt01", "pos": [752, 1184], "dir": "right" },
                 { "type": "SHEAR", "on": false, "strength": 0.0, "duration_sec": 0.2 },
+                { "type": "SCREEN_FX", "kind": "cloud", "on": false, "dir": "RANDOM" },
                 { "type": "WAIT", "val": 0.35 },
                 { "type": "FADEIN", "val": 0.45 },
-                { "type": "OVERLAY_UI", "action": "show", "content": "button", "text": "경기 중지", "overlay_id": "racing_exit", "clickable": true, "click_action": "stop_racing", "persist": true, "hold_forever": true, "anchor": "top_left", "margin_x": 8, "margin_y": 8, "size": 10 },
                 { "type": "DEV_CMD", "cmd": "start_racing", "map": "bg_circurt01", "return_map": "bg_jjangpu", "return_pos": [850, 2310] }
             ],
             "result": {},
