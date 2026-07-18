@@ -2475,6 +2475,12 @@ class GameFlow:
         
         # 2. 자산 로드 (경로도 world_data.json에 정의된 대로)
         bg = pygame.image.load(os.path.join("assets", "images", "bg", m["bg_img"])).convert()
+        try:
+            from engine import invalidate_rotate3d_mode7_map_cache
+
+            invalidate_rotate3d_mode7_map_cache()
+        except Exception:
+            pass
         
         mask_path = os.path.join("assets", "images", "bg", m["mask_img"])
         if os.path.exists(mask_path):

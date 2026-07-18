@@ -2941,6 +2941,12 @@ class RacingActivity(BaseFieldActivity):
             for x, y, nx, ny in samples:
                 pygame.draw.circle(bg, col, (int(round(x + nx * d)), int(round(y + ny * d))), lane_r)
         self._road_painted = True
+        try:
+            from engine import bump_rotate3d_mode7_map_gen
+
+            bump_rotate3d_mode7_map_gen(bg)
+        except Exception:
+            pass
         print(f"[racing] road painted: lane_w={lane_w:.0f} samples={len(samples)}")
 
     # --- 미니맵 오버레이 (마리오카트식) ------------------------------------

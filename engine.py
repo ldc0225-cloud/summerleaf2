@@ -1808,6 +1808,213 @@ def rotate3d_mode7_fill_sky_and_ground(dst, ctx, cfg=None, *, fill_sky=True):
                 pass
 
 
+# Mode7 맵 array3d 캐시 — 매 프레임 전체 맵 복사(1440²≈6MB)를 막는다.
+# road paint 등으로 맵 픽셀이 바뀌면 bump_rotate3d_mode7_map_gen(surf) 호출.
+_MODE7_MAP_ARR_CACHE = {"key": None, "arr": None}
+_MODE7_LORES_TMP = None
+
+
+def bump_rotate3d_mode7_map_gen(map_surf) -> None:
+    """맵 Surface 픽셀이 바뀐 뒤 Mode7 array 캐시를 무효화할 때 호출."""
+    if map_surf is None:
+        return
+    try:
+        gen = int(getattr(map_surf, "_mode7_cache_gen", 0) or 0) + 1
+        map_surf._mode7_cache_gen = gen
+    except Exception:
+        pass
+    try:
+        _MODE7_MAP_ARR_CACHE["key"] = None
+        _MODE7_MAP_ARR_CACHE["arr"] = None
+    except Exception:
+        pass
+
+
+def invalidate_rotate3d_mode7_map_cache() -> None:
+    """Mode7 맵 array 캐시 전부 비우기 (맵 전환 등)."""
+    _MODE7_MAP_ARR_CACHE["key"] = None
+    _MODE7_MAP_ARR_CACHE["arr"] = None
+
+
+def _mode7_map_cache_key(map_surf):
+    try:
+        return (
+            id(map_surf),
+            int(map_surf.get_width()),
+            int(map_surf.get_height()),
+            int(getattr(map_surf, "_mode7_cache_gen", 0) or 0),
+        )
+    except Exception:
+        return None
+
+
+def _mode7_get_map_arr(map_surf):
+    """map_surf → numpy RGB 배열. 동일 Surface·gen 이면 캐시 재사용."""
+    import numpy as np  # noqa: F401 — 호출측에서만 사용
+
+    key = _mode7_map_cache_key(map_surf)
+    if key is not None and _MODE7_MAP_ARR_CACHE.get("key") == key:
+        arr = _MODE7_MAP_ARR_CACHE.get("arr")
+        if arr is not None:
+            return arr
+    arr = pygame.surfarray.array3d(map_surf)
+    _MODE7_MAP_ARR_CACHE["key"] = key
+    _MODE7_MAP_ARR_CACHE["arr"] = arr
+    return arr
+
+
+def _mode7_quality_scale(cfg) -> float:
+    """
+    Mode7 샘플 해상도 비율 (1.0=전체, 0.5=반해상도 후 확대).
+    Android에서 QUALITY_SCALE 이 1.0이면 ANDROID_QUALITY_SCALE 로 자동 하향.
+    """
+    try:
+        q = float(
+            (cfg or {}).get(
+                "quality_scale",
+                CONFIG.get("ROTATE3D_QUALITY_SCALE", 1.0),
+            )
+            or 1.0
+        )
+    except (TypeError, ValueError):
+        q = 1.0
+    try:
+        from data import _is_android_runtime
+
+        if _is_android_runtime() and abs(q - 1.0) < 1e-6:
+            q = float(CONFIG.get("ROTATE3D_ANDROID_QUALITY_SCALE", 0.45) or 0.45)
+    except Exception:
+        pass
+    return max(0.25, min(1.0, float(q)))
+
+
+def _mode7_fallback_steps(cfg):
+    """numpy 없을 때 (x_step, y_step)."""
+    try:
+        from data import _is_android_runtime
+
+        android = bool(_is_android_runtime())
+    except Exception:
+        android = False
+    if android:
+        x_key, y_key = "ROTATE3D_ANDROID_FALLBACK_X_STEP", "ROTATE3D_ANDROID_FALLBACK_Y_STEP"
+        xd, yd = 3, 2
+    else:
+        x_key, y_key = "ROTATE3D_FALLBACK_X_STEP", "ROTATE3D_FALLBACK_Y_STEP"
+        xd, yd = 2, 1
+    try:
+        xs = int((cfg or {}).get("fallback_x_step", CONFIG.get(x_key, xd)) or xd)
+    except (TypeError, ValueError):
+        xs = xd
+    try:
+        ys = int((cfg or {}).get("fallback_y_step", CONFIG.get(y_key, yd)) or yd)
+    except (TypeError, ValueError):
+        ys = yd
+    return max(1, min(8, xs)), max(1, min(4, ys))
+
+
+def _mode7_sample_into(dst, map_surf, ctx, *, fill_sky=True, clear_color=(0, 0, 0), cfg=None):
+    """
+    Mode7 픽셀 샘플을 dst 에 쓴다. ctx 는 dst 크기와 맞아야 한다.
+    PC: numpy+캐시된 array3d. Android: get_at 폴백(+스텝).
+    """
+    if dst is None or map_surf is None or not ctx:
+        return False
+    try:
+        w = int(dst.get_width())
+        h = int(dst.get_height())
+        mw = int(map_surf.get_width())
+        mh = int(map_surf.get_height())
+    except Exception:
+        return False
+    if w <= 0 or h <= 0 or mw <= 0 or mh <= 0:
+        return False
+
+    horizon = int(ctx["horizon"])
+    fwd_x = float(ctx["fwd_x"])
+    fwd_y = float(ctx["fwd_y"])
+    lat_x = float(ctx["lat_x"])
+    lat_y = float(ctx["lat_y"])
+    cam_h = float(ctx["cam_h"])
+    near = float(ctx["near"])
+    depth_mul = float(ctx["depth_mul"])
+    lateral_mul = float(ctx["lateral_mul"])
+    cx = float(ctx["cam_x"])
+    cy = float(ctx["cam_y"])
+    try:
+        view_cx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
+    except (TypeError, ValueError):
+        view_cx = float(w) * 0.5
+
+    if fill_sky:
+        rotate3d_mode7_fill_sky_and_ground(dst, ctx, cfg, fill_sky=True)
+    else:
+        try:
+            dst.fill(clear_color)
+        except Exception:
+            pass
+
+    # PC: numpy+surfarray 고속 경로. Android APK 는 numpy 미포함 → get_at 폴백.
+    try:
+        import numpy as np
+
+        map_arr = _mode7_get_map_arr(map_surf)
+        out = pygame.surfarray.pixels3d(dst)
+        sx_arr = np.arange(w, dtype=np.float32)
+        try:
+            for sy in range(horizon, h):
+                row = float(sy - horizon)
+                p_row = cam_h / (row + near)
+                depth = p_row * depth_mul
+                lat_scale = p_row * lateral_mul
+                row_cx = cx + fwd_x * depth
+                row_cy = cy + fwd_y * depth
+                lat = (sx_arr - view_cx) * lat_scale
+                mx = (row_cx + lat * lat_x).astype(np.int32)
+                my = (row_cy + lat * lat_y).astype(np.int32)
+                m = (mx >= 0) & (mx < mw) & (my >= 0) & (my < mh)
+                if np.any(m):
+                    out[sx_arr[m].astype(np.int32), sy] = map_arr[mx[m], my[m]]
+        finally:
+            del out
+        return True
+    except Exception:
+        pass
+
+    # numpy/surfarray 없음: Surface 픽셀 폴백 (스텝 + 이웃 복제로 부하↓)
+    x_step, y_step = _mode7_fallback_steps(cfg)
+    try:
+        sy = horizon
+        while sy < h:
+            row = float(sy - horizon)
+            p_row = cam_h / (row + near)
+            depth = p_row * depth_mul
+            lat_scale = p_row * lateral_mul
+            row_cx = cx + fwd_x * depth
+            row_cy = cy + fwd_y * depth
+            sx = 0
+            while sx < w:
+                lat = (float(sx) - view_cx) * lat_scale
+                mx = int(row_cx + lat * lat_x)
+                my = int(row_cy + lat * lat_y)
+                if 0 <= mx < mw and 0 <= my < mh:
+                    c = map_surf.get_at((mx, my))
+                    for dy in range(y_step):
+                        yy = sy + dy
+                        if yy >= h:
+                            break
+                        for dx in range(x_step):
+                            xx = sx + dx
+                            if xx >= w:
+                                break
+                            dst.set_at((xx, yy), c)
+                sx += x_step
+            sy += y_step
+    except Exception:
+        return False
+    return True
+
+
 def apply_rotate3d_mode7(
     dst,
     map_surf,
@@ -1829,6 +2036,11 @@ def apply_rotate3d_mode7(
       p = CAM_H/(row+NEAR); depth = p*DEPTH_MUL; lat_scale = p*LATERAL_MUL
     → 윗줄일수록 맵이 멀고 작게 (상하·좌우 같은 비율).
 
+    성능:
+      - 맵 array3d 는 Surface gen 단위로 캐시 (매 프레임 전체 복사 방지)
+      - quality_scale < 1 이면 저해상도 샘플 후 확대 (Android 기본 ~0.45)
+      - 엔티티/클릭용 ctx 는 항상 전체 화면 해상도로 반환
+
     빈 공간:
       fill_sky=True  → 지평선 위 하늘색/360파노라마, 아래(맵 밖) 검정(ground_fill)
       fill_sky=False → clear_color 단색만 (마스크 Mode7 등)
@@ -1844,8 +2056,11 @@ def apply_rotate3d_mode7(
         return None
     if w <= 0 or h <= 0 or mw <= 0 or mh <= 0:
         return None
-    if ctx is None:
-        ctx = rotate3d_mode7_build_ctx(
+
+    # 엔티티·입력은 전체 해상도 ctx 를 쓴다 (저해상도 렌더와 분리).
+    full_ctx = ctx
+    if full_ctx is None:
+        full_ctx = rotate3d_mode7_build_ctx(
             cfg,
             strength_01,
             w,
@@ -1857,84 +2072,62 @@ def apply_rotate3d_mode7(
             player_wx=player_wx,
             player_wy=player_wy,
         )
-    if ctx is None or float(ctx.get("strength", 0.0)) <= 1e-6:
+    if full_ctx is None or float(full_ctx.get("strength", 0.0)) <= 1e-6:
         return None
-    horizon = int(ctx["horizon"])
-    fwd_x = float(ctx["fwd_x"])
-    fwd_y = float(ctx["fwd_y"])
-    lat_x = float(ctx["lat_x"])
-    lat_y = float(ctx["lat_y"])
-    cam_h = float(ctx["cam_h"])
-    near = float(ctx["near"])
-    depth_mul = float(ctx["depth_mul"])
-    lateral_mul = float(ctx["lateral_mul"])
-    cx = float(ctx["cam_x"])
-    cy = float(ctx["cam_y"])
-    try:
-        view_cx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
-    except (TypeError, ValueError):
-        view_cx = float(w) * 0.5
 
-    # 지평선 위/아래 빈 공간 선채움 (맵 샘플이 덮는 부분만 이후 덮어씀)
-    if fill_sky:
-        rotate3d_mode7_fill_sky_and_ground(dst, ctx, cfg, fill_sky=True)
-    else:
+    q = _mode7_quality_scale(cfg)
+    if q < 0.999:
+        global _MODE7_LORES_TMP
+        rw = max(1, int(round(w * q)))
+        rh = max(1, int(round(h * q)))
         try:
-            dst.fill(clear_color)
+            if (
+                _MODE7_LORES_TMP is None
+                or _MODE7_LORES_TMP.get_width() != rw
+                or _MODE7_LORES_TMP.get_height() != rh
+            ):
+                _MODE7_LORES_TMP = pygame.Surface((rw, rh))
+            lores = _MODE7_LORES_TMP
         except Exception:
-            pass
+            lores = None
+        if lores is not None:
+            lores_ctx = rotate3d_mode7_build_ctx(
+                cfg,
+                strength_01,
+                rw,
+                rh,
+                cam_x,
+                cam_y,
+                cam_angle_rad,
+                ref_forward=ref_forward,
+                player_wx=player_wx,
+                player_wy=player_wy,
+            )
+            if lores_ctx is not None and _mode7_sample_into(
+                lores,
+                map_surf,
+                lores_ctx,
+                fill_sky=fill_sky,
+                clear_color=clear_color,
+                cfg=cfg,
+            ):
+                try:
+                    # scale 이 smoothscale 보다 훨씬 빠르고 Mode7 저해상도엔 충분
+                    scaled = pygame.transform.scale(lores, (w, h))
+                    dst.blit(scaled, (0, 0))
+                    return full_ctx
+                except Exception:
+                    pass
 
-    # PC: numpy+surfarray 고속 경로. Android APK 는 numpy 미포함(p4a/py3.10 충돌) → get_at 폴백.
-    try:
-        import numpy as np
-
-        map_arr = pygame.surfarray.array3d(map_surf)
-        out = pygame.surfarray.pixels3d(dst)
-        sx_arr = np.arange(w, dtype=np.float32)
-        try:
-            for sy in range(horizon, h):
-                row = float(sy - horizon)
-                p_row = cam_h / (row + near)
-                depth = p_row * depth_mul
-                lat_scale = p_row * lateral_mul
-                row_cx = cx + fwd_x * depth
-                row_cy = cy + fwd_y * depth
-                lat = (sx_arr - view_cx) * lat_scale
-                mx = (row_cx + lat * lat_x).astype(np.int32)
-                my = (row_cy + lat * lat_y).astype(np.int32)
-                m = (mx >= 0) & (mx < mw) & (my >= 0) & (my < mh)
-                if np.any(m):
-                    out[sx_arr[m].astype(np.int32), sy] = map_arr[mx[m], my[m]]
-        finally:
-            del out
-        return ctx
-    except Exception:
-        pass
-
-    # numpy/surfarray 없음: Surface 픽셀 폴백 (가로 2px 스텝으로 모바일 부하↓)
-    try:
-        x_step = 2
-        for sy in range(horizon, h):
-            row = float(sy - horizon)
-            p_row = cam_h / (row + near)
-            depth = p_row * depth_mul
-            lat_scale = p_row * lateral_mul
-            row_cx = cx + fwd_x * depth
-            row_cy = cy + fwd_y * depth
-            sx = 0
-            while sx < w:
-                lat = (float(sx) - view_cx) * lat_scale
-                mx = int(row_cx + lat * lat_x)
-                my = int(row_cy + lat * lat_y)
-                if 0 <= mx < mw and 0 <= my < mh:
-                    c = map_surf.get_at((mx, my))
-                    dst.set_at((sx, sy), c)
-                    if x_step > 1 and sx + 1 < w:
-                        dst.set_at((sx + 1, sy), c)
-                sx += x_step
-    except Exception:
-        return None
-    return ctx
+    _mode7_sample_into(
+        dst,
+        map_surf,
+        full_ctx,
+        fill_sky=fill_sky,
+        clear_color=clear_color,
+        cfg=cfg,
+    )
+    return full_ctx
 
 
 def rotate3d_flat_rotate(fx, fy, px, py, angle_rad):

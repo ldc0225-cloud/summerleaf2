@@ -527,6 +527,15 @@ CONFIG = {
     "ROTATE3D_SKY_PANORAMA": "",                 # 360 하늘 이미지 경로. 빈 문자열=단색. 예: assets/images/bg/sky_360.png
     "ROTATE3D_SKY_PANORAMA_YAW_OFFSET": 0.0,     # 파노라마 기준 yaw 보정(라디안). 이미지 정면 맞출 때
     "ROTATE3D_SKY_FOV_RAD": 1.2,                 # 화면 가로가 담는 하늘 시야각(라디안). 클수록 좌우로 더 많이 보임
+    # --- Mode7 성능 ---
+    # quality_scale: 1.0=전체 해상도 샘플, 0.5=반해상도 샘플 후 확대(픽셀 수 ~1/4).
+    # Android는 numpy 미포함이라 get_at 폴백이 매우 무거움 → ANDROID_QUALITY_SCALE 기본 0.45.
+    "ROTATE3D_QUALITY_SCALE": 1.0,              # PC 기본(전체). 0.5~0.75로 낮추면 부하↓
+    "ROTATE3D_ANDROID_QUALITY_SCALE": 0.45,     # Android에서 QUALITY_SCALE==1.0 일 때 자동 적용
+    "ROTATE3D_FALLBACK_X_STEP": 2,              # numpy 없을 때 가로 샘플 간격(px)
+    "ROTATE3D_FALLBACK_Y_STEP": 1,              # numpy 없을 때 세로 샘플 간격(px). 2면 줄 복제
+    "ROTATE3D_ANDROID_FALLBACK_X_STEP": 3,      # Android get_at 폴백 가로 간격
+    "ROTATE3D_ANDROID_FALLBACK_Y_STEP": 2,      # Android get_at 폴백 세로 간격
     # 시작 시 디버그 텍스트 오버레이(HUD) 기본 표시 여부. 런타임 토글은 'O' 키.
     "SHOW_OVERLAY_DEFAULT": False,
     # 오버레이(HUD)를 껐을 때도 RSS 메모리 표시를 남길지 여부.
@@ -1255,6 +1264,10 @@ def _android_ram_profile_preset_3gb():
         "MEM_WATCHDOG_GROWTH_TRIM_FRACTION": 0.12,
         "MEM_WATCHDOG_GC_AFTER_FULL_CLEAR": False,
         "TILT_SHEAR_STRIP_BUCKET_PX": 96,
+        # Mode7: Android는 numpy 없이 get_at 폴백 → 저해상도 샘플이 필수
+        "ROTATE3D_QUALITY_SCALE": 0.45,
+        "ROTATE3D_FALLBACK_X_STEP": 3,
+        "ROTATE3D_FALLBACK_Y_STEP": 2,
     }
 
 
