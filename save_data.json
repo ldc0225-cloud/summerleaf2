@@ -21,5 +21,8 @@
         893.4,
         2312.0
     ],
-    "baseball_difficulty": "easy"
+    "baseball_difficulty": "easy",
+    "racing_mode7_quality": "high",
+    "racing_minimap_enabled": true,
+    "racing_camera_mode": "back"
 }

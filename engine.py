@@ -1866,25 +1866,26 @@ def _mode7_get_map_arr(map_surf):
 def _mode7_quality_scale(cfg) -> float:
     """
     Mode7 샘플 해상도 비율 (1.0=전체, 0.5=반해상도 후 확대).
-    Android에서 QUALITY_SCALE 이 1.0이면 ANDROID_QUALITY_SCALE 로 자동 하향.
+    cfg['quality_scale'] 이 명시되면 그대로 사용(레이스 옵션).
+    명시가 없고 Android + CONFIG 1.0 이면 ANDROID_QUALITY_SCALE 로 하향.
     """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    explicit = cfg.get("quality_scale") is not None
     try:
-        q = float(
-            (cfg or {}).get(
-                "quality_scale",
-                CONFIG.get("ROTATE3D_QUALITY_SCALE", 1.0),
-            )
-            or 1.0
-        )
+        if explicit:
+            q = float(cfg.get("quality_scale"))
+        else:
+            q = float(CONFIG.get("ROTATE3D_QUALITY_SCALE", 1.0) or 1.0)
     except (TypeError, ValueError):
         q = 1.0
-    try:
-        from data import _is_android_runtime
+    if not explicit:
+        try:
+            from data import _is_android_runtime
 
-        if _is_android_runtime() and abs(q - 1.0) < 1e-6:
-            q = float(CONFIG.get("ROTATE3D_ANDROID_QUALITY_SCALE", 0.45) or 0.45)
-    except Exception:
-        pass
+            if _is_android_runtime() and abs(q - 1.0) < 1e-6:
+                q = float(CONFIG.get("ROTATE3D_ANDROID_QUALITY_SCALE", 0.75) or 0.75)
+        except Exception:
+            pass
     return max(0.25, min(1.0, float(q)))
 
 

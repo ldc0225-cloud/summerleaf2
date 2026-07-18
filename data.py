@@ -112,7 +112,7 @@ CONFIG = {
     "DEFAULT_PLAYER_CHAR": "summer_k",
     "CHAR_SPEED": 1.6, "CURSOR_SPEED": 3.5,
     # 클릭 이동
-    "DOUBLE_CLICK_MS": 280,
+    "DOUBLE_CLICK_MS": 500,
     "DOUBLE_CLICK_DIST_PX": 18.0,
     # 더블클릭 달리기(직선 이동) 속도 배율
     "RUN_SPEED_MUL": 1.8,
@@ -502,11 +502,11 @@ CONFIG = {
     # 배경 Mode7: p = CAM_H/(row+NEAR), depth = p*DEPTH_MUL, lat_scale = p*LATERAL_MUL
     # 스프라이트 크기(SNES 카트): scale = CAMERA_BACK/forward — 앞뒤만. 같은 깊이면 플레이어와 동일 크기.
     "ROTATE3D_HORIZON_FRAC": 0.30,     # 지평선 높이 = 화면높이×비율×strength
-    "ROTATE3D_CAM_H": 80.0,            # p = CAM_H/(row+NEAR)   80
+    "ROTATE3D_CAM_H": 60.0,            # p = CAM_H/(row+NEAR)   80
     "ROTATE3D_NEAR": 30.0,             # 작을수록 원근 강함(너무 작으면 하단이 광각처럼 보임)   30.0
     "ROTATE3D_DEPTH_MUL": 165.0,       # depth = p * DEPTH_MUL (PIVOT_FIT 켜면 런타임에 덮어씀) 165
     "ROTATE3D_LATERAL_MUL": 1.05,      # 도로 위치 샘플용. 스프라이트 크기에는 안 씀
-    "ROTATE3D_CAMERA_BACK": 250.0,      # 플레이어 뒤 카메라 + 스프라이트 scale=1 기준 깊이 250
+    "ROTATE3D_CAMERA_BACK": 200.0,      # 플레이어 뒤 카메라 + 스프라이트 scale=1 기준 깊이 200
     "ROTATE3D_BASE_HEADING": 1.5707963267948966,  # 기본 시선(+y). heading = BASE + ui.rotate3d_angle
     "ROTATE3D_PLAYER_BOTTOM_PAD": 50,  # 플레이어 하단 고정 여백(px)
     # Mode7 화면에서 플레이어(투영 중심) X 비율. 0.5=중앙, 1/3≈좌측 — 우측 시야에 트랙 전방이 더 넓게 들어옴
@@ -528,13 +528,13 @@ CONFIG = {
     "ROTATE3D_SKY_PANORAMA_YAW_OFFSET": 0.0,     # 파노라마 기준 yaw 보정(라디안). 이미지 정면 맞출 때
     "ROTATE3D_SKY_FOV_RAD": 1.2,                 # 화면 가로가 담는 하늘 시야각(라디안). 클수록 좌우로 더 많이 보임
     # --- Mode7 성능 ---
-    # quality_scale: 1.0=전체 해상도 샘플, 0.5=반해상도 샘플 후 확대(픽셀 수 ~1/4).
-    # Android는 numpy 미포함이라 get_at 폴백이 매우 무거움 → ANDROID_QUALITY_SCALE 기본 0.45.
-    "ROTATE3D_QUALITY_SCALE": 1.0,              # PC 기본(전체). 0.5~0.75로 낮추면 부하↓
-    "ROTATE3D_ANDROID_QUALITY_SCALE": 0.45,     # Android에서 QUALITY_SCALE==1.0 일 때 자동 적용
+    # quality_scale: 1.0=전체 해상도 샘플, 0.75≈중간, 0.5=반해상도 후 확대.
+    # cfg에 quality_scale 이 명시되면(레이스 옵션) Android 자동 하향을 적용하지 않는다.
+    "ROTATE3D_QUALITY_SCALE": 1.0,              # PC·명시 없을 때 기본(전체)
+    "ROTATE3D_ANDROID_QUALITY_SCALE": 0.75,     # Android에서 CONFIG만 1.0일 때 자동(중간급). 레이스 옵션이 우선
     "ROTATE3D_FALLBACK_X_STEP": 2,              # numpy 없을 때 가로 샘플 간격(px)
     "ROTATE3D_FALLBACK_Y_STEP": 1,              # numpy 없을 때 세로 샘플 간격(px). 2면 줄 복제
-    "ROTATE3D_ANDROID_FALLBACK_X_STEP": 3,      # Android get_at 폴백 가로 간격
+    "ROTATE3D_ANDROID_FALLBACK_X_STEP": 2,      # Android get_at 폴백 가로 간격(품질↑ — 예전 3→2)
     "ROTATE3D_ANDROID_FALLBACK_Y_STEP": 2,      # Android get_at 폴백 세로 간격
     # 시작 시 디버그 텍스트 오버레이(HUD) 기본 표시 여부. 런타임 토글은 'O' 키.
     "SHOW_OVERLAY_DEFAULT": False,
@@ -870,10 +870,10 @@ RACING_DEFAULTS = {
     "road_border_color": [40, 40, 46],  # 도로 가장자리 테두리색
     "road_border_px": 3.0,              # 테두리 두께(월드 px)
     "laps": 3,
-    "max_speed": 130.0,      # 직선 최고속 (월드 px/s)
-    "min_corner_speed": 42.0,
-    "accel": 52.0,           # 출발·가속 (서서히 붙는 느낌)
-    "brake": 95.0,           # 코너 감속
+    "max_speed": 200.0,      # 직선 최고속 (월드 px/s)
+    "min_corner_speed": 50.0,
+    "accel": 80.0,           # 출발·가속 (서서히 붙는 느낌)
+    "brake": 40.0,           # 코너 감속
     "corner_brake": 1.4,     # 앞 꺾임(rad)에 비례한 목표속도 감소
     "corner_lookahead_px": 90.0,  # 앞 경로점 chase 거리(클수록 일찍 돌기 시작)
     "turn_rate_rad": 2.2,    # 헤딩이 목표 방향으로 따라가는 각속도 — 코너 관성
@@ -882,17 +882,22 @@ RACING_DEFAULTS = {
     "lane_occupy_s": 40.0,
     # 네임박스: 발 화면좌표에서 위로 올린 고정 px (Mode7 원근 스케일 없음 · 오버레이급)
     "namebox_head_off_px": 42.0,
-    # --- 레인 화살표 HUD (화면 왼쪽 · 한 칸씩 A↔B↔C) ---
+    # --- 레인 화살표 HUD (캐릭터 기준 · 한 칸씩 A↔B↔C) ---
     # 에셋이 없으면 삼각형 화살표를 코드로 자동 생성.
-    # 애니 세트(선택): assets/images/ui/racing/<lane_btn_up_anim>/ 폴더 PNG 시퀀스
+    # 애니 세트(선택): assets/images/ui/racing/<lane_btn_*_anim>/ 폴더 PNG 시퀀스
     #   또는 assets/images/ui/racing/<name>_0.png … 번호 시퀀스 (_load_numbered_ui_sequence).
-    "lane_btn_up_anim": "lane_up",       # 위 화살표 애니 세트 이름
-    "lane_btn_down_anim": "lane_down",   # 아래 화살표 애니 세트 이름
-    "lane_btn_anim_fps": 8.0,            # 에셋 프레임 재생 속도
-    "lane_btn_size_px_320": 40.0,        # 버튼 한 변(320 설계폭 기준 → 논리 해상도 스케일)
-    "lane_btn_gap_px_320": 10.0,         # 위·아래 버튼 간격
-    "lane_btn_margin_x_frac": 0.03,      # 화면 왼쪽 여백 (폭 비율)
-    "lane_btn_center_y_frac": 0.55,      # 두 버튼 묶음의 세로 중심 (높이 비율)
+    # 카메라 옆: 캐릭터 뒤 ▲▼ / 카메라 뒤: 캐릭터 아래 ◀▶
+    "lane_btn_up_anim": "lane_up",
+    "lane_btn_down_anim": "lane_down",
+    "lane_btn_left_anim": "lane_left",
+    "lane_btn_right_anim": "lane_right",
+    "lane_btn_anim_fps": 8.0,
+    "lane_btn_size_px_320": 40.0,
+    "lane_btn_gap_px_320": 10.0,
+    "lane_btn_char_gap_px_320": 8.0,  # 캐릭터와 버튼 사이 간격
+    "lane_btn_alpha": 128,            # 반투명 (~50%)
+    "lane_btn_margin_x_frac": 0.03,   # (레거시·폴백) 화면 왼쪽 여백
+    "lane_btn_center_y_frac": 0.55,   # (레거시·폴백) 세로 중심
     "path_pull": 2.2,        # 경로로 끌어당기는 힘(작을수록 코너에서 바깥으로 더 나감)
     "path_soft_follow": 0.5, # (레거시·미사용) path_pull 사용
     "cam_side_sign": -1.0,   # Mode7: heading + sign*π/2 = 진행 방향의 오른쪽에서 비춤
@@ -909,26 +914,36 @@ RACING_DEFAULTS = {
     "minimap_margin_x_frac": 0.015,  # 화면 오른쪽 여백 (폭 비율)
     "minimap_top_frac": 0.075,   # exit 버튼 바로 밑 시작 y (높이 비율)
     # --- 경로 위 아이템 포인트 ---
-    # items: [{s, lane:"A"|"B"|"C", type, kind?, ...}, ...]
+    # items: [{s, lane:"A"|"B"|"C", type, kind?, consume?, ...}, ...]
     # kind: normal | secret | roulette | summon  (기본 normal)
     #   secret — 시크릿 상자(먹을 때 룰렛 UI 후 speed/slow/swap 중 랜덤)
     #   roulette — 발판 위 아이템이 A→B→C→A 로 이동 (roulette_period_sec)
     #   summon — 밟으면 경로 어딘가에 아이템 소환 + 번쩍 표시
+    # consume: true면 획득 후 영구 제거. 기본 false → 숨김 후 item_respawn_sec 뒤 재등장
     # s = 경로 누적거리(px). lane A=상단 B=중앙 C=하단.
     "items": [],
     "item_pick_radius": 18.0,
     "item_draw_height": 10.0,
+    "item_respawn_sec": 3.0,  # 고정 아이템 획득 후 재등장까지
     "item_random_enabled": False,
     "item_random_count": 6,
     # 청정 구간: [[s0,s1], ...] — 날씨·랜덤 소환·번개 등 글로벌 랜덤 무효
     "clean_zones": [],
     # 맵별 날씨 (전역 랜덤). enabled=false 면 비활성.
-    # rain: 구간 통과 시 감속 / lightning: 구간 내 확률로 잠깐 정지(최대 패널티)
+    # rain: 구간 통과 시 감속 / lightning: 구간 진입 시 1회 꽝!(정지)
+    # 애니(선택): assets/images/ui/racing/<weather_*_anim>/ — 없으면 비=큰그림자, 번개=빨간깜빡
     "weather": {
         "enabled": True,
         "rain": {"chance_per_lap": 0.45, "zone_len_s": [70.0, 160.0], "slow_mul": 0.72},
-        "lightning": {"chance_per_lap": 0.22, "zone_len_s": [40.0, 90.0], "strike_chance": 0.35, "freeze_sec": 1.15},
+        "lightning": {
+            "chance_per_lap": 0.22,
+            "zone_len_s": [40.0, 90.0],
+            "strike_chance": 1.0,
+            "freeze_sec": 1.15,
+        },
     },
+    "weather_rain_anim": "rain",
+    "weather_lightning_anim": "lightning",
     # 슬립스트림 — 최고속 90%↑ 앞차 뒤 반투명 에프터 / 뒤차 가속 보너스
     "slipstream_min_speed_frac": 0.90,
     "slipstream_follow_s": 38.0,
@@ -938,6 +953,8 @@ RACING_DEFAULTS = {
     "slipstream_bump_front_boost": 1.35,
     "slipstream_bump_rear_slow": 0.45,
     "slipstream_bump_slow_sec": 1.4,
+    # 속도 상승 아이템 획득 시 뒤쪽 에프터버너 FX 지속(초)
+    "speed_afterburner_sec": 1.1,
     # 시크릿 상자 룰렛 UI
     "secret_spin_sec": 1.35,
     "roulette_lane_period_sec": 0.55,
@@ -1005,6 +1022,12 @@ RACING_ITEM_TYPES = {
 
 # 시크릿 상자·소환 시 실제로 나올 수 있는 효과 풀
 RACING_MYSTERY_EFFECT_POOL = ("speed", "slow", "swap")
+# 추첨 가중치 — 기본 1.0, 위치 교환(swap)은 다른 아이템의 30%
+RACING_MYSTERY_EFFECT_WEIGHTS = {
+    "speed": 1.0,
+    "slow": 1.0,
+    "swap": 0.3,
+}
 
 # 차선 문자 → 경로 법선 오프셋 부호 (racing.LANE_*)
 RACING_LANE_LETTERS = {

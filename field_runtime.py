@@ -1258,7 +1258,7 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
     elif n == "start_racing":
         from activities import request_field_activity
 
-        params = {"save_data": dict(flow.save_data) if flow else {}}
+        params = {"save_data": flow.save_data if flow else {}, "flow": flow}
         if isinstance(step, dict):
             if step.get("map") or step.get("map_id"):
                 params["map"] = step.get("map") or step.get("map_id")

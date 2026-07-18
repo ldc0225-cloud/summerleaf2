@@ -344,8 +344,7 @@
                 { "type": "OVERLAY_UI", "action": "remove", "disappear": 2.0, "overlay_id": "TITLE" },
                 { "type": "FOLLOW_STOP" },
                 { "type": "FADEOUT", "val": 1.0 },
-                { "type": "WAIT", "val": 1.0 },
-                { "type": "CURSOR_VISIBLE", "val": 1.0 }
+                { "type": "WAIT", "val": 1.0 }
             ],
             "result": {},
             "map_id": "__GLOBAL__",

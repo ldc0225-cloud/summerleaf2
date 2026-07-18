@@ -4904,6 +4904,18 @@ def main():
                     mode7_cfg["player_screen_x_frac"] = float(_m7x)
             except (TypeError, ValueError, UnboundLocalError):
                 mode7_cfg = rotate3d_cfg
+            # 레이스 옵션 해상도(high/medium/low) → Mode7 quality_scale
+            try:
+                _m7q = getattr(_fa_sess_m7, "mode7_quality_scale", None)
+                if _m7q is not None:
+                    mode7_cfg = dict(mode7_cfg or {})
+                    mode7_cfg["quality_scale"] = float(_m7q)
+                    _fb = getattr(_fa_sess_m7, "_mode7_fallback_xy", None)
+                    if isinstance(_fb, (tuple, list)) and len(_fb) >= 2:
+                        mode7_cfg["fallback_x_step"] = int(_fb[0])
+                        mode7_cfg["fallback_y_step"] = int(_fb[1])
+            except (TypeError, ValueError, UnboundLocalError):
+                pass
             cam_back = float(rotate3d_cfg.get("camera_back", 26.0)) * float(rotate3d_current)
             cam_wx = px_w - math.cos(cam_heading) * cam_back
             cam_wy = py_w - math.sin(cam_heading) * cam_back

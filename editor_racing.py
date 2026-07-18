@@ -46,6 +46,7 @@ def new_state() -> dict:
         "selected_ix": None,
         "selected_item_ix": None,
         "dragging": False,
+        "dragging_item": False,
         "show_settings": False,
         "settings_fields": {},
         "pick_xy_key": None,  # exit_pos
@@ -100,7 +101,7 @@ RACING_EDITOR_WEATHER_KEYS = [
     ("weather_lightning_chance", "번개 확률/랩", "float", 0.22),
     ("weather_lightning_zone_min", "번개 구간최소", "float", 40.0),
     ("weather_lightning_zone_max", "번개 구간최대", "float", 90.0),
-    ("weather_lightning_strike", "번개 명중률", "float", 0.35),
+    ("weather_lightning_strike", "번개 진입명중(0~1)", "float", 1.0),
     ("weather_lightning_freeze", "번개 정지(초)", "float", 1.15),
 ]
 
@@ -225,7 +226,7 @@ def _weather_cfg_to_flat(cfg: dict) -> Dict[str, str]:
         "weather_lightning_chance": str(lig.get("chance_per_lap", 0.22)),
         "weather_lightning_zone_min": str(zl0),
         "weather_lightning_zone_max": str(zl1),
-        "weather_lightning_strike": str(lig.get("strike_chance", 0.35)),
+        "weather_lightning_strike": str(lig.get("strike_chance", 1.0)),
         "weather_lightning_freeze": str(lig.get("freeze_sec", 1.15)),
     }
 
@@ -248,7 +249,7 @@ def _flat_to_weather_cfg(fields: dict) -> dict:
                 _parse_float(fields.get("weather_lightning_zone_min"), 40.0),
                 _parse_float(fields.get("weather_lightning_zone_max"), 90.0),
             ],
-            "strike_chance": _parse_float(fields.get("weather_lightning_strike"), 0.35),
+            "strike_chance": _parse_float(fields.get("weather_lightning_strike"), 1.0),
             "freeze_sec": _parse_float(fields.get("weather_lightning_freeze"), 1.15),
         },
     }
@@ -310,6 +311,10 @@ def _normalize_item(raw) -> dict:
     except (TypeError, ValueError):
         rps = 0.55
     rps = max(0.2, min(3.0, rps))
+    consume = _parse_bool(
+        raw.get("consume", raw.get("despawn", raw.get("remove_on_pickup", False))),
+        False,
+    )
     out = {
         "s": round(s, 2),
         "lane": lane,
@@ -318,6 +323,7 @@ def _normalize_item(raw) -> dict:
         "strength": round(strength, 3),
         "duration_sec": round(dur, 2),
         "asset": asset,
+        "consume": bool(consume),
     }
     if kind == "roulette":
         out["roulette_period_sec"] = round(rps, 2)
@@ -373,6 +379,7 @@ def load_path_into_state(state, flow, map_id: str) -> None:
     state["selected_ix"] = None
     state["selected_item_ix"] = None
     state["dragging"] = False
+    state["dragging_item"] = False
     state["dirty"] = False
     state["settings_fields"] = load_settings_fields(flow, map_id)
     # 게임에서 실제로 생성할 도로 설정을 에디터 미리보기에 그대로 사용.
@@ -529,9 +536,9 @@ def left_list_tops(top_bar_h: int, state=None) -> dict:
     tb = int(top_bar_h)
     tools = tb + 38
     actions = tools + 32
-    # tool=ITEMS 에서는 action 버튼이 8개.
+    # tool=ITEMS 에서는 action 버튼이 10개.
     # 값이 작으면 리스트가 겹치며 폰트가 잘려/겹쳐 보일 수 있음.
-    n_act = 8
+    n_act = 10
     if state is not None and str(state.get("tool") or "") != "ITEMS":
         n_act = 5
     list_header = actions + n_act * 28 + 16
@@ -597,9 +604,11 @@ def draw_left_panel(
         kind_lab = RACING_ITEM_KIND_LABELS.get(str((cur or {}).get("kind") or "normal"), "일반")
         type_lab = (cur or {}).get("type", "-")
         lane_set = _item_group_lane_set(items, sel)
+        consume_on = bool((cur or {}).get("consume", False))
         actions = [
             ("cycle_item_kind", f"배치: {kind_lab}"),
             ("cycle_item_type", f"효과: {type_lab}"),
+            ("toggle_consume", f"획득후소모: {'ON' if consume_on else 'OFF'}"),
             ("toggle_lane_A", f"[{'x' if 'A' in lane_set else ' '}] 레인 A"),
             ("toggle_lane_B", f"[{'x' if 'B' in lane_set else ' '}] 레인 B"),
             ("toggle_lane_C", f"[{'x' if 'C' in lane_set else ' '}] 레인 C"),
@@ -643,9 +652,10 @@ def draw_left_panel(
                     pygame.draw.rect(screen, (80, 70, 40), r)
                 kind = str(it.get("kind") or "normal")
                 klab = RACING_ITEM_KIND_LABELS.get(kind, kind)[:4]
+                cons = "소모" if it.get("consume") else "유지"
                 lab = (
                     f"{i:02d} {klab} {it.get('type','?')} "
-                    f"{it.get('lane','B')} s={float(it.get('s',0)):.0f}"
+                    f"{it.get('lane','B')} {cons} s={float(it.get('s',0)):.0f}"
                 )
                 screen.blit(
                     font.render(lab[:30], True, (220, 220, 220)),
@@ -707,6 +717,7 @@ def _item_group_signature(it: dict) -> Tuple:
         round(float(it.get("duration_sec", 0.0) or 0.0), 2),
         str(it.get("asset") or ""),
         round(float(it.get("roulette_period_sec", 0.0) or 0.0), 2),
+        bool(it.get("consume", False)),
     )
 
 
@@ -821,7 +832,7 @@ def handle_left_click(state, mx, my, tops, sidebar_w, flow, map_id, *, list_scro
         return None
     if btn_i.collidepoint(mx, my):
         state["tool"] = "ITEMS"
-        state["hint"] = "맵 클릭 → 경로 위 아이템 배치"
+        state["hint"] = "기존 아이템 클릭=선택 · 빈 경로=추가 · 드래그=이동"
         return None
     if btn_s.collidepoint(mx, my):
         state["tool"] = "SETTINGS"
@@ -835,6 +846,7 @@ def handle_left_click(state, mx, my, tops, sidebar_w, flow, map_id, *, list_scro
         actions = [
             "cycle_item_kind",
             "cycle_item_type",
+            "toggle_consume",
             "toggle_lane_A",
             "toggle_lane_B",
             "toggle_lane_C",
@@ -897,6 +909,20 @@ def handle_left_click(state, mx, my, tops, sidebar_w, flow, map_id, *, list_scro
                 state["dirty"] = True
                 k = items[int(ix)].get("kind", "normal")
                 state["hint"] = f"배치 → {RACING_ITEM_KIND_LABELS.get(k, k)}"
+            else:
+                state["hint"] = "아이템을 먼저 선택"
+            return act
+        if act == "toggle_consume":
+            ix = state.get("selected_item_ix")
+            items = state.get("items") or []
+            if ix is not None and 0 <= int(ix) < len(items):
+                for gi in _item_group_indices(items, ix):
+                    it = items[int(gi)]
+                    it["consume"] = not bool(it.get("consume", False))
+                state["items"] = [_normalize_item(x) for x in items]
+                state["dirty"] = True
+                on = bool(items[int(ix)].get("consume", False))
+                state["hint"] = f"획득 후 소모 {'ON' if on else 'OFF'}(기본 OFF=유지)"
             else:
                 state["hint"] = "아이템을 먼저 선택"
             return act
@@ -1068,6 +1094,29 @@ def handle_map_click(
     return False
 
 
+def _lane_width_from_state(state) -> float:
+    fields = state.get("settings_fields") or {}
+    return max(
+        8.0,
+        _parse_float(
+            fields.get("lane_width", RACING_DEFAULTS.get("lane_width", 30.0)),
+            30.0,
+        ),
+    )
+
+
+def _s_delta(rp, a: float, b: float) -> float:
+    """경로 위 두 s 사이 최단 거리 (루프면 wrap)."""
+    try:
+        length = float(getattr(rp, "length", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        length = 0.0
+    da = abs(float(a) - float(b))
+    if length > 1e-6 and bool(getattr(rp, "closed", True)):
+        return min(da, length - da)
+    return da
+
+
 def _nearest_item_ix(state, wx: float, wy: float, *, max_dist=28.0) -> Optional[int]:
     best_i = None
     best_d = float(max_dist)
@@ -1082,15 +1131,80 @@ def _nearest_item_ix(state, wx: float, wy: float, *, max_dist=28.0) -> Optional[
     return best_i
 
 
+def _pick_existing_item_ix(state, wx: float, wy: float) -> Optional[int]:
+    """
+    맵 클릭으로 기존 아이템 선택.
+    화면 축소 시 월드 반경만으로는 마커를 못 잡을 수 있어
+    1) 월드 거리 2) 경로 s 근접 순으로 판정한다.
+    """
+    items = state.get("items") or []
+    if not items:
+        return None
+    lane_w = _lane_width_from_state(state)
+    # 맵이 축소되면 12px 마커가 수십 월드유닛에 해당 → 넉넉히
+    spatial = max(64.0, lane_w * 2.0 + 28.0)
+    near = _nearest_item_ix(state, wx, wy, max_dist=spatial)
+    if near is not None:
+        return near
+    path = state.get("path") or []
+    if len(path) < 2:
+        return None
+    try:
+        rp = _race_path_from_state(state)
+        s_click = float(rp.nearest_s(wx, wy))
+        px, py, _, _ = rp.sample(s_click)
+    except Exception:
+        return None
+    # 도로에서 너무 멀면 경로 s 매칭하지 않음
+    if math.hypot(float(wx) - float(px), float(wy) - float(py)) > max(48.0, lane_w * 2.5):
+        return None
+    max_ds = max(40.0, lane_w * 1.5)
+    best_i = None
+    best_ds = max_ds
+    best_xy = None
+    for i, it in enumerate(items):
+        try:
+            s_it = float(it.get("s", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        ds = _s_delta(rp, s_it, s_click)
+        if ds > best_ds:
+            continue
+        xy = _item_world_xy(state, it)
+        # 같은 s 묶음이면 클릭에 가장 가까운 레인 우선
+        if ds < best_ds - 1e-6 or best_i is None:
+            best_ds = ds
+            best_i = i
+            best_xy = xy
+        elif abs(ds - best_ds) <= 1e-6 and xy is not None:
+            prev_d = (
+                math.hypot(float(best_xy[0]) - float(wx), float(best_xy[1]) - float(wy))
+                if best_xy is not None
+                else 1e9
+            )
+            cur_d = math.hypot(float(xy[0]) - float(wx), float(xy[1]) - float(wy))
+            if cur_d < prev_d:
+                best_i = i
+                best_xy = xy
+    return best_i
+
+
 def _handle_item_map_click(state, wx: float, wy: float) -> bool:
     path = state.get("path") or []
     if len(path) < 2:
         state["hint"] = "먼저 경로를 2점 이상 만드세요"
         return True
-    near = _nearest_item_ix(state, wx, wy, max_dist=28.0)
+    near = _pick_existing_item_ix(state, wx, wy)
     if near is not None:
         state["selected_item_ix"] = near
-        state["hint"] = f"아이템 #{near} 선택"
+        state["dragging_item"] = True
+        state["dragging"] = False
+        it = (state.get("items") or [])[int(near)]
+        kind = RACING_ITEM_KIND_LABELS.get(str(it.get("kind") or "normal"), "일반")
+        state["hint"] = (
+            f"아이템 #{near} 선택 ({kind}/{it.get('type')}/{it.get('lane')}) · "
+            f"좌측에서 수정 · 드래그로 이동"
+        )
         return True
     try:
         rp = _race_path_from_state(state)
@@ -1103,12 +1217,32 @@ def _handle_item_map_click(state, wx: float, wy: float) -> bool:
     items.append(it)
     state["items"] = items
     state["selected_item_ix"] = len(items) - 1
+    state["dragging_item"] = False
     state["dirty"] = True
-    state["hint"] = f"아이템 추가 s={s:.0f} · 배치/효과/트랙은 좌측에서"
+    state["hint"] = f"아이템 추가 s={s:.0f} · 배치/효과/레인은 좌측에서"
     return True
 
 
 def handle_map_drag(state, wx: float, wy: float) -> bool:
+    if state.get("dragging_item"):
+        ix = state.get("selected_item_ix")
+        items = list(state.get("items") or [])
+        if ix is None or not (0 <= int(ix) < len(items)):
+            return False
+        path = state.get("path") or []
+        if len(path) < 2:
+            return False
+        try:
+            rp = _race_path_from_state(state)
+            new_s = round(float(rp.nearest_s(wx, wy)), 2)
+        except Exception:
+            return False
+        for gi in _item_group_indices(items, ix):
+            items[int(gi)]["s"] = new_s
+        state["items"] = items
+        state["dirty"] = True
+        state["hint"] = f"아이템 이동 s={new_s:.0f}"
+        return True
     if not state.get("dragging"):
         return False
     ix = state.get("selected_ix")
@@ -1123,6 +1257,7 @@ def handle_map_drag(state, wx: float, wy: float) -> bool:
 
 def handle_map_mouseup(state) -> None:
     state["dragging"] = False
+    state["dragging_item"] = False
 
 
 def apply_xy_pick(state, wx: float, wy: float, flow, map_id: str) -> bool:
@@ -1159,6 +1294,7 @@ def delete_selected_item(state) -> bool:
     items.pop(int(ix))
     state["items"] = items
     state["selected_item_ix"] = None
+    state["dragging_item"] = False
     state["dirty"] = True
     state["hint"] = f"아이템 삭제 · 남은 {len(items)}"
     return True
@@ -1386,7 +1522,7 @@ def draw_map_overlay(
         try:
             f = font or pygame.font.Font(None, 20)
             map_surf.blit(
-                f.render("경로 위 클릭 → 아이템 포인트 추가", True, (255, 210, 140)),
+                f.render("경로 클릭 → 아이템 추가 · 기존 아이템 클릭 → 선택/수정", True, (255, 210, 140)),
                 (12, 12),
             )
         except Exception:

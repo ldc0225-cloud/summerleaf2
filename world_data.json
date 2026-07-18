@@ -449,10 +449,10 @@
             "lane_width": 30.0,
             "start_s": 0.0,
             "start_spacing": 22.0,
-            "max_speed": 130.0,
-            "min_corner_speed": 42.0,
-            "accel": 52.0,
-            "brake": 95.0,
+            "max_speed": 200.0,
+            "min_corner_speed": 50.0,
+            "accel": 80.0,
+            "brake": 40.0,
             "corner_brake": 1.4,
             "turn_rate_rad": 2.2,
             "path_pull": 2.2,
@@ -598,10 +598,9 @@
         "npcs": [],
         "racing": {
             "path": [
-                [785.0, 1186.0],
-                [891.0, 1177.0],
+                [912.0, 1184.0],
                 [1043.0, 1125.0],
-                [1155.0, 1010.0],
+                [1152.0, 1024.0],
                 [1234.0, 966.0],
                 [1279.0, 830.0],
                 [1288.0, 744.0],
@@ -623,16 +622,17 @@
                 [324.0, 901.0],
                 [426.0, 1050.0],
                 [562.0, 1155.0],
-                [649.0, 1175.0]
+                [720.0, 1184.0],
+                [864.0, 1184.0]
             ],
             "closed": true,
-            "laps": 5,
+            "laps": 7,
             "lane_width": 30.0,
             "start_s": 0.0,
             "start_spacing": 22.0,
-            "max_speed": 100.0,
-            "min_corner_speed": 15.0,
-            "accel": 30.0,
+            "max_speed": 160.0,
+            "min_corner_speed": 40.0,
+            "accel": 80.0,
             "brake": 30.0,
             "corner_brake": 1.2,
             "turn_rate_rad": 1.2,
@@ -663,72 +663,252 @@
             "weather": {
                 "enabled": true,
                 "rain": {
-                    "chance_per_lap": 0.5,
+                    "chance_per_lap": 0.3,
                     "zone_len_s": [90.0, 180.0],
                     "slow_mul": 0.75
                 },
                 "lightning": {
-                    "chance_per_lap": 0.28,
+                    "chance_per_lap": 0.2,
                     "zone_len_s": [50.0, 100.0],
                     "strike_chance": 0.4,
                     "freeze_sec": 1.2
                 }
             },
+            "road_draw_enabled": true,
+            "road_lane_colors": [
+                [
+                    210,
+                    60,
+                    60
+                ],
+                [
+                    235,
+                    205,
+                    70
+                ],
+                [
+                    70,
+                    115,
+                    230
+                ]
+            ],
+            "road_border_color": [
+                40,
+                40,
+                46
+            ],
+            "road_border_px": 3.0,
             "items": [
                 {
-                    "s": 100.0,
-                    "lane": "A",
-                    "type": "speed",
-                    "kind": "normal",
-                    "strength": 1.45,
-                    "duration_sec": 2.2,
-                    "asset": "item_racing001"
-                },
-                {
-                    "s": 280.0,
-                    "lane": "C",
-                    "type": "slow",
-                    "kind": "normal",
-                    "strength": 0.55,
-                    "duration_sec": 2.0,
-                    "asset": "item_racing002"
-                },
-                {
-                    "s": 520.0,
+                    "s": 225.3,
                     "lane": "B",
                     "type": "speed",
                     "kind": "secret",
                     "strength": 1.45,
                     "duration_sec": 2.2,
-                    "asset": "item_racing001"
+                    "asset": "item_racing001",
+                    "consume": false
                 },
                 {
-                    "s": 780.0,
+                    "s": 225.3,
                     "lane": "A",
-                    "type": "slow",
-                    "kind": "roulette",
-                    "strength": 0.55,
-                    "duration_sec": 2.0,
-                    "asset": "item_racing002",
-                    "roulette_period_sec": 0.5
+                    "type": "speed",
+                    "kind": "secret",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
                 },
                 {
-                    "s": 1050.0,
+                    "s": 225.3,
+                    "lane": "C",
+                    "type": "speed",
+                    "kind": "secret",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 1723.15,
+                    "lane": "B",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 1723.15,
+                    "lane": "A",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 1723.15,
                     "lane": "C",
                     "type": "speed",
                     "kind": "summon",
                     "strength": 1.45,
                     "duration_sec": 2.2,
-                    "asset": "item_racing001"
+                    "asset": "item_racing001",
+                    "consume": false
                 },
                 {
-                    "s": 1400.0,
+                    "s": 1017.49,
                     "lane": "B",
-                    "type": "swap",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 1017.49,
+                    "lane": "A",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 1017.49,
+                    "lane": "C",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 2503.25,
+                    "lane": "B",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 2503.25,
+                    "lane": "A",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 2503.25,
+                    "lane": "C",
+                    "type": "speed",
+                    "kind": "summon",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 609.22,
+                    "lane": "B",
+                    "type": "slow",
                     "kind": "normal",
-                    "strength": 1.0,
+                    "strength": 0.55,
                     "duration_sec": 2.0,
-                    "asset": "item_racing003"
+                    "asset": "item_racing002",
+                    "consume": false
+                },
+                {
+                    "s": 650.23,
+                    "lane": "A",
+                    "type": "slow",
+                    "kind": "normal",
+                    "strength": 0.55,
+                    "duration_sec": 2.0,
+                    "asset": "item_racing002",
+                    "consume": false
+                },
+                {
+                    "s": 709.91,
+                    "lane": "B",
+                    "type": "slow",
+                    "kind": "normal",
+                    "strength": 0.55,
+                    "duration_sec": 2.0,
+                    "asset": "item_racing002",
+                    "consume": false
+                },
+                {
+                    "s": 758.64,
+                    "lane": "C",
+                    "type": "slow",
+                    "kind": "normal",
+                    "strength": 0.55,
+                    "duration_sec": 2.0,
+                    "asset": "item_racing002",
+                    "consume": false
+                },
+                {
+                    "s": 1349.96,
+                    "lane": "A",
+                    "type": "speed",
+                    "kind": "roulette",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false,
+                    "roulette_period_sec": 0.35
+                },
+                {
+                    "s": 2359.59,
+                    "lane": "B",
+                    "type": "speed",
+                    "kind": "secret",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 2359.59,
+                    "lane": "A",
+                    "type": "speed",
+                    "kind": "secret",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 2359.59,
+                    "lane": "C",
+                    "type": "speed",
+                    "kind": "secret",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
+                },
+                {
+                    "s": 2665.87,
+                    "lane": "B",
+                    "type": "speed",
+                    "kind": "normal",
+                    "strength": 1.45,
+                    "duration_sec": 2.2,
+                    "asset": "item_racing001",
+                    "consume": false
                 }
             ]
         }

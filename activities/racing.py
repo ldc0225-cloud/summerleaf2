@@ -39,6 +39,7 @@ from data import (
     RACING_ITEM_TYPES,
     RACING_LANE_LETTERS,
     RACING_MYSTERY_EFFECT_POOL,
+    RACING_MYSTERY_EFFECT_WEIGHTS,
     get_activity_ui,
 )
 from field_runtime import scale_ui_text_px
@@ -91,25 +92,35 @@ def _lane_offset_to_step_index(offset: float) -> int:
     return 1
 
 
-def _make_arrow_button_surf(size: int, *, pointing_up: bool) -> pygame.Surface:
-    """에셋 없을 때 쓰는 기본 화살표 버튼 (둥근 칩 + 삼각형)."""
+def _make_arrow_button_surf(
+    size: int, *, direction: str = "up", alpha: int = 128
+) -> pygame.Surface:
+    """에셋 없을 때 쓰는 기본 화살표 버튼 (둥근 칩 + 삼각형). direction: up|down|left|right."""
     s = max(24, int(size))
+    a = max(0, min(255, int(alpha)))
     surf = pygame.Surface((s, s), pygame.SRCALPHA)
     pad = max(2, s // 12)
     body = pygame.Rect(pad, pad, s - pad * 2, s - pad * 2)
     try:
-        pygame.draw.rect(surf, (48, 62, 92, 220), body, border_radius=max(4, s // 6))
-        pygame.draw.rect(surf, (160, 200, 255, 255), body, max(1, s // 20), border_radius=max(4, s // 6))
+        pygame.draw.rect(surf, (48, 62, 92, a), body, border_radius=max(4, s // 6))
+        pygame.draw.rect(
+            surf, (160, 200, 255, min(255, a + 40)), body, max(1, s // 20), border_radius=max(4, s // 6)
+        )
     except TypeError:
-        pygame.draw.rect(surf, (48, 62, 92, 220), body)
-        pygame.draw.rect(surf, (160, 200, 255, 255), body, max(1, s // 20))
+        pygame.draw.rect(surf, (48, 62, 92, a), body)
+        pygame.draw.rect(surf, (160, 200, 255, min(255, a + 40)), body, max(1, s // 20))
     cx, cy = s // 2, s // 2
     arm = max(6, s // 3)
-    if pointing_up:
-        pts = [(cx, cy - arm), (cx - arm, cy + arm // 2), (cx + arm, cy + arm // 2)]
-    else:
+    d = str(direction or "up").strip().lower()
+    if d == "down":
         pts = [(cx, cy + arm), (cx - arm, cy - arm // 2), (cx + arm, cy - arm // 2)]
-    pygame.draw.polygon(surf, (240, 248, 255, 255), pts)
+    elif d == "left":
+        pts = [(cx - arm, cy), (cx + arm // 2, cy - arm), (cx + arm // 2, cy + arm)]
+    elif d == "right":
+        pts = [(cx + arm, cy), (cx - arm // 2, cy - arm), (cx - arm // 2, cy + arm)]
+    else:
+        pts = [(cx, cy - arm), (cx - arm, cy + arm // 2), (cx + arm, cy + arm // 2)]
+    pygame.draw.polygon(surf, (240, 248, 255, min(255, a + 80)), pts)
     return surf
 
 
@@ -152,36 +163,70 @@ class RaceLaneHudButton:
 
     __slots__ = (
         "action",
-        "pointing_up",
+        "direction",
         "rect",
         "frames",
         "frame_i",
         "anim_t",
         "press_t",
         "anim_name",
+        "_fallback_size",
+        "_fallback_alpha",
     )
 
-    def __init__(self, action: str, *, pointing_up: bool, anim_name: str = ""):
+    def __init__(self, action: str, *, direction: str = "up", anim_name: str = ""):
         self.action = str(action)
-        self.pointing_up = bool(pointing_up)
+        self.direction = str(direction or "up").strip().lower() or "up"
         self.rect = pygame.Rect(0, 0, 32, 32)
         self.anim_name = str(anim_name or "")
         self.frames: List[pygame.Surface] = []
         self.frame_i = 0
         self.anim_t = 0.0
         self.press_t = 0.0
+        self._fallback_size = 0
+        self._fallback_alpha = 128
         self.reload_frames()
+
+    @property
+    def pointing_up(self) -> bool:
+        return self.direction == "up"
+
+    def set_direction(self, direction: str, *, anim_name: Optional[str] = None) -> None:
+        d = str(direction or "up").strip().lower() or "up"
+        changed = d != self.direction
+        self.direction = d
+        if anim_name is not None:
+            name = str(anim_name or "")
+            if name != self.anim_name:
+                self.anim_name = name
+                self.reload_frames()
+                return
+        if changed and self._fallback_size > 0:
+            # 폴백 화살표 방향 갱신 유도
+            self.frames = []
+            self._fallback_size = 0
 
     def reload_frames(self) -> None:
         loaded = _load_racing_hud_anim_frames(self.anim_name)
         self.frames = list(loaded) if loaded else []
         self.frame_i = 0
         self.anim_t = 0.0
+        self._fallback_size = 0
 
-    def ensure_fallback(self, size: int) -> None:
-        if self.frames:
+    def ensure_fallback(self, size: int, *, alpha: int = 128) -> None:
+        a = max(0, min(255, int(alpha)))
+        # 에셋 프레임이 있으면 폴백 불필요
+        if self.frames and self._fallback_size <= 0:
             return
-        self.frames = [_make_arrow_button_surf(size, pointing_up=self.pointing_up)]
+        if (
+            self.frames
+            and self._fallback_size == int(size)
+            and self._fallback_alpha == a
+        ):
+            return
+        self.frames = [_make_arrow_button_surf(size, direction=self.direction, alpha=a)]
+        self._fallback_size = int(size)
+        self._fallback_alpha = a
 
     def layout(self, rect: pygame.Rect) -> None:
         self.rect = pygame.Rect(rect)
@@ -210,8 +255,8 @@ class RaceLaneHudButton:
             self.anim_t -= step
             self.frame_i = (self.frame_i + 1) % len(self.frames)
 
-    def current_surf(self, draw_size: int) -> pygame.Surface:
-        self.ensure_fallback(draw_size)
+    def current_surf(self, draw_size: int, *, alpha: int = 128) -> pygame.Surface:
+        self.ensure_fallback(draw_size, alpha=alpha)
         img = self.frames[int(self.frame_i) % len(self.frames)]
         try:
             iw, ih = img.get_width(), img.get_height()
@@ -224,6 +269,14 @@ class RaceLaneHudButton:
                 out = pygame.transform.smoothscale(img, (draw_size, draw_size))
             except Exception:
                 out = pygame.transform.scale(img, (draw_size, draw_size))
+        # 에셋 PNG 도 동일 반투명 적용
+        a = max(0, min(255, int(alpha)))
+        if a < 255 and self._fallback_size <= 0:
+            try:
+                out = out.copy()
+                out.set_alpha(a)
+            except Exception:
+                pass
         if self.press_t > 0.0:
             try:
                 dim = out.copy()
@@ -233,10 +286,10 @@ class RaceLaneHudButton:
                 pass
         return out
 
-    def draw(self, surf: pygame.Surface, draw_size: int) -> None:
+    def draw(self, surf: pygame.Surface, draw_size: int, *, alpha: int = 128) -> None:
         if surf is None:
             return
-        img = self.current_surf(draw_size)
+        img = self.current_surf(draw_size, alpha=alpha)
         try:
             dx = self.rect.centerx - img.get_width() // 2
             dy = self.rect.centery - img.get_height() // 2
@@ -314,6 +367,29 @@ def _item_type_info(type_id: str) -> dict:
     return base
 
 
+def _item_consume_flag(raw) -> bool:
+    """
+    획득 후 아이템 제거 여부.
+    consume / despawn / remove_on_pickup — 기본 False(안 없어짐).
+    """
+    if not isinstance(raw, dict):
+        return False
+    for key in ("consume", "despawn", "remove_on_pickup", "despawn_on_pickup"):
+        if key not in raw or raw.get(key) is None:
+            continue
+        v = raw.get(key)
+        if isinstance(v, bool):
+            return bool(v)
+        if isinstance(v, (int, float)):
+            return int(v) != 0
+        s = str(v).strip().lower()
+        if s in ("1", "true", "yes", "on", "y"):
+            return True
+        if s in ("0", "false", "no", "off", "n", ""):
+            return False
+    return False
+
+
 class RaceItemPoint:
     """경로 위 아이템/발판 1개 (s+lane). kind 에 따라 동작이 다름."""
 
@@ -327,6 +403,9 @@ class RaceItemPoint:
         "duration_sec",
         "asset",
         "taken",
+        "consume",
+        "touching",
+        "respawn_t",
         "wx",
         "wy",
         "surf",
@@ -369,6 +448,10 @@ class RaceItemPoint:
             self.duration_sec = 2.0
         self.asset = str(raw.get("asset") or info.get("asset") or "item_racing001").strip()
         self.taken = False
+        # consume=True 이면 획득 후 영구 제거. 기본 False → 숨겼다가 respawn.
+        self.consume = _item_consume_flag(raw)
+        self.touching: set = set()
+        self.respawn_t = 0.0
         self.wx = 0.0
         self.wy = 0.0
         try:
@@ -431,14 +514,19 @@ class RaceItemPoint:
         self.wy = float(y) + ny * self.lane * lw
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "s": round(float(self.s), 2),
             "lane": self.lane_letter,
             "type": self.type_id,
+            "kind": self.kind,
             "strength": float(self.strength),
             "duration_sec": float(self.duration_sec),
             "asset": self.asset,
+            "consume": bool(self.consume),
         }
+        if self.kind == "roulette":
+            d["roulette_period_sec"] = float(self.roulette_period)
+        return d
 
 
 def _cfg(key: str, default=None):
@@ -603,6 +691,7 @@ class RacerState:
         "slipstream_mul",
         "bump_slow_t",
         "weather_slow_mul",
+        "afterburner_t",
     )
 
     def __init__(self, char_id: str, *, is_player: bool, s0: float, lane0: float, hud_role: str = ""):
@@ -631,6 +720,7 @@ class RacerState:
         self.slipstream_mul = 1.0
         self.bump_slow_t = 0.0
         self.weather_slow_mul = 1.0
+        self.afterburner_t = 0.0
 
 
 class RacingActivity(BaseFieldActivity):
@@ -679,7 +769,14 @@ class RacingActivity(BaseFieldActivity):
         self._minimap_toggle_rect: Optional[pygame.Rect] = None
         self._options_open = False
         self._camera_mode = "side"  # side | back
-        self._minimap_user_enabled = True  # 옵션 팝업 토글 (세션 단위)
+        self._minimap_user_enabled = True  # 옵션 팝업 토글 (세이브 연동)
+        # Mode7 해상도: high|medium|low — save_data.racing_mode7_quality
+        self._mode7_quality = "high"
+        self.mode7_quality_scale: Optional[float] = None  # main.py → mode7_cfg["quality_scale"]
+        self._mode7_fallback_xy: Optional[Tuple[int, int]] = None
+        self._flow = None
+        self._quality_popup_rects: List[Tuple[pygame.Rect, str]] = []
+        self._camera_quality_rect: Optional[pygame.Rect] = None
         self.mode7_player_x_frac: Optional[float] = None
         # main.py 가 읽는 Mode7 / 틸트 오버라이드
         self.field_rotate3d_target: Optional[float] = None
@@ -693,16 +790,19 @@ class RacingActivity(BaseFieldActivity):
         self._race_mode = "record"
         self._winner: Optional[RacerState] = None
         self._objs_list = None
-        # 레인 화살표 HUD (왼쪽 · 자동생성 또는 애니 세트)
+        # 레인 화살표 HUD (캐릭터 기준 · 카메라 옆=상하 / 뒤=좌우)
         self._lane_btn_up = RaceLaneHudButton(
-            "lane_up", pointing_up=True, anim_name=str(_cfg("lane_btn_up_anim", "lane_up") or "lane_up")
+            "lane_neg",
+            direction="up",
+            anim_name=str(_cfg("lane_btn_up_anim", "lane_up") or "lane_up"),
         )
         self._lane_btn_down = RaceLaneHudButton(
-            "lane_down",
-            pointing_up=False,
+            "lane_pos",
+            direction="down",
             anim_name=str(_cfg("lane_btn_down_anim", "lane_down") or "lane_down"),
         )
         self._lane_btns: List[RaceLaneHudButton] = [self._lane_btn_up, self._lane_btn_down]
+        self._lane_anchor_xy: Optional[Tuple[float, float]] = None
         # 경로 기반 도로 자동 그리기 (bg에 직접 덧그림 → Mode7·미니맵에 그대로 반영)
         self._bg_ref: Optional[pygame.Surface] = None
         self._road_painted = False
@@ -713,6 +813,7 @@ class RacingActivity(BaseFieldActivity):
         # 날씨·청정·시크릿 룰렛·소환 번쩍
         self._clean_zones: List[Tuple[float, float]] = []
         self._weather_zones: List[dict] = []
+        self._weather_fx: List[dict] = []
         self._spawn_flashes: List[dict] = []
         self._secret_spin: Optional[dict] = None
         self._weather_msg = ""
@@ -727,6 +828,136 @@ class RacingActivity(BaseFieldActivity):
             pass
         return _cfg(key, default)
 
+    # --- 레이스 옵션 저장 (해상도·미니맵·카메라) -----------------------------
+
+    _MODE7_QUALITY_ORDER = ("high", "medium", "low")
+    _MODE7_QUALITY_LABELS = {
+        "high": "높음",
+        "medium": "중간",
+        "low": "낮음",
+    }
+
+    def _normalize_mode7_quality(self, raw) -> str:
+        key = str(raw or "").strip().lower()
+        aliases = {
+            "hi": "high",
+            "high": "high",
+            "높음": "high",
+            "mid": "medium",
+            "medium": "medium",
+            "중간": "medium",
+            "lo": "low",
+            "low": "low",
+            "낮음": "low",
+        }
+        return aliases.get(key, "high")
+
+    def _sync_mode7_quality_scale(self) -> None:
+        """_mode7_quality → mode7_quality_scale / fallback 스텝 (main.py 가 읽음)."""
+        q = self._normalize_mode7_quality(getattr(self, "_mode7_quality", "high"))
+        self._mode7_quality = q
+        scales = self._p("mode7_quality_scales") or {}
+        defaults = {"high": 1.0, "medium": 0.75, "low": 0.5}
+        try:
+            sc = float((scales.get(q) if isinstance(scales, dict) else None) or defaults[q])
+        except (TypeError, ValueError, KeyError):
+            sc = float(defaults.get(q, 1.0))
+        self.mode7_quality_scale = max(0.25, min(1.0, sc))
+        steps = self._p("mode7_quality_fallback_steps") or {}
+        step_defaults = {"high": (2, 1), "medium": (2, 2), "low": (3, 2)}
+        raw = steps.get(q) if isinstance(steps, dict) else None
+        try:
+            if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                self._mode7_fallback_xy = (max(1, int(raw[0])), max(1, int(raw[1])))
+            else:
+                self._mode7_fallback_xy = step_defaults.get(q, (2, 1))
+        except (TypeError, ValueError):
+            self._mode7_fallback_xy = step_defaults.get(q, (2, 1))
+
+    def _mode7_quality_label(self) -> str:
+        return self._MODE7_QUALITY_LABELS.get(
+            self._normalize_mode7_quality(self._mode7_quality), "높음"
+        )
+
+    def _cycle_mode7_quality(self) -> None:
+        q = self._normalize_mode7_quality(self._mode7_quality)
+        order = self._MODE7_QUALITY_ORDER
+        try:
+            ix = order.index(q)
+        except ValueError:
+            ix = 0
+        self._mode7_quality = order[(ix + 1) % len(order)]
+        self._sync_mode7_quality_scale()
+        self._persist_racing_prefs()
+
+    def _load_racing_prefs(self) -> None:
+        sd = self._save_data if isinstance(self._save_data, dict) else {}
+        raw_q = sd.get("racing_mode7_quality", self._p("mode7_quality", "high"))
+        self._mode7_quality = self._normalize_mode7_quality(raw_q)
+        if "racing_minimap_enabled" in sd:
+            self._minimap_user_enabled = bool(sd.get("racing_minimap_enabled"))
+        else:
+            self._minimap_user_enabled = bool(self._p("minimap_enabled", True))
+        cam = str(sd.get("racing_camera_mode") or "side").strip().lower()
+        self._camera_mode = "back" if cam == "back" else "side"
+        self._sync_mode7_quality_scale()
+
+    def _persist_racing_prefs(self) -> None:
+        """옵션을 save_data 에 기록하고 디스크에 즉시 저장(기존 세이브와 병합)."""
+        sd = self._save_data
+        if not isinstance(sd, dict):
+            return
+        q = self._normalize_mode7_quality(self._mode7_quality)
+        mm = bool(self._minimap_user_enabled)
+        cam = "back" if str(self._camera_mode or "") == "back" else "side"
+        sd["racing_mode7_quality"] = q
+        sd["racing_minimap_enabled"] = mm
+        sd["racing_camera_mode"] = cam
+        flow = self._flow
+        path = getattr(flow, "save_path", None) if flow is not None else None
+        if flow is not None:
+            try:
+                fsd = getattr(flow, "save_data", None)
+                if isinstance(fsd, dict):
+                    fsd["racing_mode7_quality"] = q
+                    fsd["racing_minimap_enabled"] = mm
+                    fsd["racing_camera_mode"] = cam
+                    if fsd is not sd:
+                        self._save_data = fsd
+                        sd = fsd
+            except Exception:
+                pass
+        if not path:
+            try:
+                path = str(CONFIG.get("SAVE_FILE", "save_data.json") or "save_data.json")
+            except Exception:
+                path = "save_data.json"
+        try:
+            import json
+            import os
+
+            out = None
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        disk = json.load(f)
+                    if isinstance(disk, dict) and disk:
+                        disk["racing_mode7_quality"] = q
+                        disk["racing_minimap_enabled"] = mm
+                        disk["racing_camera_mode"] = cam
+                        out = disk
+                except Exception:
+                    out = None
+            if out is None:
+                # 디스크에 기존 세이브가 없을 때만 메모리 dict 저장(빈 dict 덮어쓰기 방지)
+                if "current_map" not in sd:
+                    return
+                out = dict(sd)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"[racing] prefs save fail: {e}")
+
     # --- lifecycle ---------------------------------------------------------
 
     def begin(self, player, **params) -> bool:
@@ -740,8 +971,14 @@ class RacingActivity(BaseFieldActivity):
         wd = params.get("world_data")
         self._world_data = wd if isinstance(wd, dict) else {}
         self._minimap_bg = None  # 맵이 바뀌었을 수 있으니 미니맵 캐시 초기화
-        save = params.get("save_data") or {}
-        self._save_data = dict(save) if isinstance(save, dict) else {}
+        save = params.get("save_data")
+        # flow.save_data 원본을 유지해야 옵션 저장이 세이브 파일에 반영된다.
+        if isinstance(save, dict):
+            self._save_data = save
+        else:
+            self._save_data = {}
+        self._flow = params.get("flow")
+        self._load_racing_prefs()
 
         pts_raw = self.field.get("path") or _cfg("path") or []
         pts: List[Tuple[float, float]] = []
@@ -791,8 +1028,8 @@ class RacingActivity(BaseFieldActivity):
         self._option_btn_rect = None
         self._race_quit_confirm = False
         self._race_confirm_rects = []
-        self._camera_mode = "side"
-        self._minimap_user_enabled = bool(self._p("minimap_enabled", True))
+        # _camera_mode / 미니맵 / Mode7 해상도는 위에서 _load_racing_prefs 로 복원됨
+        self._sync_mode7_quality_scale()
         self.field_tilt_target = 1.0
         try:
             player.stop_moving()
@@ -1116,6 +1353,7 @@ class RacingActivity(BaseFieldActivity):
                 except (TypeError, ValueError):
                     pass
         self._weather_zones = []
+        self._weather_fx = []
         self._spawn_flashes = []
         self._secret_spin = None
         self._weather_msg = ""
@@ -1158,8 +1396,11 @@ class RacingActivity(BaseFieldActivity):
                         "s0": float(s0),
                         "s1": float(s1),
                         "slow_mul": float(block.get("slow_mul", 0.72) or 0.72),
-                        "strike_chance": float(block.get("strike_chance", 0.35) or 0.35),
+                        # 진입 시 1회 명중 확률 (구간 내 지속 타격 아님)
+                        "strike_chance": float(block.get("strike_chance", 1.0) or 1.0),
                         "freeze_sec": float(block.get("freeze_sec", 1.15) or 1.15),
+                        "struck_ids": set(),
+                        "flash_t": 0.0,
                     }
                 )
 
@@ -1216,7 +1457,6 @@ class RacingActivity(BaseFieldActivity):
         except (TypeError, ValueError):
             n = 6
         n = max(0, min(40, n))
-        types = list(RACING_MYSTERY_EFFECT_POOL) or ["speed", "slow", "swap"]
         lanes = ["A", "B", "C"]
         out = []
         L = max(1.0, float(path.length))
@@ -1230,7 +1470,7 @@ class RacingActivity(BaseFieldActivity):
                 {
                     "s": float(s),
                     "lane": random.choice(lanes),
-                    "type": random.choice(types),
+                    "type": self._pick_mystery_effect(),
                     "kind": random.choices(
                         ["normal", "secret", "roulette", "summon"],
                         weights=[55, 15, 18, 12],
@@ -1241,8 +1481,28 @@ class RacingActivity(BaseFieldActivity):
         return out
 
     def _pick_mystery_effect(self) -> str:
+        """
+        시크릿·소환 결과 추첨.
+        기본 아이템 가중치 1.0, 위치 교환(swap)은 그 30%(0.3).
+        """
         pool = [str(x) for x in (RACING_MYSTERY_EFFECT_POOL or ("speed", "slow", "swap"))]
-        return random.choice(pool) if pool else "speed"
+        if not pool:
+            return "speed"
+        wmap = RACING_MYSTERY_EFFECT_WEIGHTS if isinstance(RACING_MYSTERY_EFFECT_WEIGHTS, dict) else {}
+        # 맵/필드에서 덮어쓸 수 있게
+        override = self._p("mystery_effect_weights")
+        if isinstance(override, dict) and override:
+            wmap = override
+        weights = []
+        for tid in pool:
+            try:
+                w = float(wmap.get(tid, 0.3 if tid == "swap" else 1.0) or 0.0)
+            except (TypeError, ValueError):
+                w = 0.3 if tid == "swap" else 1.0
+            weights.append(max(0.0, w))
+        if sum(weights) <= 1e-9:
+            return pool[0]
+        return random.choices(pool, weights=weights, k=1)[0]
 
     def _apply_effect_to_racer(self, r: RacerState, type_id: str, *, strength=None, duration=None) -> None:
         """type_id 기준 효과 적용 (speed/slow/swap/freeze)."""
@@ -1280,6 +1540,13 @@ class RacingActivity(BaseFieldActivity):
         r.buff_label = str(info.get("label") or tid)
         if abs(st - 1.0) > 1e-6:
             r.speed = max(0.0, float(r.speed) * st)
+        # 속도 상승(>1) 이면 짧은 에프터버너 FX
+        if st > 1.01:
+            try:
+                ab = float(self._p("speed_afterburner_sec", 1.1) or 1.1)
+            except (TypeError, ValueError):
+                ab = 1.1
+            r.afterburner_t = max(float(getattr(r, "afterburner_t", 0.0) or 0.0), max(0.35, ab))
         if r.is_player:
             self._item_msg = r.buff_label
             self._item_msg_t = 1.6
@@ -1312,8 +1579,10 @@ class RacingActivity(BaseFieldActivity):
             self._add_spawn_flash(who.pos[0], who.pos[1])
 
     def _start_secret_spin(self, r: RacerState) -> None:
-        """시크릿 상자 — 마리오카트식 아이콘 룰렛 후 효과 적용."""
+        """시크릿 상자 — 룰렛 UI만 돌리고, 확정되는 순간에 효과 적용(그 전엔 정상 플레이)."""
         if r is None:
+            return
+        if self._secret_spin and not self._secret_spin.get("applied"):
             return
         final = self._pick_mystery_effect()
         pool = list(RACING_MYSTERY_EFFECT_POOL) or ["speed", "slow", "swap"]
@@ -1321,28 +1590,50 @@ class RacingActivity(BaseFieldActivity):
             dur = float(self._p("secret_spin_sec", 1.35) or 1.35)
         except (TypeError, ValueError):
             dur = 1.35
+        dur = max(0.7, float(dur))
+        hold = min(0.55, max(0.28, dur * 0.30))
+        spin = max(0.4, dur - hold)
         self._secret_spin = {
             "racer": r,
             "pool": pool,
             "t": 0.0,
-            "dur": max(0.6, dur),
+            "spin_sec": spin,
+            "hold_sec": hold,
             "final": final,
+            "phase": "spin",  # spin → hold(확정+효과) → done
             "applied": False,
         }
         if r.is_player:
             self._item_msg = "??? 상자!"
-            self._item_msg_t = dur + 0.3
+            self._item_msg_t = spin + hold + 0.4
 
     def _tick_secret_spin(self, dt: float) -> None:
         sp = self._secret_spin
-        if not sp or sp.get("applied"):
+        if not sp:
             return
-        sp["t"] = float(sp.get("t", 0.0)) + max(0.0, float(dt))
-        if float(sp["t"]) >= float(sp.get("dur", 1.0)):
-            r = sp.get("racer")
-            if r is not None and not sp.get("applied"):
-                self._apply_effect_to_racer(r, str(sp.get("final") or "speed"))
-            sp["applied"] = True
+        dt = max(0.0, float(dt))
+        sp["t"] = float(sp.get("t", 0.0)) + dt
+        phase = str(sp.get("phase") or "spin")
+        if phase == "spin":
+            # 도는 동안: 효과 없음 · 레이서는 정상 주행
+            if float(sp["t"]) >= float(sp.get("spin_sec", 1.0)):
+                sp["phase"] = "hold"
+                sp["t"] = 0.0
+                # 룰렛이 멈추고 아이템이 확정되는 순간 → 효과 적용
+                if not sp.get("applied"):
+                    r = sp.get("racer")
+                    if r is not None:
+                        self._apply_effect_to_racer(r, str(sp.get("final") or "speed"))
+                    sp["applied"] = True
+            return
+        if phase == "hold":
+            # 확정 아이콘 홀드 (효과는 이미 적용됨)
+            if float(sp["t"]) >= float(sp.get("hold_sec", 0.35)):
+                sp["phase"] = "done"
+                sp["t"] = 0.0
+            return
+        # done: 결과 UI 잠깐 남기고 닫기
+        if float(sp["t"]) >= 0.35:
             self._secret_spin = None
 
     def _summon_random_item(self, *, avoid_s: Optional[float] = None) -> None:
@@ -1359,7 +1650,13 @@ class RacingActivity(BaseFieldActivity):
                 continue
             lane = random.choice(["A", "B", "C"])
             tid = self._pick_mystery_effect()
-            row = {"s": float(s), "lane": lane, "type": tid, "kind": "normal"}
+            row = {
+                "s": float(s),
+                "lane": lane,
+                "type": tid,
+                "kind": "normal",
+                "consume": True,  # 소환 아이템은 1회성
+            }
             try:
                 it = RaceItemPoint(row, path, float(self._p("lane_width", 26.0)))
                 self._items.append(it)
@@ -1391,28 +1688,70 @@ class RacingActivity(BaseFieldActivity):
                 out.append(f)
         self._spawn_flashes = out
 
-    def _on_item_pickup(self, r: RacerState, it: RaceItemPoint) -> None:
-        """아이템/발판 종류별 처리."""
-        kind = str(getattr(it, "kind", "normal") or "normal")
-        if kind == "secret":
-            it.taken = True
-            self._start_secret_spin(r)
-            return
-        if kind == "summon":
-            it.taken = True
-            self._summon_random_item(avoid_s=float(it.s))
-            return
-        if kind == "roulette":
-            it.taken = True
-            self._apply_effect_to_racer(r, str(getattr(it, "inner_type_id", "speed") or "speed"))
+    def _mark_item_consumed(self, it: RaceItemPoint) -> None:
+        """
+        획득 후 처리.
+        - consume=True: 영구 제거
+        - consume=False: 잠깐 숨겼다가 item_respawn_sec(기본 3초) 후 재등장
+        """
+        if it is None:
             return
         it.taken = True
+        it.touching = set()
+        if bool(getattr(it, "consume", False)):
+            it.respawn_t = 0.0
+            return
+        try:
+            sec = float(self._p("item_respawn_sec", 3.0) or 3.0)
+        except (TypeError, ValueError):
+            sec = 3.0
+        it.respawn_t = max(0.1, sec)
+
+    def _tick_item_respawns(self, dt: float) -> None:
+        """고정 아이템 숨김 타이머 → 만료 시 재등장."""
+        dt = max(0.0, float(dt))
+        if dt <= 0.0:
+            return
+        for it in self._items:
+            if it is None:
+                continue
+            if bool(getattr(it, "consume", False)):
+                continue
+            t = float(getattr(it, "respawn_t", 0.0) or 0.0)
+            if t <= 0.0:
+                continue
+            t -= dt
+            if t <= 0.0:
+                it.respawn_t = 0.0
+                it.taken = False
+                it.touching = set()
+            else:
+                it.respawn_t = t
+
+    def _on_item_pickup(self, r: RacerState, it: RaceItemPoint) -> None:
+        """아이템/발판 종류별 처리. consume 기본 False → 3초 후 재등장."""
+        kind = str(getattr(it, "kind", "normal") or "normal")
+        if kind == "secret":
+            if self._secret_spin and not self._secret_spin.get("applied"):
+                return
+            self._start_secret_spin(r)
+            self._mark_item_consumed(it)
+            return
+        if kind == "summon":
+            self._summon_random_item(avoid_s=float(it.s))
+            self._mark_item_consumed(it)
+            return
+        if kind == "roulette":
+            self._apply_effect_to_racer(r, str(getattr(it, "inner_type_id", "speed") or "speed"))
+            self._mark_item_consumed(it)
+            return
         self._apply_effect_to_racer(
             r,
             str(it.type_id),
             strength=float(it.strength),
             duration=float(it.duration_sec),
         )
+        self._mark_item_consumed(it)
 
     def _tick_item_platforms(self, dt: float) -> None:
         path = self._path
@@ -1429,6 +1768,11 @@ class RacingActivity(BaseFieldActivity):
     def _tick_weather(self, dt: float) -> None:
         if self.state != ST_RACE:
             return
+        dt = max(0.0, float(dt))
+        for z in self._weather_zones:
+            ft = float(z.get("flash_t", 0.0) or 0.0)
+            if ft > 0.0:
+                z["flash_t"] = max(0.0, ft - dt)
         for r in self._racers:
             if r.finished:
                 r.weather_slow_mul = 1.0
@@ -1441,22 +1785,89 @@ class RacingActivity(BaseFieldActivity):
                     r.weather_slow_mul = 0.72
             else:
                 r.weather_slow_mul = 1.0
+            # 번개: 구역 진입 시 딱 1회 꽝! (구역 체류 중 연속 타격 없음)
             lz = self._racer_in_weather(r, "lightning")
-            if lz and float(r.freeze_t or 0.0) <= 0.0:
-                try:
-                    ch = float(lz.get("strike_chance", 0.35) or 0.35)
-                except (TypeError, ValueError):
-                    ch = 0.35
-                if random.random() < ch * max(0.0, float(dt)) * 2.5:
-                    try:
-                        fs = float(lz.get("freeze_sec", 1.15) or 1.15)
-                    except (TypeError, ValueError):
-                        fs = 1.15
-                    r.freeze_t = max(float(r.freeze_t or 0.0), fs)
-                    r.speed = 0.0
-                    if r.is_player:
-                        self._weather_msg = "번개!"
-                        self._weather_msg_t = 1.2
+            rid = id(r)
+            if lz is None:
+                continue
+            struck = lz.setdefault("struck_ids", set())
+            if rid in struck:
+                continue
+            if float(r.freeze_t or 0.0) > 0.0:
+                continue
+            try:
+                ch = float(lz.get("strike_chance", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                ch = 1.0
+            struck.add(rid)  # 진입 판정은 1회만 (빗나가도 재타격 없음)
+            if random.random() > max(0.0, min(1.0, ch)):
+                continue
+            try:
+                fs = float(lz.get("freeze_sec", 1.15) or 1.15)
+            except (TypeError, ValueError):
+                fs = 1.15
+            r.freeze_t = max(float(r.freeze_t or 0.0), fs)
+            r.speed = 0.0
+            lz["flash_t"] = max(float(lz.get("flash_t", 0.0) or 0.0), 0.65)
+            self._add_weather_strike_fx(r, lz)
+            if r.is_player:
+                self._weather_msg = "번개!"
+                self._weather_msg_t = 1.2
+
+    def _add_weather_strike_fx(self, r: RacerState, zone: dict) -> None:
+        """번개 타격 FX (애니 세트 있으면 사용, 없으면 구역 빨간 깜빡으로 대체)."""
+        if r is None:
+            return
+        fx = {
+            "kind": "lightning",
+            "t": 0.7,
+            "wx": float(r.pos[0]),
+            "wy": float(r.pos[1]),
+            "frames": self._weather_anim_frames("lightning"),
+            "frame_i": 0,
+            "anim_t": 0.0,
+        }
+        self._weather_fx.append(fx)
+
+    def _weather_anim_frames(self, kind: str) -> List[pygame.Surface]:
+        """assets/images/ui/racing/<anim>/ 또는 weather_<kind> 시퀀스. 없으면 []."""
+        kind = str(kind or "").strip().lower()
+        names = []
+        if kind == "lightning":
+            names = [
+                str(self._p("weather_lightning_anim", "lightning") or "lightning"),
+                "weather_lightning",
+            ]
+        elif kind == "rain":
+            names = [
+                str(self._p("weather_rain_anim", "rain") or "rain"),
+                "weather_rain",
+            ]
+        for name in names:
+            frames = _load_racing_hud_anim_frames(name)
+            if frames:
+                return list(frames)
+        return []
+
+    def _tick_weather_fx(self, dt: float) -> None:
+        if not self._weather_fx:
+            return
+        dt = max(0.0, float(dt))
+        out = []
+        for fx in self._weather_fx:
+            t = float(fx.get("t", 0.0)) - dt
+            if t <= 0.0:
+                continue
+            fx["t"] = t
+            frames = fx.get("frames") or []
+            if len(frames) > 1:
+                fx["anim_t"] = float(fx.get("anim_t", 0.0)) + dt
+                step = 1.0 / 12.0
+                while float(fx["anim_t"]) >= step:
+                    fx["anim_t"] = float(fx["anim_t"]) - step
+                    fx["frame_i"] = (int(fx.get("frame_i", 0)) + 1) % len(frames)
+            out.append(fx)
+        self._weather_fx = out
 
     def _tick_slipstream_and_bumps(self, dt: float) -> None:
         if self.state != ST_RACE:
@@ -1539,15 +1950,21 @@ class RacingActivity(BaseFieldActivity):
         if self._weather_msg_t > 0.0:
             self._weather_msg_t = max(0.0, self._weather_msg_t - max(0.0, float(dt)))
         self._tick_item_platforms(dt)
+        self._tick_item_respawns(dt)
         self._tick_weather(dt)
         self._tick_slipstream_and_bumps(dt)
         self._tick_secret_spin(dt)
         self._tick_spawn_flashes(dt)
+        self._tick_weather_fx(dt)
 
     def _apply_item_to_racer(self, r: RacerState, it: RaceItemPoint) -> None:
         self._on_item_pickup(r, it)
 
     def _tick_item_pickups(self) -> None:
+        """
+        아이템 획득. 반경 진입 순간(상승 에지)에만 발동.
+        consume=False(기본)면 3초 숨김 후 재등장.
+        """
         path = self._path
         if path is None or self.state != ST_RACE:
             return
@@ -1558,19 +1975,26 @@ class RacingActivity(BaseFieldActivity):
         rad2 = max(4.0, rad) ** 2
         for it in self._items:
             if it.taken:
+                it.touching = set()
                 continue
+            now_touch: set = set()
             for r in self._racers:
                 if r.finished:
                     continue
-                # 같은 차선 근처 + 근접
                 if abs(float(r.lane) - float(it.lane)) > 0.55:
                     continue
                 dx = float(r.pos[0]) - float(it.wx)
                 dy = float(r.pos[1]) - float(it.wy)
-                if dx * dx + dy * dy <= rad2:
-                    it.taken = True
-                    self._apply_item_to_racer(r, it)
+                if dx * dx + dy * dy > rad2:
+                    continue
+                rid = id(r)
+                now_touch.add(rid)
+                if rid in getattr(it, "touching", set()):
+                    continue  # 이미 밟고 있음 → 재발동 없음
+                self._apply_item_to_racer(r, it)
+                if it.taken:
                     break
+            it.touching = set() if it.taken else now_touch
 
     def _spawn_temp_npcs(self) -> None:
         """레이스 NPC 엔티티를 필드 npcs 리스트에 붙인다 (메인 렌더 + 위치 동기화)."""
@@ -1710,11 +2134,11 @@ class RacingActivity(BaseFieldActivity):
             r.freeze_t = max(0.0, float(r.freeze_t) - dt)
             r.speed = 0.0
             return
-        sp = self._secret_spin
-        if sp and not sp.get("applied") and sp.get("racer") is r:
-            r.speed = max(0.0, float(r.speed) * 0.25)
+        # 시크릿 룰렛 중에도 정상 주행 — 효과는 확정 시점에만 적용
         if float(r.bump_slow_t or 0.0) > 0.0:
             r.bump_slow_t = max(0.0, float(r.bump_slow_t) - dt)
+        if float(getattr(r, "afterburner_t", 0.0) or 0.0) > 0.0:
+            r.afterburner_t = max(0.0, float(r.afterburner_t) - dt)
         # 버프 틱
         if r.buff_t > 0.0:
             r.buff_t = max(0.0, float(r.buff_t) - dt)
@@ -1915,8 +2339,12 @@ class RacingActivity(BaseFieldActivity):
                         if act == "camera":
                             self._camera_mode = "back" if str(self._camera_mode or "side") == "side" else "side"
                             self._cam_heading = None
+                            self._persist_racing_prefs()
                         elif act == "minimap":
                             self._minimap_user_enabled = not bool(self._minimap_user_enabled)
+                            self._persist_racing_prefs()
+                        elif act == "quality":
+                            self._cycle_mode7_quality()
                         elif act == "stop":
                             self._race_options_open = False
                             self._race_quit_confirm = True
@@ -1954,12 +2382,18 @@ class RacingActivity(BaseFieldActivity):
                     return True
                 self._quit_session()
                 return True
-        # 데스크톱: 위/아래 키로도 한 칸 이동
+        # 데스크톱: 카메라 모드에 맞는 키로 한 칸 이동 (옆=상하, 뒤=좌우 · 둘 다 허용)
         if self.state in (ST_RACE, ST_COUNTDOWN):
             if key in (pygame.K_UP, pygame.K_w):
                 self._nudge_player_lane(-1)
                 return True
             if key in (pygame.K_DOWN, pygame.K_s):
+                self._nudge_player_lane(1)
+                return True
+            if key in (pygame.K_LEFT, pygame.K_a):
+                self._nudge_player_lane(-1)
+                return True
+            if key in (pygame.K_RIGHT, pygame.K_d):
                 self._nudge_player_lane(1)
                 return True
         return False
@@ -1971,41 +2405,106 @@ class RacingActivity(BaseFieldActivity):
             sz320 = 40.0
         return max(28, int(round(scale_ui_text_px(sz320, screen_w=screen_w))))
 
+    def _lane_btn_alpha(self) -> int:
+        try:
+            a = float(self._p("lane_btn_alpha", 128) or 128)
+        except (TypeError, ValueError):
+            a = 128.0
+        return max(0, min(255, int(round(a))))
+
+    def _sync_lane_btn_appearance(self) -> None:
+        """카메라 모드에 맞춰 화살표 방향·애니 이름 동기화."""
+        cam_back = str(getattr(self, "_camera_mode", "side") or "side").strip().lower() == "back"
+        if cam_back:
+            up_name = str(self._p("lane_btn_left_anim", "lane_left") or "lane_left")
+            down_name = str(self._p("lane_btn_right_anim", "lane_right") or "lane_right")
+            self._lane_btn_up.set_direction("left", anim_name=up_name)
+            self._lane_btn_down.set_direction("right", anim_name=down_name)
+        else:
+            up_name = str(self._p("lane_btn_up_anim", "lane_up") or "lane_up")
+            down_name = str(self._p("lane_btn_down_anim", "lane_down") or "lane_down")
+            self._lane_btn_up.set_direction("up", anim_name=up_name)
+            self._lane_btn_down.set_direction("down", anim_name=down_name)
+
+    def _resolve_lane_anchor_xy(self, w: int, h: int) -> Tuple[float, float]:
+        """플레이어 발 화면좌표. 없으면 카메라 모드별 폴백."""
+        ax = getattr(self, "_lane_anchor_xy", None)
+        if ax is not None:
+            try:
+                return float(ax[0]), float(ax[1])
+            except (TypeError, ValueError, IndexError):
+                pass
+        cam_back = str(getattr(self, "_camera_mode", "side") or "side").strip().lower() == "back"
+        if cam_back:
+            return float(w) * 0.5, float(h) * 0.78
+        # 옆 시점: 화면상 좌→우 주행 · 캐릭터는 보통 왼쪽
+        try:
+            xf = float(self._p("player_screen_x_frac", 0.22) or 0.22)
+        except (TypeError, ValueError):
+            xf = 0.22
+        return float(w) * max(0.08, min(0.9, xf)), float(h) * 0.78
+
     def _layout_lane_buttons(self, w: int, h: int) -> None:
-        """화면 왼쪽: 위 화살표, 그 아래 아래 화살표."""
+        """
+        카메라 옆: 캐릭터 바로 뒤(진행 반대쪽)에 ▲▼.
+        카메라 뒤: 캐릭터 바로 아래에 ◀▶.
+        """
         size = self._lane_btn_draw_size(w)
+        alpha = self._lane_btn_alpha()
         try:
             gap320 = float(self._p("lane_btn_gap_px_320", 10.0) or 10.0)
         except (TypeError, ValueError):
             gap320 = 10.0
         gap = max(4, int(round(scale_ui_text_px(gap320, screen_w=w))))
         try:
-            mx = float(self._p("lane_btn_margin_x_frac", 0.03) or 0.03)
+            char_gap320 = float(self._p("lane_btn_char_gap_px_320", 8.0) or 8.0)
         except (TypeError, ValueError):
-            mx = 0.03
+            char_gap320 = 8.0
+        char_gap = max(2, int(round(scale_ui_text_px(char_gap320, screen_w=w))))
         try:
-            cy_frac = float(self._p("lane_btn_center_y_frac", 0.55) or 0.55)
+            head_off = float(self._p("namebox_head_off_px", 42.0) or 42.0)
         except (TypeError, ValueError):
-            cy_frac = 0.55
-        mx = max(0.0, min(0.2, mx))
-        cy_frac = max(0.25, min(0.85, cy_frac))
-        x = int(w * mx)
+            head_off = 42.0
+        body_lift = max(8, int(round(scale_ui_text_px(head_off * 0.45, screen_w=w))))
+
+        self._sync_lane_btn_appearance()
+        self._lane_btn_up.ensure_fallback(size, alpha=alpha)
+        self._lane_btn_down.ensure_fallback(size, alpha=alpha)
+
+        fx, fy = self._resolve_lane_anchor_xy(w, h)
+        cam_back = str(getattr(self, "_camera_mode", "side") or "side").strip().lower() == "back"
+
+        if cam_back:
+            total_w = size * 2 + gap
+            x0 = int(round(fx - total_w * 0.5))
+            y_below = int(round(fy + char_gap))
+            # 발이 화면 하단이면 발 바로 위(캐릭터 하단)에 배치
+            if y_below + size > h - 4:
+                y0 = int(round(fy - size - char_gap))
+            else:
+                y0 = y_below
+            x0 = max(4, min(w - total_w - 4, x0))
+            y0 = max(4, min(h - size - 4, y0))
+            self._lane_btn_up.layout(pygame.Rect(x0, y0, size, size))
+            self._lane_btn_down.layout(pygame.Rect(x0 + size + gap, y0, size, size))
+            return
+
+        # side: 캐릭터 뒤쪽(기본 좌→우 주행이면 왼쪽)에 세로 스택
+        try:
+            side = float(self._p("cam_side_sign", -1.0) or -1.0)
+        except (TypeError, ValueError):
+            side = -1.0
         total_h = size * 2 + gap
-        y0 = int(h * cy_frac) - total_h // 2
-        y0 = max(8, min(h - total_h - 8, y0))
-        # 맵 설정이 바뀌었을 수 있어 애니 이름 동기화
-        up_name = str(self._p("lane_btn_up_anim", "lane_up") or "lane_up")
-        down_name = str(self._p("lane_btn_down_anim", "lane_down") or "lane_down")
-        if up_name != self._lane_btn_up.anim_name:
-            self._lane_btn_up.anim_name = up_name
-            self._lane_btn_up.reload_frames()
-        if down_name != self._lane_btn_down.anim_name:
-            self._lane_btn_down.anim_name = down_name
-            self._lane_btn_down.reload_frames()
-        self._lane_btn_up.ensure_fallback(size)
-        self._lane_btn_down.ensure_fallback(size)
-        self._lane_btn_up.layout(pygame.Rect(x, y0, size, size))
-        self._lane_btn_down.layout(pygame.Rect(x, y0 + size + gap, size, size))
+        body_cy = fy - body_lift
+        y0 = int(round(body_cy - total_h * 0.5))
+        if side < 0.0:
+            x0 = int(round(fx - size - char_gap))
+        else:
+            x0 = int(round(fx + char_gap))
+        x0 = max(4, min(w - size - 4, x0))
+        y0 = max(4, min(h - total_h - 4, y0))
+        self._lane_btn_up.layout(pygame.Rect(x0, y0, size, size))
+        self._lane_btn_down.layout(pygame.Rect(x0, y0 + size + gap, size, size))
 
     def _tick_lane_buttons(self, dt: float) -> None:
         try:
@@ -2022,12 +2521,13 @@ class RacingActivity(BaseFieldActivity):
             return
         self._layout_lane_buttons(w, h)
         size = self._lane_btn_draw_size(w)
+        alpha = self._lane_btn_alpha()
         for btn in self._lane_btns:
-            btn.draw(surf, size)
+            btn.draw(surf, size, alpha=alpha)
 
     def _nudge_player_lane(self, direction: int) -> None:
         """
-        direction -1 = 위(A 쪽), +1 = 아래(C 쪽). 한 레인씩.
+        direction -1 = A 쪽, +1 = C 쪽. 한 레인씩.
         가까이에 다른 레이서가 같은 레인이면 거부.
         """
         pr = next((x for x in self._racers if x.is_player), None)
@@ -2043,7 +2543,7 @@ class RacingActivity(BaseFieldActivity):
             self._item_msg_t = 0.7
 
     def _handle_lane_button(self, screen_xy) -> bool:
-        """왼쪽 화살표 히트 시 한 칸 이동. 처리했으면 True."""
+        """화살표 히트 시 한 칸 이동. 처리했으면 True."""
         if not screen_xy:
             return False
         w, h = self._ui_screen_wh or self._logical_screen_size()
@@ -2075,6 +2575,7 @@ class RacingActivity(BaseFieldActivity):
         rows = [
             ("camera", f"카메라 : {'뒤' if cam_back else '옆'}", (46, 52, 70)),
             ("minimap", f"미니맵 : {'켬' if self._minimap_user_enabled else '끔'}", (46, 52, 70)),
+            ("quality", f"해상도 : {self._mode7_quality_label()}", (46, 52, 70)),
             ("stop", "게임 중지", (70, 40, 40)),
         ]
         pw = max(140, int(round(w * 0.22)))
@@ -2135,18 +2636,19 @@ class RacingActivity(BaseFieldActivity):
             self._race_confirm_rects.append((rrect, act))
 
     def _layout_camera_popup(self, w: int, h: int) -> None:
-        """옵션 서브메뉴 팝업 — 열리는 동안 상위 메뉴는 숨기므로 화면 중앙에 배치."""
-        pw = max(160, int(round(w * 0.34)))
+        """옵션 서브메뉴 팝업 — 카메라·미니맵·해상도."""
+        pw = max(168, int(round(w * 0.36)))
         row_h = max(24, int(round(h * 0.16 * 0.28)))
-        ph = 28 + row_h * 3 + 8 * 2 + 10  # 제목 + 3행(카메라 옆/뒤 + 미니맵) + 간격
+        ph = 28 + row_h * 4 + 8 * 3 + 10  # 제목 + 4행
         px = w // 2 - pw // 2
-        py = max(8, int(round(h * 0.32)))
+        py = max(8, int(round(h * 0.28)))
         self._camera_popup_rect = pygame.Rect(px, py, pw, ph)
         inner_x = px + 10
         inner_w = pw - 20
         self._camera_side_rect = pygame.Rect(inner_x, py + 28, inner_w, row_h)
         self._camera_back_rect = pygame.Rect(inner_x, py + 28 + row_h + 8, inner_w, row_h)
         self._minimap_toggle_rect = pygame.Rect(inner_x, py + 28 + (row_h + 8) * 2, inner_w, row_h)
+        self._camera_quality_rect = pygame.Rect(inner_x, py + 28 + (row_h + 8) * 3, inner_w, row_h)
 
     # --- menu UI -----------------------------------------------------------
 
@@ -2233,6 +2735,8 @@ class RacingActivity(BaseFieldActivity):
                     return "camera_back"
                 if self._minimap_toggle_rect and self._minimap_toggle_rect.collidepoint(px, py):
                     return "minimap_toggle"
+                if self._camera_quality_rect and self._camera_quality_rect.collidepoint(px, py):
+                    return "quality_cycle"
                 if self._camera_popup_rect and self._camera_popup_rect.collidepoint(px, py):
                     return "popup"
             except Exception:
@@ -2269,15 +2773,19 @@ class RacingActivity(BaseFieldActivity):
             if act == "camera_side":
                 self._camera_mode = "side"
                 self._cam_heading = None
-                self._options_open = False
+                self._persist_racing_prefs()
                 return True
             if act == "camera_back":
                 self._camera_mode = "back"
                 self._cam_heading = None
-                self._options_open = False
+                self._persist_racing_prefs()
                 return True
             if act == "minimap_toggle":
                 self._minimap_user_enabled = not bool(self._minimap_user_enabled)
+                self._persist_racing_prefs()
+                return True
+            if act == "quality_cycle":
+                self._cycle_mode7_quality()
                 return True
             if act == "popup":
                 return True
@@ -2526,6 +3034,7 @@ class RacingActivity(BaseFieldActivity):
 
         if self.state not in (ST_COUNTDOWN, ST_RACE, ST_FINISH):
             return
+        self._draw_weather_zones_world(ctx)
         try:
             h_off = float(self._p("item_draw_height", 10.0) or 10.0)
         except (TypeError, ValueError):
@@ -2606,9 +3115,46 @@ class RacingActivity(BaseFieldActivity):
         self._draw_npc_racer_sprites(ctx)
         self._draw_slipstream_afterburners(ctx)
         self._draw_spawn_flashes_world(ctx)
+        self._draw_weather_fx_world(ctx)
+
+    def _afterburner_screen_ends(
+        self, ctx: FieldDrawContext, r: RacerState, *, world_len: float
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+        """
+        에프터버너 선분 화면 좌표.
+        월드에서 진행(heading) 반대쪽으로 뻗은 뒤 Mode7/카메라로 투영.
+        return: fx, fy, ex, ey
+        """
+        if r is None or ctx is None:
+            return None, None, None, None
+        tang = float(r.heading)
+        L = max(8.0, float(world_len))
+        # 진행 방향 반대 = 캐릭터 뒤
+        bx = float(r.pos[0]) - math.cos(tang) * L
+        by = float(r.pos[1]) - math.sin(tang) * L
+        fx, fy = self._racer_feet_screen_xy(ctx, r)
+        if fx is None or fy is None:
+            return None, None, None, None
+        ex, ey = self._world_to_draw_xy(ctx, bx, by, 0.0)
+        fwx, fwy = self._world_to_draw_xy(ctx, float(r.pos[0]), float(r.pos[1]), 0.0)
+        if ex is None or ey is None or fwx is None or fwy is None:
+            return None, None, None, None
+        # Mode7 플레이어는 발이 빌보드 고정점이라, 월드 발→뒤 벡터를 빌보드 발에 붙인다
+        if r.is_player and getattr(ctx, "mode7_ctx", None):
+            return (
+                float(fx),
+                float(fy),
+                float(fx) + (float(ex) - float(fwx)),
+                float(fy) + (float(ey) - float(fwy)),
+            )
+        return float(fx), float(fy), float(ex), float(ey)
 
     def _draw_slipstream_afterburners(self, ctx: FieldDrawContext) -> None:
-        """최고속 90%↑ 일 때 뒤쪽 반투명 에프터버너."""
+        """
+        에프터버너 꼬리 (진행 방향 반대 = 캐릭터 뒤):
+        - 슬립스트림: 최고속 90%↑ 일 때 파란 반투명
+        - 속도 상승 아이템: afterburner_t 동안 주황/시안 강화 꼬리
+        """
         if ctx is None or ctx.surf is None or self.state not in (ST_COUNTDOWN, ST_RACE, ST_FINISH):
             return
         try:
@@ -2616,20 +3162,61 @@ class RacingActivity(BaseFieldActivity):
             max_spd = float(self._p("max_speed", 140.0))
         except (TypeError, ValueError):
             min_frac, max_spd = 0.9, 140.0
+        ticks = pygame.time.get_ticks()
         for r in self._racers:
             if r is None or r.finished:
                 continue
+            boost_t = float(getattr(r, "afterburner_t", 0.0) or 0.0)
             cap = max_spd * max(0.15, float(r.speed_mul))
-            if float(r.speed) < cap * min_frac:
+            slip_on = float(r.speed) >= cap * min_frac
+            if boost_t <= 0.0 and not slip_on:
                 continue
-            fx, fy = self._racer_feet_screen_xy(ctx, r)
-            if fx is None or fy is None:
+            if boost_t > 0.0:
+                try:
+                    ab_max = float(self._p("speed_afterburner_sec", 1.1) or 1.1)
+                except (TypeError, ValueError):
+                    ab_max = 1.1
+                u = max(0.0, min(1.0, boost_t / max(0.35, ab_max)))
+                pulse = 0.65 + 0.35 * abs(math.sin(ticks * 0.028))
+                world_len = 34.0 + 28.0 * u * pulse
+                thick = max(5, int(round(scale_ui_text_px(8 + 4 * u))))
+                fx, fy, ex, ey = self._afterburner_screen_ends(ctx, r, world_len=world_len)
+                if fx is None or ex is None:
+                    continue
+                mx = float(fx) + (float(ex) - float(fx)) * 0.45
+                my = float(fy) + (float(ey) - float(fy)) * 0.45
+                try:
+                    pygame.draw.line(
+                        ctx.surf,
+                        (255, 140, 40, int(70 + 90 * u * pulse)),
+                        (int(fx), int(fy)),
+                        (int(ex), int(ey)),
+                        thick + 4,
+                    )
+                    pygame.draw.line(
+                        ctx.surf,
+                        (120, 230, 255, int(100 + 100 * u)),
+                        (int(fx), int(fy)),
+                        (int(ex), int(ey)),
+                        thick,
+                    )
+                    pygame.draw.line(
+                        ctx.surf,
+                        (255, 250, 200, int(140 + 80 * pulse)),
+                        (int(fx), int(fy)),
+                        (int(mx), int(my)),
+                        max(2, thick // 2),
+                    )
+                except TypeError:
+                    pygame.draw.line(
+                        ctx.surf, (255, 160, 50), (int(fx), int(fy)), (int(ex), int(ey)), thick
+                    )
                 continue
-            tang = float(r.heading)
-            length = int(round(scale_ui_text_px(36)))
+            # 슬립스트림 기본 꼬리
             thick = max(4, int(round(scale_ui_text_px(6))))
-            ex = float(fx) - math.cos(tang) * length
-            ey = float(fy) - math.sin(tang) * length
+            fx, fy, ex, ey = self._afterburner_screen_ends(ctx, r, world_len=32.0)
+            if fx is None or ex is None:
+                continue
             col = (120, 200, 255) if r.is_player else (180, 210, 255)
             try:
                 pygame.draw.line(
@@ -2705,7 +3292,10 @@ class RacingActivity(BaseFieldActivity):
 
     def _draw_secret_roulette_ui(self, surf: pygame.Surface, w: int, h: int) -> None:
         sp = self._secret_spin
-        if not sp or sp.get("applied") or surf is None:
+        if not sp or surf is None:
+            return
+        phase = str(sp.get("phase") or "spin")
+        if phase not in ("spin", "hold", "done"):
             return
         pool = list(sp.get("pool") or [])
         if not pool:
@@ -2716,16 +3306,14 @@ class RacingActivity(BaseFieldActivity):
         pygame.draw.rect(surf, (40, 48, 70, 220), rect, border_radius=10)
         pygame.draw.rect(surf, (200, 220, 255), rect, 2, border_radius=10)
         t = float(sp.get("t", 0.0))
-        dur = max(0.1, float(sp.get("dur", 1.0)))
-        hold = min(0.45, dur * 0.30)
-        spin_end = max(0.1, dur - hold)
+        spin_sec = max(0.1, float(sp.get("spin_sec", 1.0)))
         final = str(sp.get("final") or pool[0])
-        # 화면 중앙 아이템 하나만 빠르게 바뀌고, 마지막 hold 동안 최종 아이템에 멈춘다.
-        if t >= spin_end:
-            tid = final
+        # spin: 순환 / hold·done: 최종 고정 (효과는 hold 종료 직후)
+        if phase == "spin":
+            interval = 0.075 + 0.14 * max(0.0, min(1.0, t / spin_sec)) ** 2
+            tid = pool[int(t / max(0.05, interval)) % len(pool)]
         else:
-            interval = 0.075 + 0.14 * max(0.0, min(1.0, t / spin_end)) ** 2
-            tid = pool[int(t / interval) % len(pool)]
+            tid = final
         info = _item_type_info(tid)
         col = info.get("roulette_color") or info.get("placeholder_color") or (200, 200, 200)
         chip = _load_racing_item_surface(
@@ -2736,7 +3324,7 @@ class RacingActivity(BaseFieldActivity):
         chip_x, chip_y = cx - slot // 2, cy - slot // 2
         surf.blit(chip, (chip_x, chip_y))
         self._draw_item_symbol(surf, tid, chip_x, chip_y, slot, slot)
-        if t >= spin_end:
+        if phase in ("hold", "done"):
             finfo = _item_type_info(final)
             lbl = self._plain_hud_font(int(round(scale_ui_text_px(14)))).render(
                 str(finfo.get("label") or final), True, (255, 248, 200)
@@ -2749,18 +3337,144 @@ class RacingActivity(BaseFieldActivity):
             return
         in_rain = self._racer_in_weather(pr, "rain") is not None
         in_storm = self._racer_in_weather(pr, "lightning") is not None
-        if not in_rain and not in_storm:
-            return
+        strike_flash = any(
+            float(z.get("flash_t", 0.0) or 0.0) > 0.0
+            for z in self._weather_zones
+            if str(z.get("kind") or "") == "lightning"
+        )
+        if not in_rain and not in_storm and not strike_flash:
+            if not (self._weather_msg_t > 0.0 and self._weather_msg):
+                return
         overlay = pygame.Surface((w, h), pygame.SRCALPHA)
         if in_rain:
             overlay.fill((80, 120, 200, 35))
         if in_storm:
             overlay.fill((60, 60, 90, 25))
+        if strike_flash:
+            pulse = 0.55 + 0.45 * abs(math.sin(pygame.time.get_ticks() * 0.045))
+            overlay.fill((255, 40, 30, int(90 * pulse)))
         surf.blit(overlay, (0, 0))
         if self._weather_msg_t > 0.0 and self._weather_msg:
             f = self._plain_hud_font(int(round(scale_ui_text_px(13))))
             t = f.render(str(self._weather_msg), True, (255, 240, 120))
             surf.blit(t, (w // 2 - t.get_width() // 2, int(h * 0.12)))
+
+    def _iter_zone_world_samples(self, s0: float, s1: float, *, step: float = 36.0):
+        """날씨 구간 경로 샘플 (wx, wy, tang)."""
+        path = self._path
+        if path is None:
+            return
+        a, b = float(s0), float(s1)
+        if b < a:
+            a, b = b, a
+        step = max(12.0, float(step))
+        s = a
+        while s <= b + 1e-6:
+            try:
+                x, y, tang, _ = path.sample(s)
+                yield float(x), float(y), float(tang)
+            except Exception:
+                pass
+            s += step
+
+    def _draw_weather_zones_world(self, ctx: FieldDrawContext) -> None:
+        """비=큰 그림자 / 번개=구역 빨간 깜빡. 애니 세트 있으면 그걸 우선."""
+        if ctx is None or ctx.surf is None:
+            return
+        if self.state not in (ST_COUNTDOWN, ST_RACE, ST_FINISH):
+            return
+        if not self._weather_zones:
+            return
+        try:
+            lane_w = float(self._p("lane_width", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            lane_w = 30.0
+        rain_frames = self._weather_anim_frames("rain")
+        for z in self._weather_zones:
+            kind = str(z.get("kind") or "")
+            s0, s1 = float(z.get("s0", 0.0)), float(z.get("s1", 0.0))
+            if kind == "rain":
+                for wx, wy, _tang in self._iter_zone_world_samples(s0, s1, step=48.0):
+                    sx, sy = self._world_to_draw_xy(ctx, wx, wy, 0.0)
+                    if sx is None or sy is None:
+                        continue
+                    sc = float(ctx.z)
+                    m7 = getattr(ctx, "mode7_ctx", None)
+                    if m7:
+                        try:
+                            from engine import rotate3d_mode7_project
+
+                            pr = rotate3d_mode7_project(
+                                wx, wy, m7, height_off=0.0, zoom=float(ctx.z)
+                            )
+                            if pr and pr.get("valid", pr.get("visible")):
+                                sc = float(pr.get("scale", 1.0) or 1.0)
+                        except Exception:
+                            pass
+                    if rain_frames:
+                        img = rain_frames[int(pygame.time.get_ticks() / 80) % len(rain_frames)]
+                        try:
+                            tw = max(8, int(round(img.get_width() * sc * 1.2)))
+                            th = max(8, int(round(img.get_height() * sc * 1.2)))
+                            img2 = pygame.transform.smoothscale(img, (tw, th))
+                            ctx.surf.blit(img2, (int(sx) - tw // 2, int(sy) - th // 2))
+                        except Exception:
+                            pass
+                        continue
+                    rw = max(18, int(round(lane_w * 2.2 * sc)))
+                    rh = max(10, int(round(lane_w * 0.85 * sc)))
+                    try:
+                        sh = pygame.Surface((rw * 2, rh * 2), pygame.SRCALPHA)
+                        pygame.draw.ellipse(sh, (20, 24, 40, 110), sh.get_rect())
+                        ctx.surf.blit(sh, (int(sx) - rw, int(sy) - rh // 2))
+                    except Exception:
+                        pass
+            elif kind == "lightning":
+                # 구역 빨간 원 폴백은 당분간 비표시 (애니 세트 준비 후 재개)
+                continue
+
+    def _draw_weather_fx_world(self, ctx: FieldDrawContext) -> None:
+        """번개 타격 지점 애니(있으면) / 폴백 번쩍."""
+        if not self._weather_fx or ctx is None or ctx.surf is None:
+            return
+        for fx in self._weather_fx:
+            sx, sy = self._world_to_draw_xy(ctx, float(fx["wx"]), float(fx["wy"]), 20.0)
+            if sx is None:
+                continue
+            frames = fx.get("frames") or []
+            if frames:
+                img = frames[int(fx.get("frame_i", 0)) % len(frames)]
+                try:
+                    sc = float(ctx.z)
+                    tw = max(12, int(round(img.get_width() * sc)))
+                    th = max(12, int(round(img.get_height() * sc)))
+                    img2 = pygame.transform.smoothscale(img, (tw, th))
+                    ctx.surf.blit(img2, (int(sx) - tw // 2, int(sy) - th))
+                except Exception:
+                    pass
+                continue
+            t = float(fx.get("t", 0.0))
+            pulse = 0.5 + 0.5 * abs(math.sin(t * 30.0))
+            try:
+                hh = int(40 + 50 * pulse)
+                ww = max(3, int(4 + 4 * pulse))
+                bolt = pygame.Surface((ww + 8, hh + 8), pygame.SRCALPHA)
+                pygame.draw.line(
+                    bolt, (255, 255, 220, 230), (ww // 2 + 4, 4), (ww // 2 + 4, hh), ww
+                )
+                pygame.draw.line(
+                    bolt,
+                    (255, 80, 60, 180),
+                    (ww // 2 + 4, 4),
+                    (ww // 2 + 4, hh),
+                    max(1, ww // 2),
+                )
+                ctx.surf.blit(bolt, (int(sx) - ww // 2 - 4, int(sy) - hh))
+                glow = pygame.Surface((48, 48), pygame.SRCALPHA)
+                pygame.draw.circle(glow, (255, 60, 40, int(100 * pulse)), (24, 24), 22)
+                ctx.surf.blit(glow, (int(sx) - 24, int(sy) - 24))
+            except Exception:
+                pass
 
     def _racer_sprite_image(self, r: RacerState):
         """엔티티 현재 프레임, 없으면 idle 폴백."""
@@ -3103,10 +3817,12 @@ class RacingActivity(BaseFieldActivity):
                         ttl = small.render("옵션", True, (255, 248, 220))
                         surf.blit(ttl, (self._camera_popup_rect.x + 10, self._camera_popup_rect.y + 8))
                         mm_on = bool(self._minimap_user_enabled)
+                        q_lab = self._mode7_quality_label()
                         for rect, active, label in (
                             (self._camera_side_rect, str(self._camera_mode or "side") == "side", "카메라 모드 : 옆"),
                             (self._camera_back_rect, str(self._camera_mode or "side") == "back", "카메라 모드 : 뒤"),
                             (self._minimap_toggle_rect, mm_on, f"미니맵 : {'켬' if mm_on else '끔'}"),
+                            (self._camera_quality_rect, True, f"해상도 : {q_lab}"),
                         ):
                             if rect is None:
                                 continue
@@ -3197,7 +3913,9 @@ class RacingActivity(BaseFieldActivity):
             label = "GO!" if self._countdown_t <= 0.35 else str(n)
             ct = big.render(label, True, (255, 240, 120))
             surf.blit(ct, (w // 2 - ct.get_width() // 2, int(h * 0.38)))
-            tip = small.render("왼쪽 ▲▼ 로 차선 이동 (한 칸씩)", True, (200, 220, 240))
+            cam_back = str(getattr(self, "_camera_mode", "side") or "side").strip().lower() == "back"
+            tip_s = "캐릭터 아래 ◀▶ 로 차선 이동" if cam_back else "캐릭터 뒤 ▲▼ 로 차선 이동"
+            tip = small.render(tip_s, True, (200, 220, 240))
             surf.blit(tip, (w // 2 - tip.get_width() // 2, int(h * 0.72)))
         elif self.state == ST_FINISH:
             fin_px = float(get_activity_ui("racing", "finish_px_320", 24) or 24)
@@ -3206,11 +3924,19 @@ class RacingActivity(BaseFieldActivity):
             ct = big.render(finish_label, True, (255, 230, 120))
             surf.blit(ct, (w // 2 - ct.get_width() // 2, int(h * 0.40)))
         elif self.state == ST_RACE:
-            tip = small.render("왼쪽 ▲▼ = 차선 A↔B↔C", True, (180, 200, 220))
+            cam_back = str(getattr(self, "_camera_mode", "side") or "side").strip().lower() == "back"
+            tip_s = "◀▶ = 차선 A↔B↔C" if cam_back else "▲▼ = 차선 A↔B↔C"
+            tip = small.render(tip_s, True, (180, 200, 220))
             surf.blit(tip, (w // 2 - tip.get_width() // 2, h - tip.get_height() - 8))
 
-        # 레인 화살표 HUD (오버레이급)
-        self._draw_lane_buttons(surf, w, h)
+        # 레인 화살표 HUD — 플레이어 발 좌표 기준으로 배치
+        if self.state in (ST_COUNTDOWN, ST_RACE):
+            pr_anchor = next((x for x in self._racers if x.is_player), None)
+            if pr_anchor is not None:
+                fx, fy = self._racer_feet_screen_xy(ctx, pr_anchor)
+                if fx is not None and fy is not None:
+                    self._lane_anchor_xy = (float(fx), float(fy))
+            self._draw_lane_buttons(surf, w, h)
         # 레인 네임박스: 월드/오브젝트 위 · 오버레이급(원근 크기 고정)
         self._draw_racer_lane_nameboxes(ctx)
         # 왼쪽 위 옵션 버튼 + 팝업 (맨 위에 그려 다른 HUD에 가리지 않게)

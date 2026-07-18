@@ -8319,9 +8319,13 @@ def editor_main():
                                     continue
 
                         elif edit_mode == "RACING" and in_map_area:
-                            px, py = editor_snap_pick_world_xy(
-                                wx, wy, GRID_SIZE, is_shift_pressed
-                            )
+                            # 아이템은 경로 s 연속 좌표라 격자 스냅하면 기존 마커를 못 집을 수 있음
+                            if str(racing_ed.get("tool") or "") == "ITEMS":
+                                px, py = float(wx), float(wy)
+                            else:
+                                px, py = editor_snap_pick_world_xy(
+                                    wx, wy, GRID_SIZE, is_shift_pressed
+                                )
                             if rc_ed.handle_map_click(
                                 racing_ed,
                                 px,
@@ -8697,9 +8701,16 @@ def editor_main():
             
             
             
-            if event.type == pygame.MOUSEMOTION and edit_mode == "RACING" and racing_ed.get("dragging"):
+            if event.type == pygame.MOUSEMOTION and edit_mode == "RACING" and (
+                racing_ed.get("dragging") or racing_ed.get("dragging_item")
+            ):
                 _rwx, _rwy = get_real_pos(event.pos[0], event.pos[1])
-                _rsx, _rsy = editor_snap_pick_world_xy(_rwx, _rwy, GRID_SIZE, is_shift_pressed)
+                if racing_ed.get("dragging_item"):
+                    _rsx, _rsy = float(_rwx), float(_rwy)
+                else:
+                    _rsx, _rsy = editor_snap_pick_world_xy(
+                        _rwx, _rwy, GRID_SIZE, is_shift_pressed
+                    )
                 rc_ed.handle_map_drag(racing_ed, _rsx, _rsy)
                 continue
 
