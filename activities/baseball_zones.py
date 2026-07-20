@@ -130,6 +130,28 @@ def scoreboard_zoom_from_object(o) -> float:
     return scoreboard_default_zoom(od if isinstance(od, dict) else None)
 
 
+# 640×480 설계 기준 전광판 박스(에셋 없을 때). scoreboard_zoom 은 이 크기에 곱함.
+SCOREBOARD_BASE_W_640 = 32.0
+SCOREBOARD_BASE_H_640 = 18.0
+
+
+def scoreboard_screen_size(o, *, screen_w: int) -> Tuple[int, int]:
+    """화면 논리 px — 카메라·월드 후처리 줌과 무관하게 640 설계 비율로 고정."""
+    zoom = scoreboard_zoom_from_object(o)
+    try:
+        iw, ih = o.image.get_size()
+        has_real = bool(getattr(o, "has_real_image", True))
+    except Exception:
+        iw, ih = int(SCOREBOARD_BASE_W_640), int(SCOREBOARD_BASE_H_640)
+        has_real = False
+    if (not has_real) or (int(iw) <= 16 and int(ih) <= 16):
+        iw, ih = int(SCOREBOARD_BASE_W_640), int(SCOREBOARD_BASE_H_640)
+    ref = max(1.0, float(screen_w)) / 640.0
+    w = max(24, int(round(float(iw) * zoom * ref)))
+    h = max(16, int(round(float(ih) * zoom * ref)))
+    return w, h
+
+
 def apply_scoreboard_defaults(o) -> None:
     """전광판은 bbzone과 달리 서 있는 일반 오브젝트."""
     from data import OBJ_ASSETS

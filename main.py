@@ -36,6 +36,11 @@ from field_runtime import (
     install_game_exit_button,
     handle_overlay_ui_click_action,
     game_exit_confirm_open,
+    app_force_quit_combo_pressed,
+    app_force_quit_feed_event,
+    app_force_quit_combo_a_held,
+    app_force_quit_has_candidate,
+    configure_pygame_input_event_filter,
     visual_smooth_step,
     timed_effect_finished,
     timed_effect_init,
@@ -990,6 +995,7 @@ def main():
     except Exception:
         pass
     pygame.init()
+    configure_pygame_input_event_filter()
     try:
         if not pygame.mixer.get_init():
             pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
@@ -1030,6 +1036,7 @@ def main():
     # 현재 출력모드가 "줌을 해상도로 치환"한 정도(기본 1.0, UPSCALE_320로 내려가면 2.0)
     auto_res_zoom_mul = 1.0
     auto_res_hold_cam_pos = None  # 해상도 전환 프레임: cam.update()가 pos를 덮어쓰지 않도록
+    rotate3d_res_snapshot = None  # Mode7 강제 320 복원용
 
     def _apply_output_mode(*, mode, fullscreen):
         nonlocal screen, draw_surf, render_surf, world_surf, physical_w, physical_h, scale_factor, output_mode, fullscreen_on, last_frame_logical
@@ -1622,6 +1629,9 @@ def main():
         nonlocal output_mode, auto_res_zoom_mul, last_auto_switch_ms
         if not auto_res_enabled:
             return
+        if rotate3d_res_snapshot is not None:
+            # Mode7 강제 320 중에는 640으로 되돌리지 않음
+            return
         if output_mode == "NATIVE_640" and float(auto_res_zoom_mul) <= 1.0:
             return
         now_ms = pygame.time.get_ticks()
@@ -1636,6 +1646,99 @@ def main():
         except Exception:
             pass
         last_auto_switch_ms = int(now_ms)
+
+    def _sync_rotate3d_logical_320(rotate3d_on: bool) -> None:
+        """
+        Mode7 활성 중 논리 해상도를 320×240(UPSCALE_320)로 고정.
+        zoom=2.0 완료와 동일하게 auto_res_zoom_mul=2 로 체감 시야 유지.
+        종료 시 스냅샷으로 복구.
+        """
+        nonlocal output_mode, auto_res_zoom_mul, world_zoom_current, world_zoom_target
+        nonlocal world_zoom_draw, world_zoom_off_x, world_zoom_off_y
+        nonlocal last_auto_switch_ms, rotate3d_res_snapshot, auto_res_hold_cam_pos
+        try:
+            force = bool(CONFIG.get("ROTATE3D_FORCE_LOGICAL_320", True))
+        except Exception:
+            force = True
+        if not force:
+            if rotate3d_res_snapshot is not None and not rotate3d_on:
+                # 강제 꺼진 뒤 남은 스냅샷만 정리
+                rotate3d_res_snapshot = None
+            return
+        # SCREEN hi_res(640) 가 우선
+        if getattr(ev_mgr, "active_screen", None) and ev_mgr.active_screen.get("hi_res"):
+            return
+        if rotate3d_on:
+            need_320 = (
+                str(output_mode).strip().upper() != "UPSCALE_320"
+                or float(auto_res_zoom_mul) <= 1.0 + 1e-6
+                or int(CONFIG.get("WIDTH", 640) or 640) > 320
+            )
+            if not need_320:
+                return
+            if rotate3d_res_snapshot is None:
+                rotate3d_res_snapshot = {
+                    "output_mode": output_mode,
+                    "auto_res_zoom_mul": float(auto_res_zoom_mul),
+                    "world_zoom_current": float(world_zoom_current),
+                    "world_zoom_target": float(world_zoom_target),
+                }
+            prev_sf = float(scale_factor)
+            _apply_output_mode(mode="UPSCALE_320", fullscreen=fullscreen_on)
+            _after_resolution_change(prev_scale_factor=prev_sf)
+            try:
+                _auto_res_compensate_follow_offset(cam, prev_sf, float(scale_factor))
+                _preserve_cam_world_center(cam, bg_w, bg_h)
+                auto_res_hold_cam_pos = (float(cam.pos[0]), float(cam.pos[1]))
+            except Exception:
+                pass
+            auto_res_zoom_mul = 2.0
+            world_zoom_current = float(auto_zoom_in_trigger)
+            world_zoom_target = float(auto_zoom_in_trigger)
+            try:
+                ev_mgr.world_zoom_timed = None
+            except Exception:
+                pass
+            world_zoom_draw = native_world_zoom_draw(
+                world_zoom_current, output_mode, auto_res_zoom_mul
+            )
+            world_zoom_off_x = 0.0
+            world_zoom_off_y = 0.0
+            last_auto_switch_ms = int(pygame.time.get_ticks())
+            return
+        # Mode7 off → 복구
+        snap = rotate3d_res_snapshot
+        if snap is None:
+            return
+        prev_sf = float(scale_factor)
+        restore_mode = str(snap.get("output_mode") or "NATIVE_640").strip().upper()
+        if restore_mode not in ("UPSCALE_320", "NATIVE_640"):
+            restore_mode = "NATIVE_640"
+        _apply_output_mode(mode=restore_mode, fullscreen=fullscreen_on)
+        _after_resolution_change(prev_scale_factor=prev_sf)
+        auto_res_zoom_mul = float(snap.get("auto_res_zoom_mul", 1.0))
+        try:
+            world_zoom_current = float(snap.get("world_zoom_current", world_zoom_current))
+            world_zoom_target = float(snap.get("world_zoom_target", world_zoom_target))
+        except (TypeError, ValueError):
+            pass
+        try:
+            if restore_mode == "UPSCALE_320" and float(auto_res_zoom_mul) > 1.0:
+                _auto_res_compensate_follow_offset(cam, prev_sf, float(scale_factor))
+            _preserve_cam_world_center(cam, bg_w, bg_h)
+            auto_res_hold_cam_pos = (float(cam.pos[0]), float(cam.pos[1]))
+        except Exception:
+            pass
+        try:
+            world_zoom_draw = native_world_zoom_draw(
+                world_zoom_current, output_mode, auto_res_zoom_mul
+            )
+        except Exception:
+            world_zoom_draw = 1.0
+        world_zoom_off_x = 0.0
+        world_zoom_off_y = 0.0
+        rotate3d_res_snapshot = None
+        last_auto_switch_ms = int(pygame.time.get_ticks())
 
     def _sync_screen_hi_res_output():
         """SCREEN hi_res 활성 시 NATIVE_640(640x480), 종료 후 이전 출력 모드 복구."""
@@ -2833,7 +2936,22 @@ def main():
             getattr(ev_mgr, "active_screen", None)
             and ev_mgr.active_screen.get("hi_res")
         )
-        if auto_res_enabled and not _screen_hi_res_active:
+        try:
+            _r3_force_320 = bool(CONFIG.get("ROTATE3D_FORCE_LOGICAL_320", True))
+        except Exception:
+            _r3_force_320 = True
+        try:
+            _r3_eps_hold = float(CONFIG.get("ROTATE3D_EPS", 0.003) or 0.003)
+        except Exception:
+            _r3_eps_hold = 0.003
+        _rotate3d_holds_320 = bool(
+            rotate3d_res_snapshot is not None
+            or (
+                _r3_force_320
+                and abs(float(rotate3d_current)) > float(_r3_eps_hold)
+            )
+        )
+        if auto_res_enabled and not _screen_hi_res_active and not _rotate3d_holds_320:
             now_ms = pygame.time.get_ticks()
             can_switch = (now_ms - int(last_auto_switch_ms)) >= int(auto_switch_cooldown_ms)
             zoom_done = abs(float(world_zoom_current) - float(world_zoom_target)) <= 1e-6
@@ -2853,6 +2971,17 @@ def main():
                     world_zoom_current = float(auto_zoom_in_trigger)
                     world_zoom_target = float(auto_zoom_in_trigger)
                     ev_mgr.world_zoom_timed = None
+                    world_zoom_draw = native_world_zoom_draw(
+                        world_zoom_current, output_mode, auto_res_zoom_mul
+                    )
+                    last_auto_switch_ms = int(now_ms)
+                elif (
+                    output_mode == "UPSCALE_320"
+                    and float(auto_res_zoom_mul) <= 1.0 + 1e-6
+                    and abs(zc - float(auto_zoom_in_trigger)) <= 1e-6
+                ):
+                    # RG34XX 등 UPSCALE_320 부팅: 640→320 전환 없이도 줌2x 치환 적용
+                    auto_res_zoom_mul = float(upscale_factor)
                     world_zoom_draw = native_world_zoom_draw(
                         world_zoom_current, output_mode, auto_res_zoom_mul
                     )
@@ -2978,6 +3107,22 @@ def main():
             _reload_event_bundles()
             _queue_sync_for_map(map_id)
             _apply_map_field_visuals(map_id, instant=True)
+            # 레이싱 진행 중 맵 선택으로 전환된 경우 — 경로/bg 재바인딩 후 카운트다운
+            try:
+                if field_activities.is_active:
+                    _fa = getattr(field_activities, "_session", None)
+                    _rebind = getattr(_fa, "on_host_map_changed", None)
+                    if callable(_rebind):
+                        _rebind(
+                            map_id=map_id,
+                            player=player,
+                            bg=bg,
+                            npcs=npcs,
+                            objs=objs,
+                            world_data=flow.world_data,
+                        )
+            except Exception:
+                pass
 
         # 이벤트(DEV_CMD)로 요청된 필드 활동 — 입력보다 먼저 시작 (같은 프레임 탭 반영)
         fa_req = getattr(ev_mgr, "field_activity_request", None)
@@ -3035,6 +3180,15 @@ def main():
         # contact_confirm: 이번 프레임 맵 상호작용 점 1개 (좌클릭 월드좌표 또는 A/Space/Enter→커서 월드좌표)
         zone_confirm_click_world = None
         for event in pygame.event.get():
+            if event.type in (
+                pygame.KEYDOWN,
+                pygame.KEYUP,
+                pygame.JOYBUTTONDOWN,
+                pygame.JOYBUTTONUP,
+                pygame.JOYDEVICEADDED,
+                pygame.JOYDEVICEREMOVED,
+            ):
+                app_force_quit_feed_event(event)
             if event.type == pygame.QUIT:
                 running = False
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -3708,9 +3862,20 @@ def main():
                     pass
             elif field_activities.blocks_field_move() or _fishing_input_lock_active():
                 try:
-                    player.stop_moving()
-                    player.path = []
-                    player.target = list(player.pos)
+                    # stop_moving()은 anim_override까지 지움 → 레이싱 seat_idle이 idle로 풀린다.
+                    # (그네 mount/ride 와 동일하게, 경로만 끊고 포즈는 유지)
+                    aid = ""
+                    try:
+                        aid = str(getattr(field_activities, "active_id", "") or "").strip().lower()
+                    except Exception:
+                        aid = ""
+                    if aid == "racing":
+                        player.path = []
+                        player.target = list(player.pos)
+                    else:
+                        player.stop_moving()
+                        player.path = []
+                        player.target = list(player.pos)
                 except Exception:
                     pass
             elif not bool(getattr(ev_mgr, "is_talking", False)):
@@ -4156,8 +4321,13 @@ def main():
 
             pass
 
-        # 커서 이동 (rg35xxsp: 마우스 없이 D-pad로 이동)
         keys = pygame.key.get_pressed()
+        # RG34XX: A+X — 후보 키/버튼이 있을 때만 검사(매 프레임 부하 없음)
+        if app_force_quit_has_candidate(keys) and app_force_quit_combo_pressed(keys):
+            running = False
+            continue
+
+        # 커서 이동 (rg35xxsp: 마우스 없이 D-pad로 이동)
         _cursor_k = max(1e-6, float(dt_real_ms) / 16.666)
         if keys[pygame.K_LEFT]: ui_cursor[0] -= cursor_speed * _cursor_k
         if keys[pygame.K_RIGHT]: ui_cursor[0] += cursor_speed * _cursor_k
@@ -4296,6 +4466,11 @@ def main():
         except Exception:
             rotate3d_eps = 0.003
         rotate3d_active = abs(float(rotate3d_current)) > float(rotate3d_eps)
+        # Mode7 = CONFIG WIDTH×HEIGHT 샘플 → 활성 중 320×240(zoom=2 치환) 고정
+        try:
+            _sync_rotate3d_logical_320(bool(rotate3d_active))
+        except Exception:
+            pass
 
         cam.update(
             player, npcs, objs, bg_w, bg_h, shear_screen_px=float(shear_render), dt_sec=dt_visual_sec
@@ -4871,6 +5046,7 @@ def main():
                 _padd("bg_anim", _dt_bg)
 
         # --- 3D_ROTATE Mode7: 플레이어 뒤 카메라로 맵만 원근 샘플링 (일반 bg 와 이중 블릿 없음) ---
+        # [레이싱 그리기 7~5] 상·하 배경색(7) + 맵(6) — 도로(5)는 _paint_road_on_bg 로 bg에 선행 굽기
         if rotate3d_active and rotate3d_cfg is not None and bg is not None:
             try:
                 lw_i = int(CONFIG["WIDTH"])
@@ -4904,16 +5080,12 @@ def main():
                     mode7_cfg["player_screen_x_frac"] = float(_m7x)
             except (TypeError, ValueError, UnboundLocalError):
                 mode7_cfg = rotate3d_cfg
-            # 레이스 옵션 해상도(high/medium/low) → Mode7 quality_scale
+            # 레이스 옵션 해상도(high/medium/low) → Mode7 quality_scale (투영 동일·샘플만 감소)
             try:
                 _m7q = getattr(_fa_sess_m7, "mode7_quality_scale", None)
                 if _m7q is not None:
                     mode7_cfg = dict(mode7_cfg or {})
                     mode7_cfg["quality_scale"] = float(_m7q)
-                    _fb = getattr(_fa_sess_m7, "_mode7_fallback_xy", None)
-                    if isinstance(_fb, (tuple, list)) and len(_fb) >= 2:
-                        mode7_cfg["fallback_x_step"] = int(_fb[0])
-                        mode7_cfg["fallback_y_step"] = int(_fb[1])
             except (TypeError, ValueError, UnboundLocalError):
                 pass
             cam_back = float(rotate3d_cfg.get("camera_back", 26.0)) * float(rotate3d_current)
@@ -5026,6 +5198,7 @@ def main():
             fps_cap = int(fps_fx if fx_active else fps_idle)
 
         # --- [3 & 4. 통합 레이어 시스템 그리기] ---
+        # [레이싱 그리기 4] 필드 오브젝트·플레이어 ysort (경로 아이템·NPC는 activities.draw_world layer4)
         # 1. 화면에 그릴 모든 대상을 하나의 리스트로 모읍니다.
         # (손에 들고 있는 아이템은 제외)
         # 성능(핸드헬드): 화면 밖 오브젝트는 draw/정렬에서 제외(컬링)
@@ -5949,6 +6122,7 @@ def main():
                 ep_shown += 1
 
         # --- 필드 활동 오버레이 (낚시 찌·물고기 / 야구·레이스 월드 기즈모) ---
+        # [레이싱 그리기 4→3] draw_world: 아이템·NPC ysort → 에프터·충격·날씨 FX
         if field_activities.is_active:
             try:
                 _aid = None
@@ -6043,6 +6217,7 @@ def main():
 
 
         # 야구·레이스 등 화면 고정 UI — 월드 줌 이후 논리 해상도에 그림 (클릭 좌표와 일치)
+        # [레이싱 그리기 2→1] draw_screen layer2(글자·룰렛) → layer1(차선·옵션) / exit는 아래 chrome
         if field_activities.is_active:
             try:
                 _aid2 = None
@@ -6060,6 +6235,9 @@ def main():
                         x_offset_fn=x_offset_fn,
                         font_fn=activity_font_fn(_aid2),
                         mode7_ctx=rotate3d_mode7_ctx if rotate3d_active else None,
+                        world_zoom_draw=float(world_zoom_draw),
+                        world_zoom_off_x=float(world_zoom_off_x),
+                        world_zoom_off_y=float(world_zoom_off_y),
                     )
                 )
             except Exception:

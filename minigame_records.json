@@ -4,42 +4,6 @@
         "history": [
             {
                 "mode": "record_1p",
-                "char": "carrot",
-                "score": 1603,
-                "player": 1603,
-                "distances": [
-                    0,
-                    608,
-                    407,
-                    0,
-                    589
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc2",
-                "score": 169,
-                "player": 169,
-                "distances": [
-                    113,
-                    28,
-                    28
-                ]
-            },
-            {
-                "mode": "record_1p",
-                "char": "cc2",
-                "score": 254,
-                "player": 254,
-                "distances": [
-                    84,
-                    86,
-                    75,
-                    85
-                ]
-            },
-            {
-                "mode": "record_1p",
                 "char": "cc2",
                 "score": 336,
                 "player": 336,
@@ -235,6 +199,40 @@
                 "player": 84,
                 "distances": [
                     84
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "summer_k",
+                "score": 219,
+                "player": 219,
+                "distances": [
+                    53,
+                    81,
+                    84
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "boy2_k",
+                "score": 296,
+                "player": 296,
+                "distances": [
+                    110,
+                    52,
+                    111,
+                    75
+                ]
+            },
+            {
+                "mode": "record_1p",
+                "char": "boy2_k",
+                "score": 272,
+                "player": 272,
+                "distances": [
+                    109,
+                    78,
+                    85
                 ]
             }
         ]

@@ -887,7 +887,7 @@
     "category": "야구장(전광판)",
     "sprite_tilt": 1.0,
     "ysort": "ground",
-    "scoreboard_zoom": 4.0,
+    "scoreboard_zoom": 8.0,
     "baseball_scoreboard": true,
     "interact": {
       "enabled": false,

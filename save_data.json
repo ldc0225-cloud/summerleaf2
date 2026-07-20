@@ -18,11 +18,11 @@
     "progress_flower1_1": 1001,
     "baseball_entry_map": "bg_jjangpu",
     "baseball_entry_pos": [
-        893.4,
-        2312.0
+        885.8686291501015,
+        2311.1313708498983
     ],
     "baseball_difficulty": "easy",
     "racing_mode7_quality": "high",
     "racing_minimap_enabled": true,
-    "racing_camera_mode": "back"
+    "racing_camera_mode": "oblique"
 }

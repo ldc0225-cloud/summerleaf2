@@ -82,9 +82,13 @@ RACING_EDITOR_SCALAR_KEYS = [
     ("roulette_lane_period_sec", "룰렛발판 기본주기", "float", 0.55),
     ("summon_flash_sec", "소환 번쩍(초)", "float", 1.6),
     ("slipstream_min_speed_frac", "슬립 최소속도비", "float", 0.90),
-    ("slipstream_follow_s", "슬립 추종거리", "float", 38.0),
+    ("slipstream_follow_s", "슬립 추종거리", "float", 72.0),
     ("slipstream_lane_tol", "슬립 레인허용", "float", 0.42),
-    ("slipstream_accel_bonus", "슬립 가속보너스", "float", 28.0),
+    ("slipstream_hold_sec", "슬립 충전(초)", "float", 1.0),
+    ("slipstream_boost_mul", "슬립 부스트배율", "float", 1.20),
+    ("slipstream_accel_bonus", "슬립 가속보너스", "float", 18.0),
+    ("afterburner_len_speed", "에프터길이(스피드업)", "float", 36.0),
+    ("afterburner_len_slip", "에프터길이(최고속)", "float", 72.0),
     ("slipstream_bump_s", "추돌 거리", "float", 22.0),
     ("slipstream_bump_front_boost", "추돌 앞가속", "float", 1.35),
     ("slipstream_bump_rear_slow", "추돌 뒤감속", "float", 0.45),
@@ -111,8 +115,8 @@ RACING_EDITOR_XY_KEYS = [
 
 RACING_EDITOR_TEXT_KEYS = [
     ("exit_map", "퇴장 맵", "bg_jjangpu"),
-    # 청정 구간: "0,140; 2850,2992" (s0,s1 쌍 · 세미콜론 구분)
-    ("clean_zones", "청정구간(s)", ""),
+    # 청정 구간: "0,140; 2850,2992" (s0,s1 쌍 · 세미콜론 구분) — 아이템·날씨 무효과
+    ("clean_zones", "청정구간(아이템·날씨없음)", ""),
 ]
 
 
@@ -1582,7 +1586,7 @@ def draw_settings_modal(screen, font, state, sw, sh) -> dict:
         (rect.x + 14, rect.y + 12),
     )
     screen.blit(
-        font.render("청정구간: 0,140; 2850,2992", True, (180, 200, 220)),
+        font.render("청정구간: 아이템·날씨 없음  예) 0,140; 2850,2992", True, (180, 200, 220)),
         (rect.x + 14, rect.y + 28),
     )
     fields_data = state.get("settings_fields") or {}
