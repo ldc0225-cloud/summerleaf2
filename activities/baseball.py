@@ -68,8 +68,8 @@ from activities.baseball_zones import (
     resolve_flight_landing,
     resolve_landing_zone,
     scale_mask_to_background,
+    scoreboard_screen_size,
     scoreboard_style_from_object,
-    scoreboard_zoom_from_object,
     zone_footprint_rect,
     zone_uses_ellipse_fallback,
     _last_infield_before_fence,
@@ -1391,25 +1391,30 @@ class BaseballActivity(BaseFieldActivity):
             f"2P 홈런 {int(self._p2_hr)} 합계{p2}m" + (" 경기중" if live2 else ""),
         ]
 
+    def _world_to_composited_screen(self, ctx: FieldDrawContext, wx: float, wy: float) -> Tuple[int, int]:
+        """world_surf 좌표 → 후처리 월드 줌 합성 뒤 render_surf 좌표."""
+        sx, sy = _world_to_screen(ctx, wx, wy)
+        try:
+            wz = float(getattr(ctx, "world_zoom_draw", 1.0) or 1.0)
+        except Exception:
+            wz = 1.0
+        try:
+            ox = float(getattr(ctx, "world_zoom_off_x", 0.0) or 0.0)
+            oy = float(getattr(ctx, "world_zoom_off_y", 0.0) or 0.0)
+        except Exception:
+            ox, oy = 0.0, 0.0
+        return int(round(sx * wz + ox)), int(round(sy * wz + oy))
+
+    def _scoreboard_screen_rect(self, ctx: FieldDrawContext, o) -> Optional[pygame.Rect]:
+        if not is_scoreboard_object(o):
+            return None
+        sw = max(1, int(ctx.surf.get_width()))
+        dw, dh = scoreboard_screen_size(o, screen_w=sw)
+        cx, cy = self._world_to_composited_screen(ctx, float(o.pos[0]), float(o.pos[1]))
+        return pygame.Rect(int(cx - dw // 2), int(cy - dh), dw, dh)
+
     def _field_item_screen_rect(self, ctx: FieldDrawContext, o) -> Optional[pygame.Rect]:
         z = max(0.5, float(ctx.z))
-        if is_scoreboard_object(o):
-            try:
-                from engine import entity_combined_zoom_mul
-
-                ez = float(entity_combined_zoom_mul(o) or 1.0)
-            except Exception:
-                ez = scoreboard_zoom_from_object(o)
-            eff_z = z * ez
-            try:
-                iw, ih = o.image.get_size()
-            except Exception:
-                return None
-            dw = max(8, int(round(iw * eff_z)))
-            dh = max(8, int(round(ih * eff_z)))
-            cx, cy = _world_to_screen(ctx, float(o.pos[0]), float(o.pos[1]))
-            return pygame.Rect(int(cx - dw // 2), int(cy - dh), dw, dh)
-
         rect = zone_footprint_rect(o)
         if rect is None:
             return None
@@ -1439,7 +1444,7 @@ class BaseballActivity(BaseFieldActivity):
         font = self._ui_font(ctx, 9)
         corner_font = self._ui_font(ctx, 7)
         for board in self._scoreboard_objs:
-            rect = self._field_item_screen_rect(ctx, board)
+            rect = self._scoreboard_screen_rect(ctx, board)
             if rect is None or rect.w < 4 or rect.h < 4:
                 continue
             style = scoreboard_style_from_object(board)
@@ -4048,7 +4053,6 @@ class BaseballActivity(BaseFieldActivity):
             self._draw_fan_half_debug_world(ctx)
         if self.state == ST_FLIGHT:
             self._draw_ball_flight(ctx)
-        self._draw_scoreboards(ctx)
 
     def _draw_fan_half_debug_world(self, ctx: FieldDrawContext) -> None:
         """fan_half_deg를 맵 위에서 눈으로 맞추기 위한 파울라인(부채꼴) 표시."""
@@ -4110,6 +4114,7 @@ class BaseballActivity(BaseFieldActivity):
         elif self.state in (ST_MATCH_END, ST_DEMO_RESULT):
             self._draw_match_result(ctx)
 
+        self._draw_scoreboards(ctx)
         self._draw_2p_switch_fade(ctx)
 
     def _draw_2p_switch_fade(self, ctx: FieldDrawContext) -> None:

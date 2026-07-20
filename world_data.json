@@ -536,6 +536,7 @@
     },
     "bg_circurt01": {
         "bg_img": "bg_circuit01.png",
+        "display_name": "짱짱섬",
         "mask_img": "bg_town_mask.png",
         "event_zones": [],
         "objects": [
@@ -647,9 +648,13 @@
             "roulette_lane_period_sec": 0.55,
             "summon_flash_sec": 1.6,
             "slipstream_min_speed_frac": 0.9,
-            "slipstream_follow_s": 38.0,
+            "slipstream_follow_s": 72.0,
             "slipstream_lane_tol": 0.42,
-            "slipstream_accel_bonus": 28.0,
+            "slipstream_hold_sec": 1.0,
+            "slipstream_boost_mul": 1.2,
+            "slipstream_accel_bonus": 18.0,
+            "afterburner_len_speed": 36.0,
+            "afterburner_len_slip": 72.0,
             "slipstream_bump_s": 22.0,
             "slipstream_bump_front_boost": 1.35,
             "slipstream_bump_rear_slow": 0.45,
@@ -700,37 +705,7 @@
             "road_border_px": 3.0,
             "items": [
                 {
-                    "s": 225.3,
-                    "lane": "B",
-                    "type": "speed",
-                    "kind": "secret",
-                    "strength": 1.45,
-                    "duration_sec": 2.2,
-                    "asset": "item_racing001",
-                    "consume": false
-                },
-                {
-                    "s": 225.3,
-                    "lane": "A",
-                    "type": "speed",
-                    "kind": "secret",
-                    "strength": 1.45,
-                    "duration_sec": 2.2,
-                    "asset": "item_racing001",
-                    "consume": false
-                },
-                {
-                    "s": 225.3,
-                    "lane": "C",
-                    "type": "speed",
-                    "kind": "secret",
-                    "strength": 1.45,
-                    "duration_sec": 2.2,
-                    "asset": "item_racing001",
-                    "consume": false
-                },
-                {
-                    "s": 1723.15,
+                    "s": 334.29,
                     "lane": "B",
                     "type": "speed",
                     "kind": "summon",
@@ -740,7 +715,7 @@
                     "consume": false
                 },
                 {
-                    "s": 1723.15,
+                    "s": 334.29,
                     "lane": "A",
                     "type": "speed",
                     "kind": "summon",
@@ -750,7 +725,7 @@
                     "consume": false
                 },
                 {
-                    "s": 1723.15,
+                    "s": 334.29,
                     "lane": "C",
                     "type": "speed",
                     "kind": "summon",
@@ -760,7 +735,7 @@
                     "consume": false
                 },
                 {
-                    "s": 1017.49,
+                    "s": 1751.29,
                     "lane": "B",
                     "type": "speed",
                     "kind": "summon",
@@ -770,7 +745,7 @@
                     "consume": false
                 },
                 {
-                    "s": 1017.49,
+                    "s": 1751.29,
                     "lane": "A",
                     "type": "speed",
                     "kind": "summon",
@@ -780,37 +755,7 @@
                     "consume": false
                 },
                 {
-                    "s": 1017.49,
-                    "lane": "C",
-                    "type": "speed",
-                    "kind": "summon",
-                    "strength": 1.45,
-                    "duration_sec": 2.2,
-                    "asset": "item_racing001",
-                    "consume": false
-                },
-                {
-                    "s": 2503.25,
-                    "lane": "B",
-                    "type": "speed",
-                    "kind": "summon",
-                    "strength": 1.45,
-                    "duration_sec": 2.2,
-                    "asset": "item_racing001",
-                    "consume": false
-                },
-                {
-                    "s": 2503.25,
-                    "lane": "A",
-                    "type": "speed",
-                    "kind": "summon",
-                    "strength": 1.45,
-                    "duration_sec": 2.2,
-                    "asset": "item_racing001",
-                    "consume": false
-                },
-                {
-                    "s": 2503.25,
+                    "s": 1751.29,
                     "lane": "C",
                     "type": "speed",
                     "kind": "summon",
@@ -860,7 +805,7 @@
                     "consume": false
                 },
                 {
-                    "s": 1349.96,
+                    "s": 1167.85,
                     "lane": "A",
                     "type": "speed",
                     "kind": "roulette",
@@ -871,7 +816,7 @@
                     "roulette_period_sec": 0.35
                 },
                 {
-                    "s": 2359.59,
+                    "s": 2327.67,
                     "lane": "B",
                     "type": "speed",
                     "kind": "secret",
@@ -881,7 +826,7 @@
                     "consume": false
                 },
                 {
-                    "s": 2359.59,
+                    "s": 2327.67,
                     "lane": "A",
                     "type": "speed",
                     "kind": "secret",
@@ -891,7 +836,7 @@
                     "consume": false
                 },
                 {
-                    "s": 2359.59,
+                    "s": 2327.67,
                     "lane": "C",
                     "type": "speed",
                     "kind": "secret",
@@ -901,8 +846,8 @@
                     "consume": false
                 },
                 {
-                    "s": 2665.87,
-                    "lane": "B",
+                    "s": 2594.6,
+                    "lane": "C",
                     "type": "speed",
                     "kind": "normal",
                     "strength": 1.45,
@@ -911,6 +856,136 @@
                     "consume": false
                 }
             ]
+        }
+    },
+    "bg_circurt02": {
+        "bg_img": "bg_circuit02.png",
+        "display_name": "서킷 2",
+        "mask_img": "bg_town_mask.png",
+        "event_zones": [],
+        "objects": [],
+        "npcs": [],
+        "racing": {
+            "path": [
+                [768.0, 1024.0],
+                [1120.0, 1024.0],
+                [1152.0, 992.0],
+                [1184.0, 960.0],
+                [1200.0, 928.0],
+                [1200.0, 864.0],
+                [1216.0, 832.0],
+                [1216.0, 768.0],
+                [1184.0, 720.0],
+                [1184.0, 656.0],
+                [1120.0, 624.0],
+                [1056.0, 592.0],
+                [992.0, 592.0],
+                [928.0, 592.0],
+                [880.0, 560.0],
+                [864.0, 512.0],
+                [896.0, 496.0],
+                [928.0, 480.0],
+                [976.0, 464.0],
+                [1024.0, 464.0],
+                [1088.0, 480.0],
+                [1120.0, 432.0],
+                [1104.0, 384.0],
+                [1104.0, 352.0],
+                [1056.0, 320.0],
+                [1024.0, 304.0],
+                [960.0, 304.0],
+                [576.0, 304.0],
+                [512.0, 336.0],
+                [480.0, 352.0],
+                [464.0, 400.0],
+                [416.0, 448.0],
+                [368.0, 528.0],
+                [352.0, 592.0],
+                [336.0, 720.0],
+                [336.0, 816.0],
+                [352.0, 896.0],
+                [384.0, 960.0],
+                [432.0, 1008.0],
+                [480.0, 1024.0]
+            ],
+            "closed": true,
+            "laps": 7,
+            "lane_width": 30.0,
+            "start_s": 0.0,
+            "start_spacing": 22.0,
+            "max_speed": 160.0,
+            "min_corner_speed": 40.0,
+            "accel": 80.0,
+            "brake": 30.0,
+            "corner_brake": 1.2,
+            "turn_rate_rad": 1.2,
+            "path_pull": 1.2,
+            "cam_side_sign": -1.0,
+            "cam_turn_rate_rad": 1.0,
+            "countdown_sec": 3.0,
+            "item_pick_radius": 18.0,
+            "item_random_enabled": true,
+            "item_random_count": 8,
+            "secret_spin_sec": 1.35,
+            "roulette_lane_period_sec": 0.55,
+            "summon_flash_sec": 1.6,
+            "slipstream_min_speed_frac": 0.9,
+            "slipstream_follow_s": 72.0,
+            "slipstream_lane_tol": 0.42,
+            "slipstream_hold_sec": 1.0,
+            "slipstream_boost_mul": 1.2,
+            "slipstream_accel_bonus": 18.0,
+            "afterburner_len_speed": 36.0,
+            "afterburner_len_slip": 72.0,
+            "slipstream_bump_s": 22.0,
+            "slipstream_bump_front_boost": 1.35,
+            "slipstream_bump_rear_slow": 0.45,
+            "slipstream_bump_slow_sec": 1.4,
+            "exit_pos": [850.0, 2310.0],
+            "exit_map": "bg_jjangpu",
+            "clean_zones": [
+                [689.0, 944.0],
+                [1100.0, 1100.0]
+            ],
+            "weather": {
+                "enabled": true,
+                "rain": {
+                    "chance_per_lap": 0.3,
+                    "zone_len_s": [90.0, 180.0],
+                    "slow_mul": 0.75
+                },
+                "lightning": {
+                    "chance_per_lap": 0.2,
+                    "zone_len_s": [50.0, 100.0],
+                    "strike_chance": 0.4,
+                    "freeze_sec": 1.2
+                }
+            },
+            "road_draw_enabled": true,
+            "road_lane_colors": [
+                [
+                    210,
+                    60,
+                    60
+                ],
+                [
+                    235,
+                    205,
+                    70
+                ],
+                [
+                    70,
+                    115,
+                    230
+                ]
+            ],
+            "road_border_color": [
+                40,
+                40,
+                46
+            ],
+            "road_border_px": 3.0,
+            "items": []
         }
     },
     "bg_jjangpu_test": {
@@ -987,7 +1062,6 @@
             { "name": "bbzone_penalty", "pos": [1024, 640], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0, "baseball_zone": { "mode": "add_m", "value": -30.0, "label": "-30미터", "radius_x": 64.0, "radius_y": 40.0, "render": "ellipse" }
             },
             { "name": "merge-tree3-1", "pos": [432, 48], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "TV", "pos": [96, 480], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "bbscoreboard1", "pos": [320, 176], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 1 }
         ],
         "npcs": [

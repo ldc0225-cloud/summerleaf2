@@ -873,6 +873,232 @@ def build_global_hotkey_event_map():
     return out
 
 
+_APP_FORCE_QUIT_KEYS_CACHE = None
+
+
+def _app_force_quit_key_sets():
+    """CONFIG → (a_keys, x_keys, joy_combos)."""
+    global _APP_FORCE_QUIT_KEYS_CACHE
+    if _APP_FORCE_QUIT_KEYS_CACHE is not None:
+        return _APP_FORCE_QUIT_KEYS_CACHE
+    a_specs = CONFIG.get("APP_FORCE_QUIT_COMBO_KEYS_A") or ["a", "space", "return"]
+    x_specs = CONFIG.get("APP_FORCE_QUIT_COMBO_KEYS_X") or ["x"]
+    a_keys = set()
+    x_keys = set()
+    if isinstance(a_specs, (list, tuple)):
+        for spec in a_specs:
+            pk = _pygame_key_from_spec(spec)
+            if pk is not None:
+                a_keys.add(int(pk))
+    if isinstance(x_specs, (list, tuple)):
+        for spec in x_specs:
+            pk = _pygame_key_from_spec(spec)
+            if pk is not None:
+                x_keys.add(int(pk))
+    if not a_keys:
+        a_keys.add(int(pygame.K_a))
+    if not x_keys:
+        x_keys.add(int(pygame.K_x))
+    joy_combos = []
+    raw_combos = CONFIG.get("APP_FORCE_QUIT_JOY_COMBOS")
+    if isinstance(raw_combos, (list, tuple)):
+        for row in raw_combos:
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                try:
+                    joy_combos.append((int(row[0]), int(row[1])))
+                except (TypeError, ValueError):
+                    pass
+    if not joy_combos:
+        raw_joy = CONFIG.get("APP_FORCE_QUIT_JOY_BUTTONS")
+        if isinstance(raw_joy, (list, tuple)) and len(raw_joy) >= 2:
+            try:
+                joy_combos.append((int(raw_joy[0]), int(raw_joy[1])))
+            except (TypeError, ValueError):
+                pass
+    if not joy_combos:
+        joy_combos = [(0, 2), (1, 3), (0, 3)]
+    _APP_FORCE_QUIT_KEYS_CACHE = (a_keys, x_keys, tuple(joy_combos))
+    return _APP_FORCE_QUIT_KEYS_CACHE
+
+
+class _AppForceQuitInput:
+    """A+X 종료 — 이벤트 추적만(매 프레임 패드 폴링·부팅 시 joystick.init 금지)."""
+
+    def __init__(self):
+        self._held_keys: set = set()
+        self._held_joy: set = set()  # (joy_id, button)
+        self._joys: dict = {}
+        self._combo_btns: set = set()
+
+    def _combo_button_set(self):
+        if self._combo_btns:
+            return self._combo_btns
+        _, _, joy_combos = _app_force_quit_key_sets()
+        btns = set()
+        for ba, bx in joy_combos:
+            btns.add(int(ba))
+            btns.add(int(bx))
+        self._combo_btns = btns
+        return btns
+
+    def _ensure_joystick_module(self) -> None:
+        if getattr(self, "_joy_module_ready", False):
+            return
+        self._joy_module_ready = True
+        try:
+            if not pygame.joystick.get_init():
+                pygame.joystick.init()
+            configure_pygame_input_event_filter()
+        except Exception:
+            pass
+
+    def _ensure_joystick(self, joy_id: int) -> None:
+        self._ensure_joystick_module()
+        try:
+            jid = int(joy_id)
+        except (TypeError, ValueError):
+            return
+        j = self._joys.get(jid)
+        if j is None:
+            try:
+                j = pygame.joystick.Joystick(jid)
+                self._joys[jid] = j
+            except Exception:
+                return
+        try:
+            if not j.get_init():
+                j.init()
+        except Exception:
+            pass
+
+    def feed_event(self, event) -> None:
+        if event is None:
+            return
+        try:
+            if not bool(CONFIG.get("APP_FORCE_QUIT_COMBO_ENABLED", True)):
+                return
+        except Exception:
+            return
+        et = event.type
+        try:
+            if et == pygame.KEYDOWN:
+                self._held_keys.add(int(event.key))
+                try:
+                    a_keys, x_keys, _ = _app_force_quit_key_sets()
+                    if int(event.key) in a_keys or int(event.key) in x_keys:
+                        self._ensure_joystick_module()
+                except Exception:
+                    pass
+            elif et == pygame.KEYUP:
+                self._held_keys.discard(int(event.key))
+            elif et == pygame.JOYBUTTONDOWN:
+                jid = int(event.joy)
+                self._ensure_joystick(jid)
+                self._held_joy.add((jid, int(event.button)))
+            elif et == pygame.JOYBUTTONUP:
+                self._held_joy.discard((int(event.joy), int(event.button)))
+            elif et == pygame.JOYDEVICEADDED:
+                jid = int(getattr(event, "device_index", 0))
+                self._ensure_joystick(jid)
+            elif et == pygame.JOYDEVICEREMOVED:
+                jid = getattr(event, "instance_id", None)
+                if jid is None:
+                    jid = getattr(event, "device_index", None)
+                if jid is not None:
+                    jid = int(jid)
+                    self._joys.pop(jid, None)
+                    self._held_joy = {(j, b) for j, b in self._held_joy if j != jid}
+        except Exception:
+            pass
+
+    def _keys_down(self, key_set, keys_pressed) -> bool:
+        if not key_set:
+            return False
+        if keys_pressed is not None:
+            try:
+                if any(bool(keys_pressed[k]) for k in key_set):
+                    return True
+            except Exception:
+                pass
+        return any(k in self._held_keys for k in key_set)
+
+    def a_held(self, keys_pressed=None) -> bool:
+        a_keys, _, _ = _app_force_quit_key_sets()
+        return self._keys_down(a_keys, keys_pressed)
+
+    def has_combo_candidate(self, keys_pressed=None) -> bool:
+        """A 또는 X(키·패드)가 하나라도 눌려 있을 때만 True — 매 프레임 종료 검사 생략."""
+        try:
+            if not bool(CONFIG.get("APP_FORCE_QUIT_COMBO_ENABLED", True)):
+                return False
+        except Exception:
+            return False
+        a_keys, x_keys, _ = _app_force_quit_key_sets()
+        if self._keys_down(a_keys, keys_pressed) or self._keys_down(x_keys, keys_pressed):
+            return True
+        if not self._held_joy:
+            return False
+        combo_btns = self._combo_button_set()
+        return any(int(b) in combo_btns for _, b in self._held_joy)
+
+    def _joy_combo_from_events(self, joy_combos) -> bool:
+        if not self._held_joy or not joy_combos:
+            return False
+        by_joy: dict = {}
+        for jid, btn in self._held_joy:
+            by_joy.setdefault(int(jid), set()).add(int(btn))
+        for btns in by_joy.values():
+            for ba, bx in joy_combos:
+                if int(ba) in btns and int(bx) in btns:
+                    return True
+        return False
+
+    def combo_pressed(self, keys_pressed=None) -> bool:
+        try:
+            if not bool(CONFIG.get("APP_FORCE_QUIT_COMBO_ENABLED", True)):
+                return False
+        except Exception:
+            pass
+        a_keys, x_keys, joy_combos = _app_force_quit_key_sets()
+        if self._keys_down(a_keys, keys_pressed) and self._keys_down(x_keys, keys_pressed):
+            return True
+        return self._joy_combo_from_events(joy_combos)
+
+
+_APP_FORCE_QUIT = _AppForceQuitInput()
+
+
+def configure_pygame_input_event_filter() -> None:
+    """조이스틱 축·hat 이벤트 폭주 차단(RG34XX 등에서 프레임 드랍 원인)."""
+    try:
+        pygame.event.set_blocked(
+            [
+                pygame.JOYAXISMOTION,
+                pygame.JOYBALLMOTION,
+                pygame.JOYHATMOTION,
+            ]
+        )
+    except Exception:
+        pass
+
+
+def app_force_quit_feed_event(event) -> None:
+    _APP_FORCE_QUIT.feed_event(event)
+
+
+def app_force_quit_has_candidate(keys_pressed=None) -> bool:
+    return _APP_FORCE_QUIT.has_combo_candidate(keys_pressed)
+
+
+def app_force_quit_combo_a_held(keys_pressed=None) -> bool:
+    return _APP_FORCE_QUIT.a_held(keys_pressed)
+
+
+def app_force_quit_combo_pressed(keys_pressed=None) -> bool:
+    """A+X(또는 설정 키·패드) 동시 입력 — 확인 없이 앱 종료용."""
+    return _APP_FORCE_QUIT.combo_pressed(keys_pressed)
+
+
 # =============================================================================
 # 게임 종료 버튼 (OVERLAY_UI)
 # events.json의 fishing_exit·낚시 그만두기와 동일한 EventManager 파이프라인 사용.
@@ -1417,6 +1643,13 @@ def try_start_hotkey_global_event(
     eid = table.get(int(pygame_key_int))
     if not eid:
         return False
+    # A 누른 채 X → 종료 조합. X 단독 핫키(줌 순환 등)가 먼저 먹지 않게
+    try:
+        _, x_keys, _ = _app_force_quit_key_sets()
+        if int(pygame_key_int) in x_keys and app_force_quit_combo_a_held():
+            return False
+    except Exception:
+        pass
     from flow import start_system_event
 
     # 스냅샷을 넘기면 end_event 시 pending_field_tilt_restore로 필드 틸트/쉬어가 되돌아가

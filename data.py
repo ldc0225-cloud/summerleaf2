@@ -19,6 +19,10 @@ CONFIG = {
     "AUTO_OUTPUT_MODE_ON_WORLD_ZOOM": 2.0,
     "AUTO_OUTPUT_MODE_OFF_WORLD_ZOOM": 1.0,
     "AUTO_OUTPUT_MODE_COOLDOWN_MS": 900,
+    # 3D_ROTATE(Mode7) 샘플 해상도 = CONFIG WIDTH×HEIGHT.
+    # True면 Mode7 활성 중 논리 해상도를 320×240(UPSCALE_320)로 강제(해상도 재설정→깜빡임).
+    # 기본 화면이 이미 zoom=2.0(UPSCALE_320)이면 False 권장 — 성능은 같고 깜빡임만 제거.
+    "ROTATE3D_FORCE_LOGICAL_320": False,
 
 
     # 논리 해상도(게임 내부 좌표 기준)
@@ -501,16 +505,16 @@ CONFIG = {
     "ROTATE3D_ANGLE_SPEED": 2.2,       # Mode7 활성 시 < > 키 회전 속도 (rad/s). activity가 heading을 쓰면 이 키는 옵션
     # 배경 Mode7: p = CAM_H/(row+NEAR), depth = p*DEPTH_MUL, lat_scale = p*LATERAL_MUL
     # 스프라이트 크기(SNES 카트): scale = CAMERA_BACK/forward — 앞뒤만. 같은 깊이면 플레이어와 동일 크기.
-    "ROTATE3D_HORIZON_FRAC": 0.30,     # 지평선 높이 = 화면높이×비율×strength
-    "ROTATE3D_CAM_H": 60.0,            # p = CAM_H/(row+NEAR)   80
+    "ROTATE3D_HORIZON_FRAC": 0.30,     # 지평선 높이 = 화면높이×비율×strength   30
+    "ROTATE3D_CAM_H": 90.0,            # p = CAM_H/(row+NEAR)   120
     "ROTATE3D_NEAR": 30.0,             # 작을수록 원근 강함(너무 작으면 하단이 광각처럼 보임)   30.0
     "ROTATE3D_DEPTH_MUL": 165.0,       # depth = p * DEPTH_MUL (PIVOT_FIT 켜면 런타임에 덮어씀) 165
-    "ROTATE3D_LATERAL_MUL": 1.05,      # 도로 위치 샘플용. 스프라이트 크기에는 안 씀
-    "ROTATE3D_CAMERA_BACK": 200.0,      # 플레이어 뒤 카메라 + 스프라이트 scale=1 기준 깊이 200
+    "ROTATE3D_LATERAL_MUL": 1.05,      # 도로 위치 샘플용. 스프라이트 크기에는 안 씀    1.05
+    "ROTATE3D_CAMERA_BACK": 200.0,      # 플레이어 뒤 카메라 + 스프라이트 scale=1 기준 깊이 200 (가장 효과 큼)
     "ROTATE3D_BASE_HEADING": 1.5707963267948966,  # 기본 시선(+y). heading = BASE + ui.rotate3d_angle
-    "ROTATE3D_PLAYER_BOTTOM_PAD": 50,  # 플레이어 하단 고정 여백(px)
+    "ROTATE3D_PLAYER_BOTTOM_PAD": 50,  # 플레이어 하단 고정 여백(px)    50
     # Mode7 화면에서 플레이어(투영 중심) X 비율. 0.5=중앙, 1/3≈좌측 — 우측 시야에 트랙 전방이 더 넓게 들어옴
-    "ROTATE3D_PLAYER_SCREEN_X_FRAC": 0.35,
+    "ROTATE3D_PLAYER_SCREEN_X_FRAC": 0.35,    #0.35
     # True면 DEPTH_MUL만 맞춰 발이 빌보드 Y에 오게 함(행별 원근 식은 그대로)
     "ROTATE3D_PIVOT_FIT_PLAYER": True,
     # 스프라이트: scale = ref_forward/forward (앞뒤만). 호출측에서 ×zoom
@@ -529,12 +533,19 @@ CONFIG = {
     "ROTATE3D_SKY_FOV_RAD": 1.2,                 # 화면 가로가 담는 하늘 시야각(라디안). 클수록 좌우로 더 많이 보임
     # --- Mode7 성능 ---
     # quality_scale: 1.0=전체 해상도 샘플, 0.75≈중간, 0.5=반해상도 후 확대.
-    # cfg에 quality_scale 이 명시되면(레이스 옵션) Android 자동 하향을 적용하지 않는다.
+    # cfg에 quality_scale 이 명시되면(레이스 옵션) 그 값을 쓰되, Android 는 CAP 로 상한.
+    # H700급(RG34XX 등): Mode7 부하는 오브젝트가 아니라 바닥 픽셀 샘플 — 상한이 핵심.
     "ROTATE3D_QUALITY_SCALE": 1.0,              # PC·명시 없을 때 기본(전체)
-    "ROTATE3D_ANDROID_QUALITY_SCALE": 0.75,     # Android에서 CONFIG만 1.0일 때 자동(중간급). 레이스 옵션이 우선
+    "ROTATE3D_ANDROID_QUALITY_SCALE": 0.50,     # Android에서 CONFIG만 1.0일 때 자동
+    "ROTATE3D_ANDROID_QUALITY_CAP": 0.55,       # 640 논리일 때 레이스 '높음' 상한
+    # 320 논리(Mode7 강제/UPSCALE)면 픽셀 수가 1/4 → 상한을 올려도 640@0.5와 비슷한 부하
+    "ROTATE3D_ANDROID_QUALITY_CAP_320": 0.90,
+    "ROTATE3D_SAMPLE_CHUNK_ROWS": 48,           # numpy 벡터화 청크(행). 32~64 권장
+    # 행 인터레이스: 짝수/홀수 행을 프레임마다 번갈아 샘플(~2× 가벼움). 고속 회전 시 빗살 잔상 가능.
+    "ROTATE3D_INTERLACE_ROWS": True,
     "ROTATE3D_FALLBACK_X_STEP": 2,              # numpy 없을 때 가로 샘플 간격(px)
     "ROTATE3D_FALLBACK_Y_STEP": 1,              # numpy 없을 때 세로 샘플 간격(px). 2면 줄 복제
-    "ROTATE3D_ANDROID_FALLBACK_X_STEP": 2,      # Android get_at 폴백 가로 간격(품질↑ — 예전 3→2)
+    "ROTATE3D_ANDROID_FALLBACK_X_STEP": 3,      # Android get_at 폴백 가로 간격
     "ROTATE3D_ANDROID_FALLBACK_Y_STEP": 2,      # Android get_at 폴백 세로 간격
     # 시작 시 디버그 텍스트 오버레이(HUD) 기본 표시 여부. 런타임 토글은 'O' 키.
     "SHOW_OVERLAY_DEFAULT": False,
@@ -542,6 +553,13 @@ CONFIG = {
     "SHOW_RSS_OVERLAY_WHEN_OFF": False,
     # 필드 플레이 중 오른쪽 위 게임 종료 버튼(OVERLAY_UI, events.json fishing_exit와 동일 파이프).
     "GAME_EXIT_OVERLAY_ENABLED": True,
+    # RG34XX 등 터치 없는 기기: A+X 동시 입력 시 앱 즉시 종료 (확인창 없음).
+    "APP_FORCE_QUIT_COMBO_ENABLED": True,
+    "APP_FORCE_QUIT_COMBO_KEYS_A": ["a", "space", "return"],  # A 버튼(키보드 매핑)
+    "APP_FORCE_QUIT_COMBO_KEYS_X": ["x"],                     # X 버튼(키보드 매핑)
+    # RG34XX 등 패드: SDL JOYBUTTON 조합(여러 후보). 레거시 APP_FORCE_QUIT_JOY_BUTTONS 도 폴백.
+    "APP_FORCE_QUIT_JOY_COMBOS": [[0, 2], [1, 3], [0, 3], [2, 3], [1, 0]],
+    "APP_FORCE_QUIT_JOY_BUTTONS": [0, 2],
     # 감쇠로 멈춘 뒤 시뮬을 다시 시작하는 키. GLOBAL_EVENT_HOTKEYS와 동일: 한 글자, F9, K_ESCAPE 등 pygame 상수명.
     "SWING_RESTART_HOTKEY": "b",
 
@@ -895,12 +913,14 @@ RACING_DEFAULTS = {
     "lane_btn_size_px_320": 40.0,
     "lane_btn_gap_px_320": 10.0,
     "lane_btn_char_gap_px_320": 8.0,  # 캐릭터와 버튼 사이 간격
+    "lane_btn_y_down_px_320": 40.0,   # 뒤/비스듬히 ◀▶ 를 캐릭터 기준 아래로
     "lane_btn_alpha": 128,            # 반투명 (~50%)
     "lane_btn_margin_x_frac": 0.03,   # (레거시·폴백) 화면 왼쪽 여백
     "lane_btn_center_y_frac": 0.55,   # (레거시·폴백) 세로 중심
     "path_pull": 2.2,        # 경로로 끌어당기는 힘(작을수록 코너에서 바깥으로 더 나감)
     "path_soft_follow": 0.5, # (레거시·미사용) path_pull 사용
     "cam_side_sign": -1.0,   # Mode7: heading + sign*π/2 = 진행 방향의 오른쪽에서 비춤
+    "cam_oblique_rad": 0.4,  # 비스듬히: 뒤 추적 + 이 각만큼 yaw (≈45°)
     "cam_turn_rate_rad": 3.4,  # 카메라가 플레이어 heading을 따라 도는 각속도(스냅 방지)
     "rotate3d_strength": 1.0,
     "countdown_sec": 3.0,
@@ -927,7 +947,7 @@ RACING_DEFAULTS = {
     "item_respawn_sec": 3.0,  # 고정 아이템 획득 후 재등장까지
     "item_random_enabled": False,
     "item_random_count": 6,
-    # 청정 구간: [[s0,s1], ...] — 날씨·랜덤 소환·번개 등 글로벌 랜덤 무효
+    # 청정 구간: [[s0,s1], ...] — 아이템(고정·랜덤·소환) / 날씨 완전 무효과
     "clean_zones": [],
     # 맵별 날씨 (전역 랜덤). enabled=false 면 비활성.
     # rain: 구간 통과 시 감속 / lightning: 구간 진입 시 1회 꽝!(정지)
@@ -944,21 +964,80 @@ RACING_DEFAULTS = {
     },
     "weather_rain_anim": "rain",
     "weather_lightning_anim": "lightning",
-    # 슬립스트림 — 최고속 90%↑ 앞차 뒤 반투명 에프터 / 뒤차 가속 보너스
+    # 슬립스트림 — 최고속 90%↑ 노란 에프터(길이=스피드업×2). 뒤차 1초 추종 시 ×1.2·초록 에프터
     "slipstream_min_speed_frac": 0.90,
-    "slipstream_follow_s": 38.0,
+    "afterburner_yellow_off_frac": 0.84,  # 노란 꼬리 끔(히스테리시스) — 깜빡임 방지
+    "slipstream_follow_s": 72.0,  # 노란 꼬리 길이와 맞춤 (스피드업 기본 ~36의 2배)
     "slipstream_lane_tol": 0.42,
-    "slipstream_accel_bonus": 28.0,
+    "slipstream_hold_sec": 1.0,  # 노란 꼬리 밟는 시간 → 부스트 발동
+    "slipstream_boost_mul": 1.20,  # 추종 부스트 (~+20%)
+    "slipstream_accel_bonus": 18.0,
     "slipstream_bump_s": 22.0,
     "slipstream_bump_front_boost": 1.35,
     "slipstream_bump_rear_slow": 0.45,
     "slipstream_bump_slow_sec": 1.4,
-    # 속도 상승 아이템 획득 시 뒤쪽 에프터버너 FX 지속(초)
+    # 추돌 타격 FX (접촉점 빨간 스파크, 짧게·작게)
+    "bump_hit_sec": 0.28,
+    "bump_hit_radius_px": 7.0,
+    # 에프터버너: 스피드업=빨강(짧음), 최고속=노랑(2배), 슬립부스트=초록
     "speed_afterburner_sec": 1.1,
+    "afterburner_len_speed": 36.0,
+    "afterburner_len_slip": 72.0,
     # 시크릿 상자 룰렛 UI
     "secret_spin_sec": 1.35,
     "roulette_lane_period_sec": 0.55,
     "summon_flash_sec": 1.6,
+    # --- 레이스 탑승 애니 (몸=seat_idle + 뒤쪽 자벌레 underlay) ---
+    # 에셋: assets/images/character/racing/<inchworm_anim>_left/
+    # 자벌레 초당 프레임은 r.speed 에 비례 (0→정지, max_speed→inchworm_fps_at_max)
+    "inchworm_anim": "moveinchworm_racing",  # load_racing_overlay_frames 애니 세트명
+    "inchworm_fps_at_max": 14.0,             # 최고속(max_speed)일 때 자벌레 프레임/초
+    "inchworm_speed_eps": 1.0,               # 이 속도(px/s) 이하면 애니 완전 정지(fps=0)
+    # --- 메뉴: 맵·랩·난이도 ---
+    # map_pick: bg_circuit01~04. 월드 키가 bg_circurt* 이면 aliases 로 매칭.
+    "map_pick": [
+        {"id": "bg_circuit01", "aliases": ["bg_circurt01"], "label": ""},
+        {"id": "bg_circuit02", "aliases": ["bg_circurt02"], "label": ""},
+        {"id": "bg_circuit03", "aliases": ["bg_circurt03"], "label": ""},
+        {"id": "bg_circuit04", "aliases": ["bg_circurt04"], "label": ""},
+    ],
+    "lap_options": [1, 3, 5, 7],
+    "difficulty_default": "normal",
+    # --- 완주 세레모니 (마리오카트식) ---
+    "ceremony_sec": 5.0,           # 계속 주행 + 카메라 정면 + 등수 표시
+    "ceremony_cam_turn_rad": 1.35, # 세레모니 중 카메라가 정면으로 도는 각속도
+    "ceremony_fade_sec": 0.55,     # 메뉴 전환 페이드아웃/인
+    "ceremony_rank_msg": {
+        "1": "1등이야 오예~",
+        "2": "2등이야~",
+        "3": "3등이다 힝~",
+    },
+    # Mode7 해상도 옵션 (레이스 옵션). quality_scale 만 변경 — 좌표·투영 동일, 시각만 거칠어짐.
+    "mode7_quality": "medium",
+    "mode7_quality_scales": {"high": 1.0, "medium": 0.72, "low": 0.50, "lowest": 0.35},
+    "mode7_quality_scales_android": {"high": 0.50, "medium": 0.42, "low": 0.32, "lowest": 0.25},
+}
+
+# 레이스 난이도 — NPC AI 레인 변경 주기·속도 배율
+RACING_DIFFICULTY = {
+    "easy": {
+        "label": "쉬움",
+        "npc_speed_mul": 0.82,
+        "ai_lane_min": 2.0,
+        "ai_lane_max": 3.8,
+    },
+    "normal": {
+        "label": "보통",
+        "npc_speed_mul": 1.0,
+        "ai_lane_min": 1.2,
+        "ai_lane_max": 3.0,
+    },
+    "hard": {
+        "label": "어려움",
+        "npc_speed_mul": 1.18,
+        "ai_lane_min": 0.55,
+        "ai_lane_max": 1.5,
+    },
 }
 
 # 레이스 아이템/효과 레지스트리 — type 키 → 기본 효과·에셋
@@ -1288,9 +1367,16 @@ def _android_ram_profile_preset_3gb():
         "MEM_WATCHDOG_GC_AFTER_FULL_CLEAR": False,
         "TILT_SHEAR_STRIP_BUCKET_PX": 96,
         # Mode7: Android는 numpy 없이 get_at 폴백 → 저해상도 샘플이 필수
+        # (레이스 옵션 '높음'도 ANDROID_QUALITY_CAP 로 막힘)
         "ROTATE3D_QUALITY_SCALE": 0.45,
+        "ROTATE3D_ANDROID_QUALITY_SCALE": 0.45,
+        "ROTATE3D_ANDROID_QUALITY_CAP": 0.50,
         "ROTATE3D_FALLBACK_X_STEP": 3,
         "ROTATE3D_FALLBACK_Y_STEP": 2,
+        "ROTATE3D_ANDROID_FALLBACK_X_STEP": 3,
+        "ROTATE3D_ANDROID_FALLBACK_Y_STEP": 2,
+        # 인터레이스는 dst.copy() 비용이 H700에서 샘플 절감보다 클 수 있음
+        "ROTATE3D_INTERLACE_ROWS": False,
     }
 
 

@@ -20,6 +20,10 @@ class FieldDrawContext:
     x_offset_fn: Optional[Callable[[float], float]]
     font_fn: Callable[[int], pygame.font.Font]
     mode7_ctx: Any = None  # rotate3d Mode7 ctx (레이스 아이템 등)
+    # draw_screen: world_surf → 후처리 줌 합성 뒤 최종 논리 좌표 (월드 UI 앵커용)
+    world_zoom_draw: float = 1.0
+    world_zoom_off_x: float = 0.0
+    world_zoom_off_y: float = 0.0
 
 
 class BaseFieldActivity:

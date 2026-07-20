@@ -1811,7 +1811,167 @@ def rotate3d_mode7_fill_sky_and_ground(dst, ctx, cfg=None, *, fill_sky=True):
 # Mode7 맵 array3d 캐시 — 매 프레임 전체 맵 복사(1440²≈6MB)를 막는다.
 # road paint 등으로 맵 픽셀이 바뀌면 bump_rotate3d_mode7_map_gen(surf) 호출.
 _MODE7_MAP_ARR_CACHE = {"key": None, "arr": None}
+_MODE7_MAP_RGB_CACHE = {"key": None, "raw": None, "mw": 0, "mh": 0}
 _MODE7_LORES_TMP = None
+# 행 인터레이스: 이전 프레임 Mode7 버퍼 + 짝/홀 위상
+_MODE7_INTERLACE = {"phase": 0, "prev": None, "w": 0, "h": 0, "full_next": True}
+
+
+def _mode7_interlace_enabled(cfg=None) -> bool:
+    if isinstance(cfg, dict) and cfg.get("interlace_rows") is not None:
+        try:
+            return bool(cfg.get("interlace_rows"))
+        except Exception:
+            pass
+    try:
+        return bool(CONFIG.get("ROTATE3D_INTERLACE_ROWS", False))
+    except Exception:
+        return False
+
+
+def _mode7_interlace_reset() -> None:
+    _MODE7_INTERLACE["phase"] = 0
+    _MODE7_INTERLACE["prev"] = None
+    _MODE7_INTERLACE["w"] = 0
+    _MODE7_INTERLACE["h"] = 0
+    _MODE7_INTERLACE["full_next"] = True
+
+
+def _mode7_interlace_begin(dst, ctx, *, fill_sky: bool, clear_color, cfg) -> tuple:
+    """
+    return: (active, phase, sample_all)
+    active 시 이전 프레임을 dst 에 깔고, sample_all 이 아니면 하늘 띠만 다시 칠함.
+    """
+    if dst is None or not _mode7_interlace_enabled(cfg):
+        return False, 0, True
+    try:
+        w = int(dst.get_width())
+        h = int(dst.get_height())
+        fill_ctx = _mode7_fill_ctx_for_dst(ctx, w, h)
+        horizon = int(fill_ctx.get("horizon", 0) or 0)
+    except Exception:
+        return False, 0, True
+    horizon = max(0, min(h, horizon))
+    prev = _MODE7_INTERLACE.get("prev")
+    size_ok = (
+        prev is not None
+        and int(_MODE7_INTERLACE.get("w") or 0) == w
+        and int(_MODE7_INTERLACE.get("h") or 0) == h
+    )
+    sample_all = bool(_MODE7_INTERLACE.get("full_next")) or (not size_ok)
+    phase = int(_MODE7_INTERLACE.get("phase") or 0) & 1
+
+    if sample_all:
+        if fill_sky:
+            rotate3d_mode7_fill_sky_and_ground(dst, fill_ctx, cfg, fill_sky=True)
+        else:
+            try:
+                dst.fill(clear_color)
+            except Exception:
+                pass
+        return True, phase, True
+
+    # 이전 프레임 유지
+    try:
+        dst.blit(prev, (0, 0))
+    except Exception:
+        if fill_sky:
+            rotate3d_mode7_fill_sky_and_ground(dst, fill_ctx, cfg, fill_sky=True)
+        return True, phase, True
+
+    # 하늘만 갱신 (바닥 fill 금지 — 홀/짝 잔상 유지)
+    if fill_sky and horizon > 0:
+        sky = _rotate3d_mode7_parse_rgb(
+            (cfg or {}).get("sky_color", CONFIG.get("ROTATE3D_SKY_COLOR", (135, 206, 235))),
+            (135, 206, 235),
+        )
+        try:
+            sky_path = str(
+                (cfg or {}).get("sky_panorama", CONFIG.get("ROTATE3D_SKY_PANORAMA", "")) or ""
+            ).strip()
+            if sky_path:
+                rotate3d_mode7_fill_sky_and_ground(dst, fill_ctx, cfg, fill_sky=True)
+                dst.blit(prev, (0, horizon), area=pygame.Rect(0, horizon, w, h - horizon))
+            else:
+                dst.fill(sky, pygame.Rect(0, 0, w, horizon))
+        except Exception:
+            pass
+    return True, phase, False
+
+
+def _mode7_interlace_end(dst, *, sample_all: bool) -> None:
+    if dst is None:
+        return
+    try:
+        w = int(dst.get_width())
+        h = int(dst.get_height())
+    except Exception:
+        return
+    prev = _MODE7_INTERLACE.get("prev")
+    if (
+        prev is None
+        or int(_MODE7_INTERLACE.get("w") or 0) != w
+        or int(_MODE7_INTERLACE.get("h") or 0) != h
+    ):
+        try:
+            prev = dst.copy()
+        except Exception:
+            try:
+                prev = pygame.Surface((w, h))
+                prev.blit(dst, (0, 0))
+            except Exception:
+                return
+        _MODE7_INTERLACE["prev"] = prev
+        _MODE7_INTERLACE["w"] = w
+        _MODE7_INTERLACE["h"] = h
+    else:
+        try:
+            prev.blit(dst, (0, 0))
+        except Exception:
+            pass
+    if sample_all:
+        _MODE7_INTERLACE["full_next"] = False
+        _MODE7_INTERLACE["phase"] = 1  # 다음 프레임부터 홀수 행
+    else:
+        _MODE7_INTERLACE["phase"] = 1 - (int(_MODE7_INTERLACE.get("phase") or 0) & 1)
+
+
+def _mode7_fill_ctx_for_dst(ctx, dst_w: int, dst_h: int):
+    """저해상도 dst 에 하늘/지평선을 맞출 때만 w/h/horizon 스케일 (투영 depth 는 full ctx 유지)."""
+    try:
+        cw = int(ctx.get("w") or dst_w)
+        ch = int(ctx.get("h") or dst_h)
+    except (TypeError, ValueError):
+        return ctx
+    if cw == int(dst_w) and ch == int(dst_h):
+        return ctx
+    try:
+        hf = int(ctx.get("horizon", 0) or 0)
+    except (TypeError, ValueError):
+        hf = 0
+    hz = max(0, min(int(dst_h) - 2, int(round(hf * float(dst_h) / max(1, float(ch))))))
+    out = dict(ctx)
+    out["w"] = int(dst_w)
+    out["h"] = int(dst_h)
+    out["horizon"] = hz
+    try:
+        psx = float(ctx.get("player_sx", dst_w * 0.5))
+        out["player_sx"] = psx * float(dst_w) / max(1.0, float(cw))
+        out["view_cx"] = float(ctx.get("view_cx", psx)) * float(dst_w) / max(1.0, float(cw))
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def _mode7_dst_horizon(ctx, dst_h: int) -> int:
+    try:
+        hf = int(ctx.get("horizon", 0) or 0)
+        ch = int(ctx.get("h") or dst_h)
+    except (TypeError, ValueError):
+        return 0
+    if ch == int(dst_h):
+        return max(0, min(int(dst_h) - 2, hf))
+    return max(0, min(int(dst_h) - 2, int(round(hf * float(dst_h) / max(1, float(ch))))))
 
 
 def bump_rotate3d_mode7_map_gen(map_surf) -> None:
@@ -1826,6 +1986,11 @@ def bump_rotate3d_mode7_map_gen(map_surf) -> None:
     try:
         _MODE7_MAP_ARR_CACHE["key"] = None
         _MODE7_MAP_ARR_CACHE["arr"] = None
+        _MODE7_MAP_RGB_CACHE["key"] = None
+        _MODE7_MAP_RGB_CACHE["raw"] = None
+        _MODE7_MAP_RGB_CACHE["mw"] = 0
+        _MODE7_MAP_RGB_CACHE["mh"] = 0
+        _mode7_interlace_reset()
     except Exception:
         pass
 
@@ -1834,6 +1999,11 @@ def invalidate_rotate3d_mode7_map_cache() -> None:
     """Mode7 맵 array 캐시 전부 비우기 (맵 전환 등)."""
     _MODE7_MAP_ARR_CACHE["key"] = None
     _MODE7_MAP_ARR_CACHE["arr"] = None
+    _MODE7_MAP_RGB_CACHE["key"] = None
+    _MODE7_MAP_RGB_CACHE["raw"] = None
+    _MODE7_MAP_RGB_CACHE["mw"] = 0
+    _MODE7_MAP_RGB_CACHE["mh"] = 0
+    _mode7_interlace_reset()
 
 
 def _mode7_map_cache_key(map_surf):
@@ -1850,8 +2020,6 @@ def _mode7_map_cache_key(map_surf):
 
 def _mode7_get_map_arr(map_surf):
     """map_surf → numpy RGB 배열. 동일 Surface·gen 이면 캐시 재사용."""
-    import numpy as np  # noqa: F401 — 호출측에서만 사용
-
     key = _mode7_map_cache_key(map_surf)
     if key is not None and _MODE7_MAP_ARR_CACHE.get("key") == key:
         arr = _MODE7_MAP_ARR_CACHE.get("arr")
@@ -1863,10 +2031,40 @@ def _mode7_get_map_arr(map_surf):
     return arr
 
 
+def _mode7_get_map_rgb_bytes(map_surf):
+    """numpy 없을 때 맵 RGB bytes 캐시 (tostring 1회/맵 gen)."""
+    if map_surf is None:
+        return None, 0, 0
+    key = _mode7_map_cache_key(map_surf)
+    if (
+        key is not None
+        and _MODE7_MAP_RGB_CACHE.get("key") == key
+        and _MODE7_MAP_RGB_CACHE.get("raw") is not None
+    ):
+        return (
+            _MODE7_MAP_RGB_CACHE["raw"],
+            int(_MODE7_MAP_RGB_CACHE.get("mw") or 0),
+            int(_MODE7_MAP_RGB_CACHE.get("mh") or 0),
+        )
+    try:
+        mw = int(map_surf.get_width())
+        mh = int(map_surf.get_height())
+        raw = pygame.image.tostring(map_surf, "RGB")
+    except Exception:
+        return None, 0, 0
+    _MODE7_MAP_RGB_CACHE["key"] = key
+    _MODE7_MAP_RGB_CACHE["raw"] = raw
+    _MODE7_MAP_RGB_CACHE["mw"] = mw
+    _MODE7_MAP_RGB_CACHE["mh"] = mh
+    return raw, mw, mh
+
+
 def _mode7_quality_scale(cfg) -> float:
     """
     Mode7 샘플 해상도 비율 (1.0=전체, 0.5=반해상도 후 확대).
-    cfg['quality_scale'] 이 명시되면 그대로 사용(레이스 옵션).
+    cfg['quality_scale'] 이 명시되면 우선 사용(레이스 옵션).
+    Android: 명시값이어도 ROTATE3D_ANDROID_QUALITY_CAP 이상으로 올리지 않음
+    (레이스 '높음'=1.0 이 핸드헬드에서 get_at/풀샘플을 강요하던 문제 방지).
     명시가 없고 Android + CONFIG 1.0 이면 ANDROID_QUALITY_SCALE 로 하향.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -1878,14 +2076,34 @@ def _mode7_quality_scale(cfg) -> float:
             q = float(CONFIG.get("ROTATE3D_QUALITY_SCALE", 1.0) or 1.0)
     except (TypeError, ValueError):
         q = 1.0
-    if not explicit:
-        try:
-            from data import _is_android_runtime
+    try:
+        from data import _is_android_runtime
 
-            if _is_android_runtime() and abs(q - 1.0) < 1e-6:
+        android = bool(_is_android_runtime())
+    except Exception:
+        android = False
+    if android:
+        if not explicit and abs(q - 1.0) < 1e-6:
+            try:
                 q = float(CONFIG.get("ROTATE3D_ANDROID_QUALITY_SCALE", 0.75) or 0.75)
-        except Exception:
-            pass
+            except (TypeError, ValueError):
+                q = 0.75
+        try:
+            lw = int(CONFIG.get("WIDTH", 640) or 640)
+        except (TypeError, ValueError):
+            lw = 640
+        cap_key = (
+            "ROTATE3D_ANDROID_QUALITY_CAP_320"
+            if lw <= 320
+            else "ROTATE3D_ANDROID_QUALITY_CAP"
+        )
+        cap_default = 0.90 if lw <= 320 else 0.55
+        try:
+            cap = float(CONFIG.get(cap_key, cap_default) or cap_default)
+        except (TypeError, ValueError):
+            cap = cap_default
+        cap = max(0.25, min(1.0, cap))
+        q = min(float(q), cap)
     return max(0.25, min(1.0, float(q)))
 
 
@@ -1916,8 +2134,8 @@ def _mode7_fallback_steps(cfg):
 
 def _mode7_sample_into(dst, map_surf, ctx, *, fill_sky=True, clear_color=(0, 0, 0), cfg=None):
     """
-    Mode7 픽셀 샘플을 dst 에 쓴다. ctx 는 dst 크기와 맞아야 한다.
-    PC: numpy+캐시된 array3d. Android: get_at 폴백(+스텝).
+    Mode7 픽셀 샘플을 dst 에 쓴다.
+    ctx 는 항상 논리 해상도(엔티티와 동일) 투영 — dst 가 더 작으면 서브샘플만 줄임(기하 동일).
     """
     if dst is None or map_surf is None or not ctx:
         return False
@@ -1926,12 +2144,17 @@ def _mode7_sample_into(dst, map_surf, ctx, *, fill_sky=True, clear_color=(0, 0, 
         h = int(dst.get_height())
         mw = int(map_surf.get_width())
         mh = int(map_surf.get_height())
+        ctx_w = int(ctx.get("w") or w)
+        ctx_h = int(ctx.get("h") or h)
     except Exception:
         return False
     if w <= 0 or h <= 0 or mw <= 0 or mh <= 0:
         return False
 
-    horizon = int(ctx["horizon"])
+    subsample = (w != ctx_w) or (h != ctx_h)
+    horizon_full = int(ctx["horizon"])
+    horizon = _mode7_dst_horizon(ctx, h) if subsample else horizon_full
+    fill_ctx = _mode7_fill_ctx_for_dst(ctx, w, h)
     fwd_x = float(ctx["fwd_x"])
     fwd_y = float(ctx["fwd_y"])
     lat_x = float(ctx["lat_x"])
@@ -1943,51 +2166,153 @@ def _mode7_sample_into(dst, map_surf, ctx, *, fill_sky=True, clear_color=(0, 0, 
     cx = float(ctx["cam_x"])
     cy = float(ctx["cam_y"])
     try:
-        view_cx = float(ctx.get("view_cx", ctx.get("player_sx", w * 0.5)))
+        view_cx = float(ctx.get("view_cx", ctx.get("player_sx", ctx_w * 0.5)))
     except (TypeError, ValueError):
-        view_cx = float(w) * 0.5
+        view_cx = float(ctx_w) * 0.5
 
-    if fill_sky:
-        rotate3d_mode7_fill_sky_and_ground(dst, ctx, cfg, fill_sky=True)
-    else:
-        try:
-            dst.fill(clear_color)
-        except Exception:
-            pass
+    interlace_on, phase, sample_all = _mode7_interlace_begin(
+        dst, ctx, fill_sky=fill_sky, clear_color=clear_color, cfg=cfg
+    )
+    if not interlace_on:
+        if fill_sky:
+            rotate3d_mode7_fill_sky_and_ground(dst, fill_ctx, cfg, fill_sky=True)
+        else:
+            try:
+                dst.fill(clear_color)
+            except Exception:
+                pass
+        sample_all = True
+        phase = 0
 
-    # PC: numpy+surfarray 고속 경로. Android APK 는 numpy 미포함 → get_at 폴백.
+    def _row_indices(y0, y1):
+        if sample_all or not interlace_on:
+            return range(y0, y1)
+        start = y0 + ((phase - (y0 & 1)) & 1)
+        return range(start, y1, 2)
+
     try:
         import numpy as np
 
         map_arr = _mode7_get_map_arr(map_surf)
-        out = pygame.surfarray.pixels3d(dst)
-        sx_arr = np.arange(w, dtype=np.float32)
         try:
-            for sy in range(horizon, h):
-                row = float(sy - horizon)
+            chunk = int(CONFIG.get("ROTATE3D_SAMPLE_CHUNK_ROWS", 48) or 48)
+        except (TypeError, ValueError):
+            chunk = 48
+        chunk = max(8, min(256, chunk))
+        ground = np.array(
+            _rotate3d_mode7_parse_rgb(
+                (cfg or {}).get(
+                    "ground_fill_color",
+                    CONFIG.get("ROTATE3D_GROUND_FILL_COLOR", (0, 0, 0)),
+                ),
+                (0, 0, 0),
+            ),
+            dtype=np.uint8,
+        )
+        sx_arr = np.arange(w, dtype=np.float32)
+        if subsample:
+            sx_proj = sx_arr * float(ctx_w) / float(w)
+        else:
+            sx_proj = sx_arr
+        out = pygame.surfarray.pixels3d(dst)
+        try:
+            for y0 in range(horizon, h, chunk):
+                y1 = min(h, y0 + chunk)
+                if sample_all or not interlace_on:
+                    rows_dst = np.arange(y0, y1, dtype=np.float32)
+                else:
+                    start = y0 + ((phase - (y0 & 1)) & 1)
+                    rows_dst = np.arange(start, y1, 2, dtype=np.float32)
+                if rows_dst.size <= 0:
+                    continue
+                if subsample:
+                    sy_full = rows_dst * float(ctx_h) / float(h)
+                    row = sy_full - float(horizon_full)
+                else:
+                    row = rows_dst - float(horizon_full)
+                p_row = cam_h / (row + near)
+                depth = p_row * depth_mul
+                lat_scale = p_row * lateral_mul
+                lat = (sx_proj[None, :] - view_cx) * lat_scale[:, None]
+                mx = (cx + fwd_x * depth[:, None] + lat * lat_x).astype(np.int32)
+                my = (cy + fwd_y * depth[:, None] + lat * lat_y).astype(np.int32)
+                valid = (mx >= 0) & (mx < mw) & (my >= 0) & (my < mh)
+                mx_c = np.clip(mx, 0, mw - 1)
+                my_c = np.clip(my, 0, mh - 1)
+                sampled = map_arr[mx_c, my_c]
+                if not bool(valid.all()):
+                    sampled = sampled.copy()
+                    sampled[~valid] = ground
+                rows_i = rows_dst.astype(np.int32)
+                sampled_t = np.transpose(sampled, (1, 0, 2))
+                if sample_all or not interlace_on:
+                    out[:, rows_i] = sampled_t
+                else:
+                    out[:, rows_i] = sampled_t
+        finally:
+            del out
+        if interlace_on:
+            _mode7_interlace_end(dst, sample_all=sample_all)
+        return True
+    except Exception:
+        pass
+
+    x_step, _y_step = _mode7_fallback_steps(cfg)
+    raw, raw_w, raw_h = _mode7_get_map_rgb_bytes(map_surf)
+    if raw is None or raw_w <= 0 or raw_h <= 0:
+        raw_w, raw_h = mw, mh
+    try:
+        px = pygame.PixelArray(dst)
+        try:
+            for sy in _row_indices(horizon, h):
+                if subsample:
+                    sy_full = float(sy) * float(ctx_h) / float(h)
+                    row = sy_full - float(horizon_full)
+                else:
+                    row = float(sy) - float(horizon_full)
                 p_row = cam_h / (row + near)
                 depth = p_row * depth_mul
                 lat_scale = p_row * lateral_mul
                 row_cx = cx + fwd_x * depth
                 row_cy = cy + fwd_y * depth
-                lat = (sx_arr - view_cx) * lat_scale
-                mx = (row_cx + lat * lat_x).astype(np.int32)
-                my = (row_cy + lat * lat_y).astype(np.int32)
-                m = (mx >= 0) & (mx < mw) & (my >= 0) & (my < mh)
-                if np.any(m):
-                    out[sx_arr[m].astype(np.int32), sy] = map_arr[mx[m], my[m]]
+                sx = 0
+                while sx < w:
+                    sx_full = float(sx) * float(ctx_w) / float(w) if subsample else float(sx)
+                    lat = (sx_full - view_cx) * lat_scale
+                    mx = int(row_cx + lat * lat_x)
+                    my = int(row_cy + lat * lat_y)
+                    if 0 <= mx < raw_w and 0 <= my < raw_h:
+                        if raw is not None:
+                            i = (my * raw_w + mx) * 3
+                            try:
+                                col = (raw[i] << 16) | (raw[i + 1] << 8) | raw[i + 2]
+                            except Exception:
+                                c = map_surf.get_at((mx, my))
+                                col = (int(c[0]) << 16) | (int(c[1]) << 8) | int(c[2])
+                        else:
+                            c = map_surf.get_at((mx, my))
+                            col = (int(c[0]) << 16) | (int(c[1]) << 8) | int(c[2])
+                        for dx in range(x_step):
+                            xx = sx + dx
+                            if xx >= w:
+                                break
+                            px[xx, sy] = col
+                    sx += x_step
         finally:
-            del out
+            del px
+        if interlace_on:
+            _mode7_interlace_end(dst, sample_all=sample_all)
         return True
     except Exception:
         pass
 
-    # numpy/surfarray 없음: Surface 픽셀 폴백 (스텝 + 이웃 복제로 부하↓)
-    x_step, y_step = _mode7_fallback_steps(cfg)
     try:
-        sy = horizon
-        while sy < h:
-            row = float(sy - horizon)
+        for sy in _row_indices(horizon, h):
+            if subsample:
+                sy_full = float(sy) * float(ctx_h) / float(h)
+                row = sy_full - float(horizon_full)
+            else:
+                row = float(sy) - float(horizon_full)
             p_row = cam_h / (row + near)
             depth = p_row * depth_mul
             lat_scale = p_row * lateral_mul
@@ -1995,25 +2320,24 @@ def _mode7_sample_into(dst, map_surf, ctx, *, fill_sky=True, clear_color=(0, 0, 
             row_cy = cy + fwd_y * depth
             sx = 0
             while sx < w:
-                lat = (float(sx) - view_cx) * lat_scale
+                sx_full = float(sx) * float(ctx_w) / float(w) if subsample else float(sx)
+                lat = (sx_full - view_cx) * lat_scale
                 mx = int(row_cx + lat * lat_x)
                 my = int(row_cy + lat * lat_y)
                 if 0 <= mx < mw and 0 <= my < mh:
                     c = map_surf.get_at((mx, my))
-                    for dy in range(y_step):
-                        yy = sy + dy
-                        if yy >= h:
+                    for dx in range(x_step):
+                        xx = sx + dx
+                        if xx >= w:
                             break
-                        for dx in range(x_step):
-                            xx = sx + dx
-                            if xx >= w:
-                                break
-                            dst.set_at((xx, yy), c)
+                        dst.set_at((xx, sy), c)
                 sx += x_step
-            sy += y_step
+        if interlace_on:
+            _mode7_interlace_end(dst, sample_all=sample_all)
+        return True
     except Exception:
         return False
-    return True
+
 
 
 def apply_rotate3d_mode7(
@@ -2038,9 +2362,12 @@ def apply_rotate3d_mode7(
     → 윗줄일수록 맵이 멀고 작게 (상하·좌우 같은 비율).
 
     성능:
+      - 샘플 해상도 = dst 크기 = CONFIG WIDTH×HEIGHT
+        (NATIVE_640→640×480, UPSCALE_320 / Mode7강제→320×240 후 화면 2×)
       - 맵 array3d 는 Surface gen 단위로 캐시 (매 프레임 전체 복사 방지)
-      - quality_scale < 1 이면 저해상도 샘플 후 확대 (Android 기본 ~0.45)
-      - 엔티티/클릭용 ctx 는 항상 전체 화면 해상도로 반환
+      - quality_scale < 1 이면 저해상도 버퍼에 서브샘플 후 확대 (투영·좌표는 full ctx 와 동일)
+      - ROTATE3D_INTERLACE_ROWS: 짝/홀 행 교차 갱신(~2× 가벼움, 고속 회전 시 빗살 가능)
+      - 엔티티/클릭용 ctx 는 항상 전체 논리 해상도로 반환
 
     빈 공간:
       fill_sky=True  → 지평선 위 하늘색/360파노라마, 아래(맵 밖) 검정(ground_fill)
@@ -2092,22 +2419,10 @@ def apply_rotate3d_mode7(
         except Exception:
             lores = None
         if lores is not None:
-            lores_ctx = rotate3d_mode7_build_ctx(
-                cfg,
-                strength_01,
-                rw,
-                rh,
-                cam_x,
-                cam_y,
-                cam_angle_rad,
-                ref_forward=ref_forward,
-                player_wx=player_wx,
-                player_wy=player_wy,
-            )
-            if lores_ctx is not None and _mode7_sample_into(
+            if _mode7_sample_into(
                 lores,
                 map_surf,
-                lores_ctx,
+                full_ctx,
                 fill_sky=fill_sky,
                 clear_color=clear_color,
                 cfg=cfg,
@@ -2784,6 +3099,20 @@ def load_fishing_overlay_frames(body_type: str, anim_set: str):
     return list(frames) if frames else []
 
 
+def load_racing_overlay_frames(anim_set: str = "moveinchworm_racing"):
+    """
+    공용 레이싱 탈것 오버레이 — assets/images/character/racing/<anim_set>_left/
+    몸(seat_idle) 뒤에 붙는 자벌레 등. 캐릭터별 폴더가 아니라 racing/ 공유.
+    anim_set: moveinchworm_racing
+    """
+    st = str(anim_set or "moveinchworm_racing").strip().lower()
+    if not st:
+        return []
+    path = os.path.join("assets", "images", "character", "racing", f"{st}_left")
+    frames = _load_anim_dir_cached(path)
+    return list(frames) if frames else []
+
+
 def _load_char_state_or_fallback(char_name, state, fallback="walk"):
     path_l = os.path.join("assets", "images", "character", char_name, f"{state}_left")
     if os.path.isdir(path_l):
@@ -3368,7 +3697,12 @@ class BaseCharacter:
     def clear_sprite_overlay(self):
         self._sprite_overlay = None
 
-    def set_sprite_overlay(self, frames, *, loop=True, fps=6.0):
+    def set_sprite_overlay(self, frames, *, loop=True, fps=6.0, behind=False):
+        """
+        스프라이트 오버레이(또는 언더레이) 설정.
+        fps=0 이면 프레임 갱신 정지(현재 프레임 고정).
+        behind=True 이면 몸 스프라이트보다 먼저(뒤) 그린다 — 레이싱 자벌레 등.
+        """
         if not frames:
             self._sprite_overlay = None
             return
@@ -3376,16 +3710,17 @@ class BaseCharacter:
             "frames": list(frames),
             "idx": 0,
             "last_ms": pygame.time.get_ticks(),
-            "fps": max(1.0, float(fps)),
+            "fps": max(0.0, float(fps)),
             "loop": bool(loop),
             "phase": "play",
             "hold_until_ms": 0,
             "release_frames": None,
             "hold_sec": 0.0,
+            "behind": bool(behind),
         }
 
     def play_sprite_overlay_once(
-        self, frames, *, fps=8.0, hold_sec=2.0, release_frames=None
+        self, frames, *, fps=8.0, hold_sec=2.0, release_frames=None, behind=False
     ):
         if not frames:
             return
@@ -3393,12 +3728,13 @@ class BaseCharacter:
             "frames": list(frames),
             "idx": 0,
             "last_ms": pygame.time.get_ticks(),
-            "fps": max(1.0, float(fps)),
+            "fps": max(0.0, float(fps)),
             "loop": False,
             "phase": "play",
             "hold_until_ms": 0,
             "release_frames": list(release_frames) if release_frames else None,
             "hold_sec": max(0.0, float(hold_sec)),
+            "behind": bool(behind),
         }
 
     def _tick_sprite_overlay(self, now_ms):
@@ -3413,11 +3749,19 @@ class BaseCharacter:
             if now_ms >= int(ov.get("hold_until_ms") or 0):
                 rel = ov.get("release_frames")
                 if rel:
-                    self.set_sprite_overlay(rel, loop=True, fps=float(ov.get("fps") or 6.0))
+                    self.set_sprite_overlay(
+                        rel,
+                        loop=True,
+                        fps=float(ov.get("fps") or 6.0),
+                        behind=bool(ov.get("behind")),
+                    )
                 else:
                     self.clear_sprite_overlay()
             return
-        fps = float(ov.get("fps") or 6.0)
+        # fps<=0: 속도 0 등 → 프레임 고정 (레이싱 자벌레 정지)
+        fps = float(ov.get("fps") or 0.0)
+        if fps <= 0.0:
+            return
         delay_ms = max(1, int(round(1000.0 / fps)))
         last = int(ov.get("last_ms") or 0)
         if now_ms - last < delay_ms:
@@ -3437,17 +3781,20 @@ class BaseCharacter:
             ov["phase"] = "hold"
             ov["hold_until_ms"] = int(now_ms + hold_sec * 1000.0)
         elif rel:
-            self.set_sprite_overlay(rel, loop=True, fps=fps)
+            self.set_sprite_overlay(
+                rel, loop=True, fps=fps, behind=bool(ov.get("behind"))
+            )
         else:
             self.clear_sprite_overlay()
 
-    def _draw_sprite_overlay(self, screen, feet_x_px, feet_y_px, zoom_mul, sprite_perspective_q=None):
+    def current_sprite_overlay_image(self):
+        """오버레이 현재 프레임(방향 flip 반영). 없으면 None."""
         ov = getattr(self, "_sprite_overlay", None)
         if not isinstance(ov, dict):
-            return
+            return None
         frames = ov.get("frames") or []
         if not frames:
-            return
+            return None
         idx = int(ov.get("idx") or 0) % len(frames)
         img = frames[idx]
         if str(getattr(self, "direction", "left") or "left") == "right":
@@ -3455,6 +3802,12 @@ class BaseCharacter:
                 img = pygame.transform.flip(img, True, False)
             except Exception:
                 pass
+        return img
+
+    def _draw_sprite_overlay(self, screen, feet_x_px, feet_y_px, zoom_mul, sprite_perspective_q=None):
+        img = self.current_sprite_overlay_image()
+        if img is None:
+            return
         render_img = get_cached_scaled_sprite(
             img,
             float(zoom_mul),
@@ -3659,8 +4012,19 @@ class BaseCharacter:
         fpx, fpy = int(round(float(feet_x))), int(round(float(feet_y)))
         dx, dy = blit_topleft_bottom_center(fpx, fpy, render_img.get_width(), render_img.get_height())
 
+        # 언더레이(behind): 몸보다 먼저 — 레이싱 자벌레에 캐릭터가 앉은 연출
+        ov = getattr(self, "_sprite_overlay", None)
+        if isinstance(ov, dict) and ov.get("behind"):
+            self._draw_sprite_overlay(
+                screen,
+                fpx,
+                fpy,
+                eff,
+                sprite_perspective_q=sprite_perspective_q,
+            )
         screen.blit(render_img, (dx, dy))
-        if getattr(self, "_sprite_overlay", None) is not None:
+        # 오버레이(앞): 낚시 낚싯대·야구 배트 등
+        if isinstance(ov, dict) and not ov.get("behind"):
             self._draw_sprite_overlay(
                 screen,
                 fpx,
