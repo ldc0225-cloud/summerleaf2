@@ -533,13 +533,12 @@ CONFIG = {
     "ROTATE3D_SKY_FOV_RAD": 1.2,                 # 화면 가로가 담는 하늘 시야각(라디안). 클수록 좌우로 더 많이 보임
     # --- Mode7 성능 ---
     # quality_scale: 1.0=전체 해상도 샘플, 0.75≈중간, 0.5=반해상도 후 확대.
-    # cfg에 quality_scale 이 명시되면(레이스 옵션) 그 값을 쓰되, Android 는 CAP 로 상한.
+    # cfg에 quality_scale 이 명시되면(레이스 옵션) 그 값을 우선 사용.
     # H700급(RG34XX 등): Mode7 부하는 오브젝트가 아니라 바닥 픽셀 샘플 — 상한이 핵심.
     "ROTATE3D_QUALITY_SCALE": 1.0,              # PC·명시 없을 때 기본(전체)
-    "ROTATE3D_ANDROID_QUALITY_SCALE": 0.50,     # Android에서 CONFIG만 1.0일 때 자동
-    "ROTATE3D_ANDROID_QUALITY_CAP": 0.55,       # 640 논리일 때 레이스 '높음' 상한
-    # 320 논리(Mode7 강제/UPSCALE)면 픽셀 수가 1/4 → 상한을 올려도 640@0.5와 비슷한 부하
-    "ROTATE3D_ANDROID_QUALITY_CAP_320": 0.90,
+    "ROTATE3D_ANDROID_QUALITY_SCALE": 1.0,      # Android도 기본 동작은 PC와 동일
+    "ROTATE3D_ANDROID_QUALITY_CAP": 1.0,        # Android에서도 사용자가 고른 품질을 그대로 허용
+    "ROTATE3D_ANDROID_QUALITY_CAP_320": 1.0,
     "ROTATE3D_SAMPLE_CHUNK_ROWS": 48,           # numpy 벡터화 청크(행). 32~64 권장
     # 행 인터레이스: 짝수/홀수 행을 프레임마다 번갈아 샘플(~2× 가벼움). 고속 회전 시 빗살 잔상 가능.
     "ROTATE3D_INTERLACE_ROWS": True,
@@ -1015,7 +1014,7 @@ RACING_DEFAULTS = {
     # Mode7 해상도 옵션 (레이스 옵션). quality_scale 만 변경 — 좌표·투영 동일, 시각만 거칠어짐.
     "mode7_quality": "medium",
     "mode7_quality_scales": {"high": 1.0, "medium": 0.72, "low": 0.50, "lowest": 0.35},
-    "mode7_quality_scales_android": {"high": 0.50, "medium": 0.42, "low": 0.32, "lowest": 0.25},
+    "mode7_quality_scales_android": {"high": 1.0, "medium": 0.72, "low": 0.50, "lowest": 0.35},
 }
 
 # 레이스 난이도 — NPC AI 레인 변경 주기·속도 배율
@@ -1366,11 +1365,10 @@ def _android_ram_profile_preset_3gb():
         "MEM_WATCHDOG_GROWTH_TRIM_FRACTION": 0.12,
         "MEM_WATCHDOG_GC_AFTER_FULL_CLEAR": False,
         "TILT_SHEAR_STRIP_BUCKET_PX": 96,
-        # Mode7: Android는 numpy 없이 get_at 폴백 → 저해상도 샘플이 필수
-        # (레이스 옵션 '높음'도 ANDROID_QUALITY_CAP 로 막힘)
-        "ROTATE3D_QUALITY_SCALE": 0.45,
-        "ROTATE3D_ANDROID_QUALITY_SCALE": 0.45,
-        "ROTATE3D_ANDROID_QUALITY_CAP": 0.50,
+        # Mode7 품질은 Android에서도 사용자가 고른 레이스 옵션을 그대로 따른다.
+        "ROTATE3D_QUALITY_SCALE": 1.0,
+        "ROTATE3D_ANDROID_QUALITY_SCALE": 1.0,
+        "ROTATE3D_ANDROID_QUALITY_CAP": 1.0,
         "ROTATE3D_FALLBACK_X_STEP": 3,
         "ROTATE3D_FALLBACK_Y_STEP": 2,
         "ROTATE3D_ANDROID_FALLBACK_X_STEP": 3,
