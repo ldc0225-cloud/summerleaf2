@@ -277,7 +277,10 @@ CONFIG = {
     "WORLD_ZOOM_ENABLED": True,
     "WORLD_ZOOM_DEFAULT": 2.0,   # 1.0=기본, 2.0=2배 확대, 0.5=절반 축소
     "WORLD_ZOOM_MIN": 1.0,
+    # strength(0~1) 슬라이더 상한. strength=1 → 이 배율. 기본 플레이/일반 ZOOM용.
     "WORLD_ZOOM_MAX": 4.0,
+    # 이벤트 ZOOM의 val(직접 배율)만 이 값까지 허용. WORLD_ZOOM_MAX는 그대로 두고 특수 연출용.
+    "WORLD_ZOOM_HARD_MAX": 8.0,
     "WORLD_ZOOM_SPEED": 3.0,     # zoom/sec (값이 클수록 더 빠르게 확대/축소)
 
     # --- 개별 오브젝트 줌(별개 기능) ---

@@ -358,6 +358,20 @@ def native_world_zoom_draw(zoom_equiv, output_mode, zoom_mul):
     return z
 
 
+def world_zoom_hard_max():
+    """월드 줌 절대 상한. strength 슬라이더는 WORLD_ZOOM_MAX, val 직접지정만 HARD_MAX까지."""
+    try:
+        soft = float(CONFIG.get("WORLD_ZOOM_MAX", 4.0))
+    except (TypeError, ValueError):
+        soft = 4.0
+    try:
+        hard = float(CONFIG.get("WORLD_ZOOM_HARD_MAX", 8.0))
+    except (TypeError, ValueError):
+        hard = 8.0
+    soft = max(0.05, min(8.0, soft))
+    return max(soft, min(8.0, hard))
+
+
 def zoom_val_from_strength(strength_01, on=True, *, is_camera=True):
     if not on:
         return 1.0
@@ -621,7 +635,13 @@ def parse_rotate3d_step(step):
 
 
 def parse_zoom_step(step):
-    """ZOOM: 카메라는 strength(0~1)→WORLD_ZOOM_MIN~MAX, 엔티티는 val/strength=직접 배율."""
+    """ZOOM 파싱.
+
+    카메라(월드):
+      - strength만: 0~1 → WORLD_ZOOM_MIN~MAX (기본 max=4)
+      - val 명시: 직접 배율, WORLD_ZOOM_HARD_MAX까지 (기본 8). strength보다 우선.
+    엔티티: val/strength = 직접 배율 (ENTITY_ZOOM_MIN~MAX).
+    """
     on = parse_step_bool(step.get("on"), True)
     raw_tgt = (step.get("target") or "").strip()
     lt = raw_tgt.lower()
@@ -661,26 +681,56 @@ def parse_zoom_step(step):
             "on": bool(on),
             "strength": float(zoom_val),
             "val": float(zoom_val),
+            "val_explicit": False,
             "target": raw_tgt,
             "is_camera": False,
             "duration_sec": float(dur),
             "instant": float(dur) <= 0.0,
         }
 
+    # --- 카메라(월드) ---
+    # val이 있으면 직접 배율(하드 상한까지). 없으면 strength 슬라이더(소프트 상한).
+    val_raw = step.get("val")
+    has_explicit_val = val_raw is not None and str(val_raw).strip() != ""
+    try:
+        zmin = float(CONFIG.get("WORLD_ZOOM_MIN", 1.0))
+        soft_max = float(CONFIG.get("WORLD_ZOOM_MAX", 4.0))
+    except (TypeError, ValueError):
+        zmin, soft_max = 1.0, 4.0
+    zmin = max(0.05, min(8.0, zmin))
+    soft_max = max(zmin, min(8.0, soft_max))
+    hard_max = world_zoom_hard_max()
+
+    if has_explicit_val:
+        if not on:
+            zoom_val = 1.0
+            strength = 0.0
+        else:
+            try:
+                zoom_val = float(val_raw)
+            except (TypeError, ValueError):
+                try:
+                    zoom_val = float(CONFIG.get("WORLD_ZOOM_DEFAULT", 1.0))
+                except (TypeError, ValueError):
+                    zoom_val = 1.0
+            zoom_val = max(zmin, min(hard_max, zoom_val))
+            span = max(1e-6, soft_max - zmin)
+            # 에디터 strength 표시용(소프트 범위 밖이면 1.0으로 캡)
+            strength = max(0.0, min(1.0, (zoom_val - zmin) / span))
+        return {
+            "on": bool(on),
+            "strength": float(strength),
+            "val": float(zoom_val),
+            "val_explicit": True,
+            "target": raw_tgt,
+            "is_camera": True,
+            "duration_sec": float(dur),
+            "instant": float(dur) <= 0.0,
+        }
+
     strength = step.get("strength")
     if strength is None or str(strength).strip() == "":
-        val = step.get("val")
-        if val is not None and str(val).strip() != "":
-            try:
-                v = float(val)
-                zmin = float(CONFIG.get("WORLD_ZOOM_MIN", 1.0))
-                zmax = float(CONFIG.get("WORLD_ZOOM_MAX", 2.0))
-                span = max(1e-6, zmax - zmin)
-                strength = max(0.0, min(1.0, (v - zmin) / span)) if on else 0.0
-            except (TypeError, ValueError):
-                strength = 1.0 if on else 0.0
-        else:
-            strength = 1.0 if on else 0.0
+        strength = 1.0 if on else 0.0
     strength = parse_strength_01(strength, 1.0 if on else 0.0)
     zoom_val = zoom_val_from_strength(strength, on=on, is_camera=True)
 
@@ -688,6 +738,7 @@ def parse_zoom_step(step):
         "on": bool(on),
         "strength": float(strength),
         "val": float(zoom_val),
+        "val_explicit": False,
         "target": raw_tgt,
         "is_camera": True,
         "duration_sec": float(dur),
@@ -743,9 +794,13 @@ def _canonical_zoom_json(parsed):
     j = {
         "type": "ZOOM",
         "on": bool(parsed["on"]),
-        "strength": round(float(parsed["strength"]), 4),
         "duration_sec": round(float(parsed["duration_sec"]), 4),
     }
+    # val 직접지정이면 val만 저장(하드 상한 배율 유지). 아니면 strength 슬라이더.
+    if parsed.get("val_explicit"):
+        j["val"] = round(float(parsed["val"]), 4)
+    else:
+        j["strength"] = round(float(parsed["strength"]), 4)
     tgt = (parsed.get("target") or "").strip()
     if tgt:
         j["target"] = tgt
@@ -784,10 +839,21 @@ def fill_editor_fields_from_step(step_fields, step, step_type):
     elif t == "ZOOM":
         p = parse_zoom_step(step)
         step_fields["zoom_on"] = "true" if p["on"] else "false"
-        step_fields["zoom_strength"] = str(round(p["strength"], 4))
         step_fields["zoom_duration_sec"] = str(round(p["duration_sec"], 4))
         step_fields["target"] = (p.get("target") or "").strip()
         step_fields["zoom_persist"] = "true" if parse_step_persist(step) else "false"
+        if bool(p.get("is_camera", True)) and p.get("val_explicit"):
+            # 카메라 val 직접배율 — strength 필드는 비워 혼동 방지
+            step_fields["val"] = str(round(float(p["val"]), 4))
+            step_fields["zoom_strength"] = ""
+        elif bool(p.get("is_camera", True)):
+            step_fields["val"] = ""
+            step_fields["zoom_strength"] = str(round(p["strength"], 4))
+        else:
+            # 엔티티: 직접 배율을 strength/val 양쪽에 표시
+            mul = str(round(float(p["val"]), 4))
+            step_fields["val"] = mul
+            step_fields["zoom_strength"] = mul
     elif t == "CAMERA":
         p = parse_camera_step(step)
         step_fields["cam_mode"] = str(p["mode"])
@@ -833,6 +899,9 @@ def build_step_from_editor_fields(step_fields, step_type):
             "duration_sec": step_fields.get("zoom_duration_sec"),
             "target": step_fields.get("target"),
         }
+        val_f = step_fields.get("val")
+        if val_f is not None and str(val_f).strip() != "":
+            stub["val"] = val_f
         if parse_step_bool(step_fields.get("zoom_persist"), False):
             stub["persist"] = True
         return _canonical_zoom_json(parse_zoom_step(stub))

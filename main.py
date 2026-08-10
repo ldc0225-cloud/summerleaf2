@@ -1596,6 +1596,12 @@ def main():
         world_zoom_max = 2.0
     world_zoom_min = max(0.1, min(8.0, world_zoom_min))
     world_zoom_max = max(world_zoom_min, min(8.0, world_zoom_max))
+    # strength 슬라이더 상한(WORLD_ZOOM_MAX)과 별도: 이벤트 val 직접배율 절대 상한
+    try:
+        world_zoom_hard_max = float(CONFIG.get("WORLD_ZOOM_HARD_MAX", 8.0))
+    except Exception:
+        world_zoom_hard_max = 8.0
+    world_zoom_hard_max = max(world_zoom_max, min(8.0, world_zoom_hard_max))
     try:
         world_zoom_speed = float(CONFIG.get("WORLD_ZOOM_SPEED", 2.0))
     except Exception:
@@ -3037,7 +3043,7 @@ def main():
                 except Exception:
                     pass
             world_zoom_target = max(
-                world_zoom_min, min(world_zoom_max, float(world_zoom_target))
+                world_zoom_min, min(world_zoom_hard_max, float(world_zoom_target))
             )
             # AUTO_OUTPUT_MODE: world_zoom은 항상 640 기준(1.0=기본, 2.0=2배).
             # 2.0 미만으로 가려면 320(UPSCALE) 상태에서 먼저 640으로 올린 뒤 보간한다.
@@ -3086,7 +3092,7 @@ def main():
                 ev_mgr.pending_world_zoom = None
             except Exception:
                 pass
-        world_zoom_target = max(world_zoom_min, min(world_zoom_max, float(world_zoom_target)))
+        world_zoom_target = max(world_zoom_min, min(world_zoom_hard_max, float(world_zoom_target)))
 
         # 보간 중에도 2.0 미만 목표면 640 선전환 (320+줌치환 상태에서 draw만 줄이면 깨짐)
         if (

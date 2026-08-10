@@ -2201,9 +2201,9 @@ def _step_field_rows(step_type, step_fields=None):
         return [
             ("ZOOM: target 비우면 카메라(월드), 이름이면 스프라이트", "_hint_zoom"),
             ("on (true/false)", "zoom_on"),
-            ("strength (카메라: 0~1 슬라이더 / 엔티티: 직접 배율)", "zoom_strength"),
+            ("strength (카메라: 0~1→최대 WORLD_ZOOM_MAX, 보통 4배)", "zoom_strength"),
             ("duration_sec (0=즉시)", "zoom_duration_sec"),
-            ("val (배율 직접지정, 비우면 strength 사용)", "val"),
+            ("val (카메라: 직접배율, 최대 HARD_MAX=8 / 있으면 strength보다 우선)", "val"),
             ("Target (비우면 카메라)", "target"),
             ("persist — 엔티티 줌만: true면 이벤트 종료 후 유지", "zoom_persist"),
         ]
