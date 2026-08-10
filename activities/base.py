@@ -24,6 +24,8 @@ class FieldDrawContext:
     world_zoom_draw: float = 1.0
     world_zoom_off_x: float = 0.0
     world_zoom_off_y: float = 0.0
+    # 필드 원근 세로압축 계수 — sprite_tilt=0 누운 스프라이트용 (없으면 무시)
+    sprite_perspective_q: Optional[float] = None
 
 
 class BaseFieldActivity:
@@ -46,6 +48,14 @@ class BaseFieldActivity:
 
     def draw(self, ctx: FieldDrawContext) -> None:
         pass
+
+    def draw_world_under(self, ctx: FieldDrawContext) -> None:
+        """배경 직후·캐릭터 ysort 직전 (연꽃잎·바닥 FX 등)."""
+        pass
+
+    def collect_ysort_sprites(self):
+        """캐릭터와 함께 ysort 할 임시 스프라이트 목록 (pos/layer/draw 필요)."""
+        return []
 
     @property
     def is_active(self) -> bool:

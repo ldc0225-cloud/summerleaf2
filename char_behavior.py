@@ -40,6 +40,24 @@ def get_char_ui_name(char_id: str) -> str:
     return nm or cid
 
 
+def get_char_call_name(char_id: str) -> str:
+    """
+    호칭(대화용). 여름이→여름아, 이경이→이경아, 유하→유하야.
+    char_defs.call_name 이 있으면 우선, 없으면 name 규칙으로 유도.
+    """
+    cid = str(char_id or "").strip()
+    if not cid:
+        return ""
+    info = get_char_type_def(cid)
+    explicit = str(info.get("call_name") or "").strip()
+    if explicit:
+        return explicit
+    nm = str(info.get("name") or "").strip() or cid
+    if nm.endswith("이"):
+        return nm[:-1] + "아"
+    return nm + "야"
+
+
 def char_body_type(cdef: dict | None) -> str:
     """캐릭터 체형 — adult | kid | animal (야구 오버레이 세트 선택)."""
     t = str((cdef or {}).get("type") or "adult").strip().lower()
@@ -83,6 +101,129 @@ def attach_interact_spec(entity, type_asset: dict, world_entry: dict = None):
     entity.interact_spec = merge_interact_spec(type_asset, entry)
 
 
+def normalize_behavior_mode(mode: str) -> str:
+    """UI/JSON 별칭 → 내부 모드. randomwalk=wander, play=randomplay."""
+    m = str(mode or "idle").strip().lower()
+    if m in ("randomwalk", "random_walk"):
+        return "wander"
+    if m in ("play",):
+        return "randomplay"
+    return m or "idle"
+
+
+def display_behavior_mode(mode: str) -> str:
+    """에디터 표시용 — wander → randomwalk."""
+    m = normalize_behavior_mode(mode)
+    if m == "wander":
+        return "randomwalk"
+    return m
+
+
+def _behavior_mode_wants_mask_nav(mode) -> bool:
+    """ambient 이동 AI — 마스크 위를 걸어야 하는 모드."""
+    return normalize_behavior_mode(mode) in (
+        "wander",
+        "randomplay",
+        "patrol",
+        "follow",
+        "flee",
+    )
+
+
+def spawn_as_mask_walker(name: str, world_entry: Optional[dict] = None) -> bool:
+    """
+    MaskWalkingCharacter 로 스폰할지.
+    char_defs.mask_nav 또는 roam/play 계열 behavior 이면 True.
+    """
+    asset = CHAR_ASSETS.get(str(name or ""), {}) or {}
+    if asset.get("mask_nav"):
+        return True
+    entry = world_entry if isinstance(world_entry, dict) else {}
+    mode = None
+    if entry.get("mode"):
+        mode = entry.get("mode")
+    beh = entry.get("behavior")
+    if mode is None and isinstance(beh, dict):
+        mode = beh.get("mode")
+    elif mode is None and isinstance(beh, str):
+        mode = beh
+    if mode is None:
+        mode = (asset.get("behavior") or {}).get("mode")
+    return _behavior_mode_wants_mask_nav(mode)
+
+
+def _roam_home(npc) -> tuple[float, float]:
+    home = getattr(npc, "_bh_home", None)
+    if isinstance(home, (list, tuple)) and len(home) >= 2:
+        try:
+            return float(home[0]), float(home[1])
+        except (TypeError, ValueError):
+            pass
+    op = getattr(npc, "origin_pos", None)
+    if isinstance(op, (list, tuple)) and len(op) >= 2:
+        try:
+            return float(op[0]), float(op[1])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(npc.pos[0]), float(npc.pos[1])
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
+def set_roam_home(npc, x=None, y=None) -> None:
+    if x is None or y is None:
+        try:
+            x, y = float(npc.pos[0]), float(npc.pos[1])
+        except (TypeError, ValueError):
+            return
+    npc._bh_home = [float(x), float(y)]
+
+
+def set_npc_behavior(npc, mode, *, radius=None, interval_ms=None, clear_event_hold=True) -> None:
+    """런타임 behavior.mode 설정 (캐릭터 기본·이벤트 BEHAVIOR/PLACE 공통)."""
+    if npc is None:
+        return
+    m = normalize_behavior_mode(mode)
+    spec = dict(getattr(npc, "behavior_spec", None) or {})
+    # 저장/표시는 사용자 친화 이름 유지 (wander → randomwalk)
+    spec["mode"] = display_behavior_mode(m)
+    if radius is not None:
+        try:
+            spec["radius"] = float(radius)
+        except (TypeError, ValueError):
+            pass
+    if interval_ms is not None:
+        try:
+            spec["interval_ms"] = int(interval_ms)
+        except (TypeError, ValueError):
+            pass
+    npc.behavior_spec = spec
+    if clear_event_hold:
+        npc._bh_event_hold = False
+    st = getattr(npc, "_bh_state", None)
+    if not isinstance(st, dict):
+        st = {}
+        npc._bh_state = st
+    st["wander_next_ms"] = 0
+    st["play_next_ms"] = 0
+    st["wander_target"] = None
+    if m in ("idle", "frozen"):
+        sm = getattr(npc, "stop_moving", None)
+        if callable(sm):
+            try:
+                sm()
+            except Exception:
+                pass
+
+
+def hold_npc_ai_for_event(npc) -> None:
+    """MOVE/ACTION_ANIM 등 이벤트 직접 제어 시 ambient AI 일시 정지."""
+    if npc is None:
+        return
+    npc._bh_event_hold = True
+
+
 def attach_npc_from_entry(npc, world_entry: dict):
     """BaseCharacter / MaskWalkingCharacter 인스턴스에 정의·행동 상태 부착."""
     name = getattr(npc, "name", "") or ""
@@ -94,17 +235,23 @@ def attach_npc_from_entry(npc, world_entry: dict):
 
     attach_interact_spec(npc, CHAR_ASSETS.get(name, {}), entry)
     npc.behavior_spec = dict((npc.char_def.get("behavior") or {}))
+    raw_mode = npc.behavior_spec.get("mode")
+    if raw_mode:
+        npc.behavior_spec["mode"] = display_behavior_mode(raw_mode)
     npc._bh_state = {
         "patrol_idx": 0,
         "wait_until_ms": 0,
         "wander_next_ms": 0,
         "wander_target": None,
+        "play_next_ms": 0,
     }
+    npc._bh_event_hold = False
     wps = entry.get("waypoints")
     if wps:
         npc.behavior_spec.setdefault("waypoints", list(wps))
     if entry.get("mode"):
-        npc.behavior_spec["mode"] = entry["mode"]
+        npc.behavior_spec["mode"] = display_behavior_mode(entry["mode"])
+    set_roam_home(npc)
     npc._in_npc_talk = False
 
 
@@ -310,8 +457,7 @@ def apply_talk_after(after: Any, flow, npc) -> None:
 
     mode = after.get("set_behavior")
     if isinstance(mode, str) and mode:
-        npc.behavior_spec = dict(getattr(npc, "behavior_spec", {}) or {})
-        npc.behavior_spec["mode"] = mode
+        set_npc_behavior(npc, mode)
 
     flow.save_game(save.get("current_map", ""), save.get("player_pos", [0, 0]))
 
@@ -519,11 +665,7 @@ def apply_state_patch(entity, patch: dict) -> bool:
 
     bm = patch.get("behavior_mode") or patch.get("behavior")
     if isinstance(bm, str) and bm.strip():
-        spec = getattr(entity, "behavior_spec", None)
-        if isinstance(spec, dict):
-            spec["mode"] = bm.strip().lower()
-        elif hasattr(entity, "behavior_spec"):
-            entity.behavior_spec = {"mode": bm.strip().lower()}
+        set_npc_behavior(entity, bm.strip())
 
     if patch.get("anim") or patch.get("state"):
         _apply_char_anim(entity, patch)
@@ -662,7 +804,7 @@ def _behavior_mode(npc) -> str:
     if getattr(npc, "_in_npc_talk", False):
         return "frozen"
     spec = getattr(npc, "behavior_spec", None) or {}
-    return str(spec.get("mode") or "idle").strip().lower()
+    return normalize_behavior_mode(spec.get("mode") or "idle")
 
 
 def _tick_patrol(npc, mask, objs, npcs, now_ms: int):
@@ -699,19 +841,109 @@ def _tick_patrol(npc, mask, objs, npcs, now_ms: int):
     st["patrol_idx"] = (idx + 1) % len(wps)
 
 
-def _tick_wander(npc, mask, objs, npcs, now_ms: int):
-    spec = npc.behavior_spec or {}
-    st = npc._bh_state
-    if now_ms < int(st.get("wander_next_ms") or 0):
-        return
-    if getattr(npc, "path", None):
-        return
-    radius = float(spec.get("radius", 64) or 64)
+def _is_mask_walk(mask, x, y) -> bool:
+    if mask is None:
+        return True
+    try:
+        from engine import mask_terrain_class
+
+        return mask_terrain_class(mask, float(x), float(y)) == "walk"
+    except Exception:
+        return True
+
+
+def _point_walkable(npc, mask, objs, npcs, x, y) -> bool:
+    """마스크(+가능하면 충돌 probe) 기준 서 있을 수 있는 점."""
+    if mask is None:
+        return True
+    if not _is_mask_walk(mask, x, y):
+        return False
+    probe = getattr(npc, "check_walkable", None)
+    if callable(probe):
+        try:
+            ok, _ = probe(float(x), float(y), mask, objs or [], npcs or [])
+            return bool(ok)
+        except Exception:
+            return True
+    return True
+
+
+def _snap_walk_point(mask, x, y, max_r=48):
+    if mask is None:
+        return float(x), float(y)
+    try:
+        from engine import _snap_to_nearest_walk
+        from data import CONFIG
+
+        sn = _snap_to_nearest_walk(
+            mask,
+            float(x),
+            float(y),
+            max_r=int(CONFIG.get("TARGET_SNAP_MAX_R_PX", max_r) or max_r),
+            step=int(CONFIG.get("TARGET_SNAP_STEP_PX", 2) or 2),
+        )
+        if sn is not None:
+            return float(sn[0]), float(sn[1])
+    except Exception:
+        pass
+    return None
+
+
+def _pick_roam_walk_point(npc, mask, objs, npcs, hx, hy, radius, tries=14):
+    """원점 반경 안에서 이동가능(마스크) 점 선택. 실패 시 None."""
     import random
 
-    ang = random.random() * math.pi * 2
-    tx = float(npc.pos[0]) + math.cos(ang) * radius
-    ty = float(npc.pos[1]) + math.sin(ang) * radius
+    r = max(0.0, float(radius or 0))
+    if r <= 0.5:
+        if _point_walkable(npc, mask, objs, npcs, hx, hy):
+            return float(hx), float(hy)
+        return _snap_walk_point(mask, hx, hy)
+
+    for _ in range(max(1, int(tries))):
+        ang = random.random() * math.pi * 2
+        dist = r * (0.25 + 0.75 * random.random())
+        tx = float(hx) + math.cos(ang) * dist
+        ty = float(hy) + math.sin(ang) * dist
+        if _point_walkable(npc, mask, objs, npcs, tx, ty):
+            return tx, ty
+        sn = _snap_walk_point(mask, tx, ty, max_r=min(40, max(12, int(r * 0.35))))
+        if sn is not None and _point_walkable(npc, mask, objs, npcs, sn[0], sn[1]):
+            return sn
+
+    # 최후: 홈 스냅
+    if _point_walkable(npc, mask, objs, npcs, hx, hy):
+        return float(hx), float(hy)
+    return _snap_walk_point(mask, hx, hy)
+
+
+def _pick_jump_land(npc, mask, objs, npcs, sx, sy, face, tries=8):
+    """randomplay 점프 착지 — 마스크 walk 만."""
+    import random
+
+    for _ in range(max(1, int(tries))):
+        dist = random.uniform(10.0, 28.0)
+        tx = float(sx) + float(face) * dist
+        ty = float(sy) + random.uniform(-8.0, 8.0)
+        if _point_walkable(npc, mask, objs, npcs, tx, ty):
+            return tx, ty
+        sn = _snap_walk_point(mask, tx, ty, max_r=24)
+        if sn is not None and _point_walkable(npc, mask, objs, npcs, sn[0], sn[1]):
+            # 너무 가까운 스냅은 점프 의미 없음
+            if math.hypot(sn[0] - float(sx), sn[1] - float(sy)) >= 6.0:
+                return sn
+    return None
+
+
+def _set_roam_move_target(npc, tx, ty, mask, objs, npcs, move_mode="walk"):
+    """
+    roam 이동 목표. 경로 계획은 항상 walk(A*/마스크)로 잡고,
+    run 이면 속도·애니만 달리기.
+    """
+    plan_mode = "walk"
+    try:
+        npc._move_mode = plan_mode
+    except Exception:
+        pass
     setter = getattr(npc, "set_new_target", None)
     if callable(setter) and mask is not None:
         setter(tx, ty, mask, objs, npcs)
@@ -719,8 +951,165 @@ def _tick_wander(npc, mask, objs, npcs, now_ms: int):
         npc.target = [tx, ty]
         npc.path = [(tx, ty)]
         npc.state = "walk"
+        return
+    if str(move_mode or "walk") != "run":
+        return
+    try:
+        npc._move_mode = "run"
+    except Exception:
+        pass
+    try:
+        npc.event_speed_mul = float(CONFIG.get("RUN_SPEED_MUL", 1.8))
+        npc._click_run_restore = True
+    except Exception:
+        pass
+    try:
+        if getattr(npc, "path", None):
+            npc.state = "run"
+    except Exception:
+        pass
+
+
+def _tick_wander(npc, mask, objs, npcs, now_ms: int):
+    """randomwalk — 배치 원점(_bh_home) 반경·이동가능 마스크 안을 걸어다님."""
+    spec = npc.behavior_spec or {}
+    st = npc._bh_state
+    if now_ms < int(st.get("wander_next_ms") or 0):
+        return
+    if getattr(npc, "path", None):
+        return
+    radius = float(spec.get("radius", 64) or 64)
+    hx, hy = _roam_home(npc)
+    pt = _pick_roam_walk_point(npc, mask, objs, npcs, hx, hy, radius)
+    if pt is None:
+        interval = int(spec.get("interval_ms", 3000) or 3000)
+        st["wander_next_ms"] = now_ms + interval
+        return
+    tx, ty = pt
+    _set_roam_move_target(npc, tx, ty, mask, objs, npcs, move_mode="walk")
     interval = int(spec.get("interval_ms", 3000) or 3000)
     st["wander_next_ms"] = now_ms + interval
+
+
+def _tick_randomplay(npc, mask, objs, npcs, now_ms: int):
+    """
+    randomplay — 이동가능 마스크(원점 반경)에서 서기/걷기/뛰기/점프를 랜덤으로.
+    아이들 자유롭게 노는 ambient AI.
+    """
+    import random
+
+    spec = npc.behavior_spec or {}
+    st = npc._bh_state
+    if now_ms < int(st.get("play_next_ms") or 0):
+        return
+    if getattr(npc, "path", None):
+        return
+    if getattr(npc, "_jump_arc", None) is not None:
+        return
+    if getattr(npc, "_anim_override", None) is not None:
+        return
+
+    radius = float(spec.get("radius", 80) or 80)
+    action = random.choices(
+        ("stand", "walk", "run", "jump"),
+        weights=(0.28, 0.34, 0.24, 0.14),
+        k=1,
+    )[0]
+
+    if action == "stand":
+        sm = getattr(npc, "stop_moving", None)
+        if callable(sm):
+            try:
+                sm()
+            except Exception:
+                pass
+        try:
+            npc.direction = random.choice(("left", "right"))
+            npc.state = "idle"
+        except Exception:
+            pass
+        st["play_next_ms"] = now_ms + random.randint(700, 2400)
+        return
+
+    if action == "jump":
+        sm = getattr(npc, "stop_moving", None)
+        if callable(sm):
+            try:
+                sm()
+            except Exception:
+                pass
+        try:
+            npc.direction = random.choice(("left", "right"))
+        except Exception:
+            pass
+
+        hop_h = float(random.randint(24, 42))
+        dur = int(random.randint(300, 520))
+        # MaskWalkingCharacter: 실제 _jump_arc 포물선(발 그림자·공중 높이)
+        if hasattr(npc, "_jump_arc"):
+            try:
+                x = float(npc.pos[0])
+                y = float(npc.pos[1])
+            except (TypeError, ValueError):
+                x = y = 0.0
+            face = -1.0 if str(getattr(npc, "direction", "left") or "left") == "left" else 1.0
+            land = _pick_jump_land(npc, mask, objs, npcs, x, y, face)
+            if land is None:
+                # 착지 불가면 점프 대신 짧게 서기
+                try:
+                    npc.state = "idle"
+                except Exception:
+                    pass
+                st["play_next_ms"] = now_ms + random.randint(400, 900)
+                return
+            tx, ty = land
+            npc._jump_arc = {
+                "t0": now_ms,
+                "dur": dur,
+                "sx": x,
+                "sy": y,
+                "ex": tx,
+                "ey": ty,
+                "arc_h": hop_h,
+            }
+            try:
+                npc._jump_draw_lift = 0.0
+            except Exception:
+                pass
+            npc.path = [(tx, ty, 1)]
+            npc.target = [tx, ty]
+            try:
+                npc.state = "jump"
+                npc.frame_idx = 0
+            except Exception:
+                pass
+        else:
+            # BaseCharacter 등: ACTION_ANIM jump 와 동일하게 height 로 띄움
+            pa = getattr(npc, "play_anim", None)
+            if callable(pa):
+                try:
+                    pa(
+                        "jump",
+                        duration_ms=dur,
+                        loop=False,
+                        release="idle",
+                        temp_height=hop_h,
+                    )
+                except Exception:
+                    pass
+        st["play_next_ms"] = now_ms + dur + random.randint(120, 450)
+        return
+
+    move_mode = "run" if action == "run" else "walk"
+    hx, hy = _roam_home(npc)
+    pt = _pick_roam_walk_point(npc, mask, objs, npcs, hx, hy, radius)
+    if pt is None:
+        st["play_next_ms"] = now_ms + random.randint(500, 1200)
+        return
+    tx, ty = pt
+    _set_roam_move_target(npc, tx, ty, mask, objs, npcs, move_mode=move_mode)
+    interval = int(spec.get("interval_ms", 2200) or 2200)
+    st["play_next_ms"] = now_ms + random.randint(max(500, interval // 2), interval + 900)
 
 
 def _tick_follow(npc, player, mask, objs, npcs, now_ms: int):
@@ -762,8 +1151,12 @@ def _tick_flee(npc, player, mask, objs, npcs, now_ms: int):
 
 
 def tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id: str = ""):
-    if ev_mgr and ev_mgr.active_event:
-        return
+    """
+    ambient AI 틱.
+    이벤트 중에도 randomwalk/randomplay 등은 계속 동작하되,
+    MOVE/ACTION_ANIM 등으로 hold 된 NPC는 건너뛴다. 이벤트 종료 시 hold 해제.
+    """
+    event_active = bool(ev_mgr and getattr(ev_mgr, "active_event", None))
     try:
         import pygame
 
@@ -776,13 +1169,22 @@ def tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id: str = ""):
             continue
         if getattr(npc, "_in_npc_talk", False):
             continue
+        if not event_active and getattr(npc, "_bh_event_hold", False):
+            npc._bh_event_hold = False
+        if getattr(npc, "_bh_event_hold", False):
+            continue
         mode = _behavior_mode(npc)
         if mode == "frozen" or mode == "idle":
+            continue
+        # 이벤트 중에는 randomwalk/randomplay 만 ambient로 유지 (follow/flee/patrol은 컷신과 충돌)
+        if event_active and mode not in ("wander", "randomplay"):
             continue
         if mode == "patrol":
             _tick_patrol(npc, mask, objs, npcs, now_ms)
         elif mode == "wander":
             _tick_wander(npc, mask, objs, npcs, now_ms)
+        elif mode == "randomplay":
+            _tick_randomplay(npc, mask, objs, npcs, now_ms)
         elif mode == "follow":
             _tick_follow(npc, player, mask, objs, npcs, now_ms)
         elif mode == "flee":
@@ -804,11 +1206,42 @@ def npc_entry_from_instance(npc) -> dict:
         d["instance_id"] = iid
     spec = getattr(npc, "behavior_spec", None) or {}
     wps = spec.get("waypoints")
-    mode = spec.get("mode")
+    mode = display_behavior_mode(spec.get("mode") or "idle")
     if mode and mode != "idle":
-        d["behavior"] = {"mode": mode}
+        beh: dict = {"mode": mode}
         if wps:
-            d["behavior"]["waypoints"] = [[int(p[0]), int(p[1])] for p in wps]
+            beh["waypoints"] = [[int(p[0]), int(p[1])] for p in wps]
+        if mode in ("randomwalk", "randomplay", "wander"):
+            if spec.get("radius") is not None:
+                try:
+                    beh["radius"] = float(spec.get("radius"))
+                except (TypeError, ValueError):
+                    pass
+            if spec.get("interval_ms") is not None:
+                try:
+                    beh["interval_ms"] = int(spec.get("interval_ms"))
+                except (TypeError, ValueError):
+                    pass
+        if mode == "patrol" and spec.get("wait_ms") is not None:
+            try:
+                beh["wait_ms"] = int(spec.get("wait_ms"))
+            except (TypeError, ValueError):
+                pass
+        if mode == "follow":
+            for k_src, k_dst in (("trigger_range", "trigger_range"), ("stop_dist", "stop_dist")):
+                if spec.get(k_src) is not None:
+                    try:
+                        beh[k_dst] = float(spec.get(k_src))
+                    except (TypeError, ValueError):
+                        pass
+        if mode == "flee":
+            for k_src in ("trigger_range", "safe_range"):
+                if spec.get(k_src) is not None:
+                    try:
+                        beh[k_src] = float(spec.get(k_src))
+                    except (TypeError, ValueError):
+                        pass
+        d["behavior"] = beh
     elif wps:
         d["waypoints"] = [[int(p[0]), int(p[1])] for p in wps]
     inst = getattr(npc, "interact_instance", None)

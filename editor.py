@@ -15,6 +15,7 @@ from char_editor_ui import (
     char_def_modal,
     char_inst_modal,
     close_all_char_modals,
+    map_field_defaults_modal,
     obj_def_modal,
     obj_inst_modal,
     presence_zone_modal,
@@ -29,7 +30,18 @@ from flow import (
     progress_value_key,
 )
 from field_runtime import build_step_from_editor_fields, fill_editor_fields_from_step
-from engine import FieldItem, BaseCharacter, MaskWalkingCharacter, draw_object_text_label
+from engine import (
+    FieldItem,
+    BaseCharacter,
+    MaskWalkingCharacter,
+    draw_object_text_label,
+    _clamp_wall_angle_deg,
+    field_wall_angle_active,
+    field_wall_dir_xy,
+    field_wall_world_aabb,
+    field_wall_editor_hit,
+    field_wall_native_half_w,
+)
 from render_align import (
     bg_anchor,
     blit_topleft_bottom_center,
@@ -50,10 +62,101 @@ EDITOR_EVENT_SECTIONS = ("LOCAL", "GLOBAL", "SYNC", "FRAGMENTS")
 EDITOR_SIDEBAR_W = 292
 EDITOR_TOP_BAR_H = 76
 EDITOR_STATUS_BAR_H = 34
-EDITOR_INSPECTOR_H = 86
+EDITOR_INSPECTOR_H = 118
 EDITOR_LINE_H = 28
 EDITOR_MAP_BOTTOM_H = EDITOR_STATUS_BAR_H + EDITOR_INSPECTOR_H
 EDITOR_RIGHT_STEPS_TOP = EDITOR_TOP_BAR_H + 42
+
+# 상단 맵 탭 바 — 가로 슬라이드 (맵이 많아지면 ◀▶ / 휠로 이동)
+EDITOR_MAP_TAB_W = 104
+EDITOR_MAP_TAB_STRIDE = 112
+EDITOR_MAP_TAB_H = 34
+EDITOR_MAP_TAB_Y = 12
+EDITOR_MAP_TAB_ARROW_W = 28
+EDITOR_MAP_TAB_SCROLL_STEP = 112  # 화살표 1회 = 탭 1칸
+
+
+def _editor_map_tab_content_width(n_maps):
+    """맵 탭 전체 가로 폭(px). n개면 (n-1)*stride + tab_w."""
+    n = max(0, int(n_maps or 0))
+    if n <= 0:
+        return 0
+    return (n - 1) * EDITOR_MAP_TAB_STRIDE + EDITOR_MAP_TAB_W
+
+
+def _editor_map_tab_bar_layout(sidebar_w, merge_btn_x, n_maps, scroll_x):
+    """
+    상단 맵 선택 스트립 레이아웃.
+    MERGE/FONT/PNG 왼쪽까지를 탭 영역으로 쓰고, 넘치면 ◀▶ + 클립 스크롤.
+
+    Returns:
+      dict: left_arrow, right_arrow, clip, scroll_x, max_scroll, need_scroll, strip_rect
+    """
+    pad = 8
+    left = int(sidebar_w) + pad
+    right = max(left, int(merge_btn_x) - pad)
+    content_w = _editor_map_tab_content_width(n_maps)
+    avail = max(0, right - left)
+    y = EDITOR_MAP_TAB_Y
+    h = EDITOR_MAP_TAB_H
+    aw = EDITOR_MAP_TAB_ARROW_W
+    need = content_w > avail and n_maps > 0
+    if need:
+        left_arrow = pygame.Rect(left, y, aw, h)
+        right_arrow = pygame.Rect(right - aw, y, aw, h)
+        clip_x = left_arrow.right + 4
+        clip_r = right_arrow.left - 4
+        clip = pygame.Rect(clip_x, y, max(0, clip_r - clip_x), h)
+    else:
+        left_arrow = None
+        right_arrow = None
+        clip = pygame.Rect(left, y, avail, h)
+    max_scroll = max(0, content_w - int(clip.width))
+    sx = int(max(0, min(max_scroll, int(scroll_x or 0))))
+    return {
+        "left_arrow": left_arrow,
+        "right_arrow": right_arrow,
+        "clip": clip,
+        "scroll_x": sx,
+        "max_scroll": max_scroll,
+        "need_scroll": need,
+        "content_w": content_w,
+        "strip_rect": pygame.Rect(left, y, max(0, right - left), h),
+    }
+
+
+def _editor_map_tab_scroll_to_index(idx, clip_w, n_maps, scroll_x):
+    """선택 탭이 보이도록 scroll_x 보정."""
+    n = max(0, int(n_maps or 0))
+    if n <= 0 or clip_w <= 0:
+        return 0
+    i = max(0, min(n - 1, int(idx or 0)))
+    tab_l = i * EDITOR_MAP_TAB_STRIDE
+    tab_r = tab_l + EDITOR_MAP_TAB_W
+    sx = int(scroll_x or 0)
+    if tab_l < sx:
+        sx = tab_l
+    elif tab_r > sx + int(clip_w):
+        sx = tab_r - int(clip_w)
+    max_scroll = max(0, _editor_map_tab_content_width(n) - int(clip_w))
+    return max(0, min(max_scroll, sx))
+
+
+def _editor_map_tab_index_at(mx, my, layout):
+    """클립 안 클릭 → 맵 인덱스. 화살표/갭이면 None."""
+    if not layout:
+        return None
+    clip = layout.get("clip")
+    if clip is None or not clip.collidepoint(mx, my):
+        return None
+    local = int(mx) - int(clip.x) + int(layout.get("scroll_x") or 0)
+    if local < 0:
+        return None
+    idx = local // EDITOR_MAP_TAB_STRIDE
+    within = local % EDITOR_MAP_TAB_STRIDE
+    if within >= EDITOR_MAP_TAB_W:
+        return None
+    return int(idx)
 
 
 def _editor_map_view_h(screen_h, top_bar_h=EDITOR_TOP_BAR_H):
@@ -72,13 +175,15 @@ def _editor_left_list_tops(top_bar_h):
     return {
         "flow": tb + 40,
         "map_tools": tb + 38,
-        "map_zone_btn": tb + 74,
-        "map_bgzone_btn": tb + 108,
-        "map_presence_btn": tb + 142,
-        "map_objects": tb + 110,
-        "map_zones": tb + 110,
-        "map_bgzones": tb + 142,
-        "map_presences": tb + 176,
+        # 맵 진입 시 틸트/쉬어 기본값 (world_data[map].field) — 항상 표시
+        "map_field_btn": tb + 74,
+        "map_zone_btn": tb + 108,
+        "map_bgzone_btn": tb + 142,
+        "map_presence_btn": tb + 176,
+        "map_objects": tb + 144,
+        "map_zones": tb + 144,
+        "map_bgzones": tb + 176,
+        "map_presences": tb + 210,
     }
 
 
@@ -87,6 +192,16 @@ def _editor_entity_world_rect(o):
     iw, ih = o.image.get_size()
     frx = int(round(float(o.pos[0])))
     fry = int(round(float(o.pos[1])))
+    try:
+        wa = float(getattr(o, "wall_angle", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        wa = 0.0
+    if isinstance(o, FieldItem) and field_wall_angle_active(wa):
+        try:
+            h_off = float(getattr(o, "height", 0) or 0)
+        except (TypeError, ValueError):
+            h_off = 0.0
+        return field_wall_world_aabb(frx, fry, iw, ih, wa, height=h_off)
     left = float(left_edge_bottom_center_x(frx, iw))
     top = float(fry) - float(ih)
     return pygame.Rect(int(left), int(top), iw, ih)
@@ -97,6 +212,34 @@ def _editor_pick_alpha_min():
         return max(1, min(255, int(CONFIG.get("EDITOR_PICK_ALPHA_MIN", 16) or 16)))
     except Exception:
         return 16
+
+
+def _editor_entity_alpha_hit(o, wx, wy, *, alpha_min=None):
+    """월드 좌표가 스프라이트의 보이는(불투명) 픽셀 위인지."""
+    img = getattr(o, "image", None)
+    if img is None:
+        return False
+    try:
+        wa = float(getattr(o, "wall_angle", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        wa = 0.0
+    if isinstance(o, FieldItem) and field_wall_angle_active(wa):
+        iw, ih = img.get_size()
+        try:
+            h_off = float(getattr(o, "height", 0) or 0)
+        except (TypeError, ValueError):
+            h_off = 0.0
+        return field_wall_editor_hit(
+            float(o.pos[0]),
+            float(o.pos[1]),
+            iw,
+            ih,
+            wa,
+            wx,
+            wy,
+            height=h_off,
+        )
+    return _editor_surface_alpha_hit(img, _editor_entity_world_rect(o), wx, wy, alpha_min=alpha_min)
 
 
 def _editor_surface_pick_mask(surf, *, alpha_min=None):
@@ -153,14 +296,6 @@ def _editor_surface_alpha_hit(surf, rect, px, py, *, alpha_min=None):
         return False
 
 
-def _editor_entity_alpha_hit(o, wx, wy, *, alpha_min=None):
-    """월드 좌표가 스프라이트의 보이는(불투명) 픽셀 위인지."""
-    img = getattr(o, "image", None)
-    if img is None:
-        return False
-    return _editor_surface_alpha_hit(img, _editor_entity_world_rect(o), wx, wy, alpha_min=alpha_min)
-
-
 def _editor_entity_alpha_hit_rect(o, sel_rect, *, alpha_min=None):
     """선택 사각형과 스프라이트 불투명 영역이 겹치는지."""
     img = getattr(o, "image", None)
@@ -173,6 +308,12 @@ def _editor_entity_alpha_hit_rect(o, sel_rect, *, alpha_min=None):
         return False
     if inter.width <= 0 or inter.height <= 0:
         return False
+    try:
+        wa = float(getattr(o, "wall_angle", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        wa = 0.0
+    if isinstance(o, FieldItem) and field_wall_angle_active(wa):
+        return True
     if alpha_min is None:
         alpha_min = _editor_pick_alpha_min()
     mask = _editor_surface_pick_mask(img, alpha_min=alpha_min)
@@ -1887,22 +2028,30 @@ def _editor_paint_modal_overlay(
 
 
 def _char_anim_dropdown_options():
-    return [
-        "idle",
-        "walk",
-        "jump",
-        "hurt",
-        "laugh",
-        "attack",
-        "lie",
-        "seat_idle",
-        "question",
-        "surprise",
-        "say",
-        "sleep",
-        "sad",
-        "seating",
-    ]
+    try:
+        from engine import list_char_anim_set_names
+
+        return list(list_char_anim_set_names())
+    except Exception:
+        return [
+            "idle",
+            "walk",
+            "jump",
+            "run",
+            "hurt",
+            "laugh",
+            "attack",
+            "lie",
+            "seat_idle",
+            "question",
+            "surprise",
+            "say",
+            "sleep",
+            "sad",
+            "seating",
+            "falldown",
+            "tickle",
+        ]
 
 
 def _parse_waypoints_semicolon(text):
@@ -1935,36 +2084,55 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "MOVE":
         return [
             ("MOVE: pos [x,y] 또는 [[x,y],…] 웨이포인트; 에디터는 Pos+추가(;)", "_hint_move"),
-            ("Target (목록/직접입력)", "target"),
+            ("Target (여러명: a,b / all_npcs)", "target"),
             ("Pos X", "pos_x"),
             ("Pos Y", "pos_y"),
             ("웨이포인트(;구분) · WP+로 맵에서 연속 추가", "waypoints"),
-            ("Dir", "dir"),
+            ("Dir (left / right / player)", "dir"),
             ("instant (true=순간)", "instant"),
             ("force (true=마스크/이동가능 무시)", "force"),
             ("Speed mul (1.0=기본, 0.5=느림, 2.0=빠름)", "speed"),
             ("wait (단일 목적지만 즉시 다음; 웨이포인트 경로는 엔진이 끝까지 대기)", "wait"),
             ("move_sync (같은 문자열의 연속 MOVE 전원 도착까지 묶음; 비우면 개별)", "move_sync"),
             ("이동 중 애니 (비우면 기본·idle 등)", "move_anim"),
+            ("단체 배치 (circle=둘러싸기 / left·right·up·down=일렬)", "group"),
+            ("단체 spacing px (circle=반경, 일렬=간격, 기본 50)", "spacing"),
         ]
     if t == "PLACE":
         return [
             ("PLACE: 새 오브젝트/NPC 등장 (기존 위치 바꿀 땐 MOVE+instant)", "_hint_place"),
-            ("Target (자산 이름)", "target"),
+            ("Target (여러명: a,b / all_npcs)", "target"),
             ("Pos X", "pos_x"),
             ("Pos Y", "pos_y"),
             ("Appear", "appear"),
-            ("Dir", "dir"),
+            ("Dir (left / right / player)", "dir"),
             ("Action", "action"),
+            ("behavior (비우면 캐릭터 기본 — idle/randomwalk/randomplay)", "behavior"),
+            ("roam radius (behavior용, 비우면 기본)", "radius"),
+            ("roam interval_ms (비우면 기본)", "interval_ms"),
+            ("단체 배치 (circle=둘러싸기 / left·right·up·down=일렬)", "group"),
+            ("단체 spacing px (circle=반경, 일렬=간격, 기본 50)", "spacing"),
             ("sprite_tilt (0~1, 비우면 유지/기본)", "sprite_tilt"),
             ("height (px, 그리기+점프 arc, 비우면 유지/기본)", "height"),
             ("ysort (ground/visual, 비우면 유지/기본)", "ysort"),
             ("layer (int, 비우면 유지/기본)", "layer"),
+            ("persist (true=remove 전까지 맵·세이브 유지)", "persist"),
+            ("travel (true=맵 이동 시 플레이어 동행, follow면 자동)", "travel"),
+        ]
+    if t == "BEHAVIOR":
+        return [
+            ("BEHAVIOR: NPC 기본행동(ambient AI) 제어", "_hint_behavior"),
+            ("Target (여러명: a,b / all_npcs)", "target"),
+            ("behavior: idle | randomwalk | randomplay | follow | …", "behavior"),
+            ("roam radius (px, 비우면 유지)", "radius"),
+            ("roam interval_ms (비우면 유지)", "interval_ms"),
+            ("persist (true=placed 에 없으면 등록+세이브)", "persist"),
+            ("travel (true/false, follow 동행 여부)", "travel"),
         ]
     if t == "TUNE":
         return [
             ("TUNE: 이미 배치된 대상의 설정값 변경(생성/이동 없음)", "_hint_tune"),
-            ("Target (목록/직접입력)", "target"),
+            ("Target (여러명: a,b / all_npcs)", "target"),
             ("sprite_tilt (0~1, 비우면 유지)", "sprite_tilt"),
             ("height (px, 비우면 유지)", "height"),
             ("ysort (ground/visual, 비우면 유지)", "ysort"),
@@ -1983,32 +2151,33 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "ACTION_ANIM":
         return [
             ("ACTION_ANIM: 캐릭터 동작(애니 세트)", "_hint_action_anim"),
-            ("Target (목록/픽)", "target"),
+            ("Target (여러명: a,b / all_npcs)", "target"),
             ("Anim (목록 또는 직접 입력)", "anim"),
             ("mode: once | hold", "mode"),
-            ("val (초, once일 때)", "val"),
+            ("val (초 — once 대기/ hop 시간, hold+jump 도 hop 1회 시간)", "val"),
             ("loop (true/false)", "loop"),
             ("wait (once+시간 있을 때)", "wait"),
             ("dir: left | right | 비우면 유지", "dir"),
-            ("height (jump일 때 점프 arc px)", "height"),
+            ("height (jump: 포물선 arc px, 기본 JUMP_ARC_HEIGHT)", "height"),
             ("release: idle | stop (해제 시)", "release"),
+            ("jump 팁: once=1회 hop / hold+loop=착지마다 반복", "_hint_jump_hop"),
         ]
     if t == "SAY":
         return [
             ("Who", "who"),
             ("Show name(true/false, 비우면 기본값)", "show_name"),
-            ("Text", "text"),
+            ("Text — \"ally5\"/{ally5} 이름치환, 줄바꿈 \\n", "text"),
             ("Voice", "voice"),
             ("Auto(true/false)", "auto"),
             ("Val(sec)", "val"),
             ("말풍선(bubble, true/false 비우면 data 기본)", "bubble"),
-            ("말풍선 대상(bubble_target, 비우면 who)", "bubble_target"),
+            ("말풍선 대상(여러명: a,b / all_npcs, 비우면 who)", "bubble_target"),
         ]
     if t == "EMOTE":
         return [
             ("EMOTE: 머리 위 감정 PNG 연속 (images/ui/{emotion}_0.png)", "_hint_emote"),
             ("action: show | clear", "action"),
-            ("Target (player 또는 이름)", "target"),
+            ("Target (여러명: a,b / all_npcs)", "target"),
             ("emotion (파일 접두어, 예: surprise)", "emotion"),
             ("frame_ms", "frame_ms"),
             ("hold_last_sec (마지막 프레임 유지 후 진행/대기)", "hold_last_sec"),
@@ -2044,10 +2213,12 @@ def _step_field_rows(step_type, step_fields=None):
             ("Leader(name)", "leader"),
             ("Dist(px)", "dist"),
             ("Speed mul", "speed"),
+            ("persist (true=ambient follow+세이브/맵동행)", "persist"),
         ]
     if t == "FOLLOW_STOP":
         return [
             ("Follower(name, empty=all)", "follower"),
+            ("persist (empty all 일 때 true=동행 follow 전부 idle)", "persist"),
         ]
     if t in ("FADEIN", "FADEOUT"):
         return [
@@ -2057,7 +2228,7 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "EFFECT":
         return [
             ("Name", "name"),
-            ("Target", "target"),
+            ("Target (여러명: a,b / all_npcs)", "target"),
             ("Anchor", "anchor"),
             ("Pos X", "pos_x"),
             ("Pos Y", "pos_y"),
@@ -2084,7 +2255,7 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "CHANGE":
         return [
             ("CHANGE: FieldItem/캐릭터 외형 교체 (들고 있는 중 OK)", "_hint_change"),
-            ("Target (held=손, 맵 오브젝트/캐릭터 이름)", "target"),
+            ("Target (held / 여러명: a,b / all_npcs)", "target"),
             ("To (FieldItem=object_defs / 캐릭터=char_defs 키)", "to"),
             ("Fade (초, 디졸브 — 사라졌다 나타남. 0/빈칸=즉시)", "fade"),
         ]
@@ -2238,7 +2409,7 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "ENTITY_FX":
         return [
             ("ENTITY_FX: 캐릭터·오브젝트 반짝임/틴트/zoom", "_hint_entity_fx"),
-            ("target (캐릭터/오브젝트 이름)", "target"),
+            ("target (여러명: a,b / all_npcs)", "target"),
             ("mode pulse|tint", "efx_mode"),
             ("action start|stop", "efx_action"),
             ("color R,G,B", "efx_color"),
@@ -2288,25 +2459,49 @@ def _names_after_steps(steps, before_index, player, objs, npcs):
     for i in range(end):
         st = steps[i]
         typ = (st.get("type") or "").upper()
-        tgt = (st.get("target") or "").strip()
-        if not tgt:
-            continue
-        if typ == "PLACE":
-            if st.get("action") == "remove":
-                names.discard(tgt)
-            else:
+        raw = st.get("target") or ""
+        # 일괄 target: a,b / all_npcs
+        tokens = []
+        if isinstance(raw, (list, tuple)):
+            tokens = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            s = str(raw).strip()
+            if s:
+                cur = []
+                for ch in s:
+                    if ch in ",;":
+                        part = "".join(cur).strip()
+                        if part:
+                            tokens.append(part)
+                        cur = []
+                    else:
+                        cur.append(ch)
+                part = "".join(cur).strip()
+                if part:
+                    tokens.append(part)
+        for tgt in tokens:
+            if not tgt or tgt.strip().lower() in ("all_npcs", "allnpc", "all_npc", "*npcs"):
+                continue
+            if typ == "PLACE":
+                if st.get("action") == "remove":
+                    names.discard(tgt)
+                else:
+                    names.add(tgt)
+            elif typ == "MOVE":
                 names.add(tgt)
-        elif typ == "MOVE":
-            names.add(tgt)
     return sorted(names)
 
 
-def _place_target_options():
-    return sorted(set(CHAR_ASSETS.keys()) | set(OBJ_ASSETS.keys()))
-
-
 def _move_target_options(steps, before_index, player, objs, npcs):
-    return _names_after_steps(steps, before_index, player, objs, npcs)
+    opts = _names_after_steps(steps, before_index, player, objs, npcs)
+    if "all_npcs" not in opts:
+        opts = ["all_npcs"] + list(opts)
+    return opts
+
+
+def _place_target_options():
+    opts = sorted(set(CHAR_ASSETS.keys()) | set(OBJ_ASSETS.keys()))
+    return ["all_npcs"] + opts
 
 
 def _dev_cmd_dropdown_options():
@@ -2330,6 +2525,9 @@ def _dev_cmd_dropdown_options():
         "stop_racing",
         "start_racing",
         "start_activity_racing",
+        "stop_bullfrog",
+        "start_bullfrog",
+        "start_activity_bullfrog",
         "restart_delete_save",
     ]
 
@@ -2354,6 +2552,7 @@ def _step_row_entity_pick(step_type, field_key):
             "MOVE",
             "PLACE",
             "TUNE",
+            "BEHAVIOR",
             "ZOOM",
             "ACTION_ANIM",
             "EFFECT",
@@ -2384,7 +2583,7 @@ def _step_entity_options_for_pick(step_type, field_key, steps_ref, before_ix, pl
         return _place_target_options()
     if fk == "target" and t == "ZOOM":
         return _zoom_target_options(steps_ref, before_ix, player, objs, npcs)
-    if fk == "target" and t in ("TUNE", "EFFECT", "EMOTE", "ENTITY_FX"):
+    if fk == "target" and t in ("TUNE", "BEHAVIOR", "EFFECT", "EMOTE", "ENTITY_FX"):
         return _move_target_options(steps_ref, before_ix, player, objs, npcs)
     if fk == "target" and t == "CHANGE":
         opts = ["held", "@held"]
@@ -2427,7 +2626,9 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
             ]
         if fk == "cam_smooth":
             return ["true", "false"]
-    if fk == "dir" and t in ("MOVE", "PLACE", "MAP", "ACTION_ANIM"):
+    if fk == "dir" and t in ("MOVE", "PLACE"):
+        return ["", "left", "right", "player"]
+    if fk == "dir" and t in ("MAP", "ACTION_ANIM"):
         return ["", "left", "right"]
     if fk == "appear" and t in ("MOVE", "PLACE", "MAP"):
         return ["", "fade"]
@@ -2461,6 +2662,19 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["once", "hold"]
     if fk == "release" and t == "ACTION_ANIM":
         return ["idle", "stop"]
+    if fk == "behavior" and t in ("BEHAVIOR", "PLACE"):
+        return [
+            "",
+            "idle",
+            "randomwalk",
+            "randomplay",
+            "patrol",
+            "follow",
+            "flee",
+            "frozen",
+        ]
+    if fk == "group" and t in ("MOVE", "PLACE"):
+        return ["", "circle", "left", "right", "up", "down"]
     if fk == "transition" and t == "SCREEN":
         return ["fade", "dissolve", "wipe"]
     if fk == "action" and t == "SCREEN":
@@ -2487,6 +2701,8 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["start", "stop"]
     if fk in ("efx_persist", "zoom_persist") and t in ("ENTITY_FX", "ZOOM"):
         return ["false", "true"]
+    if fk in ("persist", "travel") and t in ("PLACE", "BEHAVIOR", "FOLLOW_START", "FOLLOW_STOP"):
+        return ["", "true", "false"]
     if fk == "fx_dir" and t == "SCREEN_FX":
         return ["SE", "SW", "NE", "NW", "RANDOM"]
     if fk == "val" and t in ("PLAYER_VISIBLE", "CURSOR_VISIBLE"):
@@ -2571,6 +2787,9 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["val"] = "1.0"
         if empt("anim"):
             step_fields["anim"] = "idle"
+    elif t == "BEHAVIOR":
+        if empt("behavior"):
+            step_fields["behavior"] = "randomplay"
     elif t == "CARRY":
         if empt("action"):
             step_fields["action"] = "pick"
@@ -3057,6 +3276,7 @@ def _editor_wants_text_input(
         or (obj_def_modal.show and obj_def_modal.active_field)
         or (obj_inst_modal.show and obj_inst_modal.active_field)
         or (presence_zone_modal.show and presence_zone_modal.active_field)
+        or (map_field_defaults_modal.show and map_field_defaults_modal.active_field)
         or obj_height_active
         or obj_sprite_tilt_active
         or obj_layer_active
@@ -3080,33 +3300,152 @@ def _editor_sync_text_input(wants: bool):
 
 def _editor_map_obj_inspector_layout(screen_w, screen_h, sidebar_w):
     """
-    맵 편집: 단일 선택 시 높이·틸트 입력 (왼쪽 정렬, 두 줄로 겹침 방지).
-    반환: bar, height_rect, tilt_rect, ysort_rect 등.
+    맵 편집: 단일 선택 시 높이·틸트·벽각도 (왼쪽 정렬).
+    반환: bar, height_rect, tilt_rect, wall_slider_rect, ysort_rect 등.
     """
     bar_h = EDITOR_INSPECTOR_H
     bar_top = int(screen_h) - EDITOR_STATUS_BAR_H - bar_h
     bar = pygame.Rect(0, bar_top, screen_w, bar_h)
     ix = int(sidebar_w) + 10
-    row_h = bar_top + 10
-    row_t = bar_top + 38
+    row_h = bar_top + 8
+    row_t = bar_top + 34
+    row_w = bar_top + 60
     field_w = 88
     # 라벨 뒤 입력칸
     h_field_x = ix + 118
     t_field_x = ix + 118
     hr = pygame.Rect(h_field_x, row_h, field_w, 22)
     tr = pygame.Rect(t_field_x, row_t, field_w, 22)
+    # 벽 각도 슬라이더: 라벨 뒤 ~ 우측 버튼 앞
+    wall_label_w = 118
+    wall_track = pygame.Rect(ix + wall_label_w, row_w + 4, min(320, max(160, bar.right - 220 - (ix + wall_label_w))), 14)
+    wall_val = pygame.Rect(wall_track.right + 8, row_w, 56, 22)
     yr = pygame.Rect(bar.right - 200, row_h, 188, 22)
     lr = pygame.Rect(bar.right - 200, row_t, 188, 22)
     return {
         "bar": bar,
         "height_rect": hr,
         "tilt_rect": tr,
+        "wall_slider_rect": wall_track,
+        "wall_val_rect": wall_val,
         "ysort_rect": yr,
         "layer_rect": lr,
         "ix": ix,
         "row_h": row_h,
         "row_t": row_t,
+        "row_w": row_w,
     }
+
+
+def _editor_wall_angle_from_slider_x(slider_rect, mx):
+    """슬라이더 x → 0~360 도."""
+    try:
+        t = (float(mx) - float(slider_rect.x)) / max(1.0, float(slider_rect.w))
+    except Exception:
+        t = 0.0
+    t = max(0.0, min(1.0, t))
+    return _clamp_wall_angle_deg(t * 360.0)
+
+
+def _editor_blit_field_wall_on_map(
+    map_surf,
+    img,
+    world_x,
+    world_y,
+    wall_angle_deg,
+    *,
+    bg_blit_x,
+    bg_blit_y,
+    bg_w,
+    bg_h,
+    sw_bg,
+    sh_bg,
+    zoom_level,
+    height=0.0,
+):
+    """에디터 플랫 맵에 벽 컬럼 blit (런타임과 동일 각도 규칙)."""
+    if img is None or map_surf is None:
+        return None
+    ang = _clamp_wall_angle_deg(wall_angle_deg)
+    if not field_wall_angle_active(ang):
+        return None
+    try:
+        w0 = int(img.get_width())
+        h0 = int(img.get_height())
+    except Exception:
+        return None
+    if w0 < 1 or h0 < 1:
+        return None
+    z = max(0.05, float(zoom_level))
+    rw = max(1, int(round(w0 * z)))
+    rh = max(1, int(round(h0 * z)))
+    try:
+        s_img = pygame.transform.scale(img, (rw, rh))
+    except Exception:
+        return None
+    half = field_wall_native_half_w(w0)
+    c, s = field_wall_dir_xy(ang)
+    h_off = float(height or 0.0)
+    Rect = pygame.Rect
+    blit = map_surf.blit
+    min_x = min_y = 10**9
+    max_x = max_y = -10**9
+    for i in range(rw):
+        along = -half + (float(i) + 0.5) * (float(w0) / float(rw))
+        wx = float(world_x) + along * c
+        wy = float(world_y) + along * s
+        fpx, fpy = world_to_map_surface_xy(
+            bg_blit_x, bg_blit_y, wx, wy, bg_w, bg_h, sw_bg, sh_bg, h_off
+        )
+        bx = int(fpx)
+        by = int(fpy) - rh
+        try:
+            blit(s_img, (bx, by), area=Rect(i, 0, 1, rh))
+        except Exception:
+            pass
+        min_x = min(min_x, bx)
+        max_x = max(max_x, bx + 1)
+        min_y = min(min_y, by)
+        max_y = max(max_y, by + rh)
+    if max_x < min_x:
+        return None
+    return pygame.Rect(int(min_x), int(min_y), max(1, int(max_x - min_x)), max(1, int(max_y - min_y)))
+
+
+def _editor_draw_wall_base_line(
+    map_surf,
+    world_x,
+    world_y,
+    img_w,
+    wall_angle_deg,
+    *,
+    bg_blit_x,
+    bg_blit_y,
+    bg_w,
+    bg_h,
+    sw_bg,
+    sh_bg,
+    height=0.0,
+    selected=False,
+):
+    """선택 오브젝트 벽 밑변 가이드 라인."""
+    ang = _clamp_wall_angle_deg(wall_angle_deg)
+    half = field_wall_native_half_w(img_w)
+    c, s = field_wall_dir_xy(ang)
+    h_off = float(height or 0.0)
+    x0 = float(world_x) - half * c
+    y0 = float(world_y) - half * s
+    x1 = float(world_x) + half * c
+    y1 = float(world_y) + half * s
+    p0 = world_to_map_surface_xy(bg_blit_x, bg_blit_y, x0, y0, bg_w, bg_h, sw_bg, sh_bg, h_off)
+    p1 = world_to_map_surface_xy(bg_blit_x, bg_blit_y, x1, y1, bg_w, bg_h, sw_bg, sh_bg, h_off)
+    col = (80, 220, 255) if selected else (60, 160, 200)
+    try:
+        pygame.draw.line(map_surf, col, p0, p1, 2)
+        pygame.draw.circle(map_surf, col, p0, 3)
+        pygame.draw.circle(map_surf, col, p1, 3)
+    except Exception:
+        pass
 
 
 def _editor_right_sidebar_view_bottom(
@@ -3154,8 +3493,67 @@ def _preview_upto_index(show_step_config, step_edit_index, step_insert_index, st
     return -1
 
 
+def _preview_expand_step_targets(raw, pos_dict, player, objs, npcs):
+    """에디터 미리보기: target 토큰 → 이름 목록 (all_npcs / a,b 지원)."""
+    try:
+        from engine import _split_event_target_tokens, _is_all_npcs_token
+    except Exception:
+        return [str(raw or "").strip()] if str(raw or "").strip() else []
+    tokens = _split_event_target_tokens(raw)
+    if not tokens:
+        return []
+    from data import CHAR_ASSETS, OBJ_ASSETS
+
+    out = []
+    seen = set()
+    live_npc = {getattr(n, "name", "") for n in (npcs or [])}
+    live_obj = {getattr(o, "name", "") for o in (objs or [])}
+    for tok in tokens:
+        if _is_all_npcs_token(tok):
+            # 맵 NPC + 시뮬로 PLACE 된 캐릭터 (player·순수 오브젝트 제외)
+            for name in list(pos_dict.keys()):
+                if not name or name == "player" or name in seen:
+                    continue
+                if name in live_obj and name not in live_npc and name not in CHAR_ASSETS:
+                    continue
+                if name in live_npc or name in CHAR_ASSETS or name not in OBJ_ASSETS:
+                    seen.add(name)
+                    out.append(name)
+            continue
+        name = str(tok).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _preview_group_spacing(step):
+    try:
+        from engine import _event_group_spacing_px
+        return _event_group_spacing_px(step)
+    except Exception:
+        return 50.0
+
+
+def _preview_group_layout(step):
+    try:
+        from engine import _event_group_layout_mode
+        return _event_group_layout_mode(step)
+    except Exception:
+        return "circle"
+
+
+def _preview_group_pos(bx, by, index, count, spacing, layout="circle"):
+    try:
+        from engine import _event_group_pos
+        return _event_group_pos(bx, by, index, count, spacing, layout=layout)
+    except Exception:
+        return float(bx), float(by)
+
+
 def _simulate_event_preview(steps, upto_inclusive, player, objs, npcs):
-    """누적 위치와 MOVE 화살표(에디터 표시용)."""
+    """누적 위치와 MOVE 화살표(에디터 표시용). 다중 target 단체 배치 반영."""
     pos = {}
     pos["player"] = [float(player.pos[0]), float(player.pos[1])]
     for n in npcs:
@@ -3174,18 +3572,35 @@ def _simulate_event_preview(steps, upto_inclusive, player, objs, npcs):
         st = steps[si]
         typ = (st.get("type") or "").upper()
         if typ == "PLACE":
-            tgt = (st.get("target") or "").strip()
-            if not tgt:
+            names = _preview_expand_step_targets(st.get("target"), pos, player, objs, npcs)
+            if not names:
                 continue
             if st.get("action") == "remove":
-                pos.pop(tgt, None)
+                for tgt in names:
+                    pos.pop(tgt, None)
+                    last_step_for.pop(tgt, None)
+                continue
+            p = st.get("pos")
+            if isinstance(p, (list, tuple)) and len(p) >= 2 and not isinstance(p[0], (list, tuple)):
+                try:
+                    bx, by = float(p[0]), float(p[1])
+                except (TypeError, ValueError):
+                    continue
+                spacing = _preview_group_spacing(st)
+                layout = _preview_group_layout(st)
+                n = len(names)
+                for i, tgt in enumerate(names):
+                    nx, ny = _preview_group_pos(bx, by, i, n, spacing, layout=layout)
+                    pos[tgt] = [nx, ny]
+                    last_step_for[tgt] = si
             else:
-                p = st.get("pos")
-                if isinstance(p, (list, tuple)) and len(p) >= 2:
-                    pos[tgt] = [float(p[0]), float(p[1])]
+                # pos 없으면 맵 기존 위치 유지(또는 새로 등장만 표시용 0,0 스킵)
+                for tgt in names:
+                    if tgt not in pos:
+                        pos[tgt] = [float(player.pos[0]), float(player.pos[1])]
                     last_step_for[tgt] = si
         elif typ == "MOVE":
-            tgt = (st.get("target") or "").strip()
+            names = _preview_expand_step_targets(st.get("target"), pos, player, objs, npcs)
             p = st.get("pos")
             wpl = []
             if isinstance(p, (list, tuple)) and len(p) >= 2:
@@ -3194,33 +3609,49 @@ def _simulate_event_preview(steps, upto_inclusive, player, objs, npcs):
                 else:
                     for sub in p:
                         if isinstance(sub, (list, tuple)) and len(sub) >= 2:
-                            wpl.append([float(sub[0]), float(sub[1])])
-            if not tgt or not wpl:
+                            try:
+                                wpl.append([float(sub[0]), float(sub[1])])
+                            except (TypeError, ValueError):
+                                pass
+            if not names or not wpl:
                 continue
             ins = st.get("instant")
             if isinstance(ins, str):
                 instant = ins.strip().lower() in ("1", "true", "yes", "on")
             else:
                 instant = bool(ins)
-            for wi in range(len(wpl)):
-                tx, ty = wpl[wi][0], wpl[wi][1]
-                fx = fy = None
-                if tgt in pos:
-                    fx, fy = pos[tgt][0], pos[tgt][1]
-                if fx is not None:
-                    arrows.append(
-                        {
-                            "x1": fx,
-                            "y1": fy,
-                            "x2": tx,
-                            "y2": ty,
-                            "step": si,
-                            "tgt": tgt,
-                            "instant": instant,
-                        }
-                    )
-                pos[tgt] = [tx, ty]
-            last_step_for[tgt] = si
+            spacing = _preview_group_spacing(st)
+            layout = _preview_group_layout(st)
+            n = len(names)
+            for i, tgt in enumerate(names):
+                try:
+                    from engine import _event_offset_waypoints
+                    ow = _event_offset_waypoints(wpl, i, n, spacing, layout=layout)
+                except Exception:
+                    from engine import _event_group_pos
+                    lx, ly = _event_group_pos(wpl[-1][0], wpl[-1][1], i, n, spacing, layout=layout)
+                    ow = [[lx, ly]]
+                if not ow:
+                    continue
+                for wi in range(len(ow)):
+                    tx, ty = ow[wi][0], ow[wi][1]
+                    fx = fy = None
+                    if tgt in pos:
+                        fx, fy = pos[tgt][0], pos[tgt][1]
+                    if fx is not None:
+                        arrows.append(
+                            {
+                                "x1": fx,
+                                "y1": fy,
+                                "x2": tx,
+                                "y2": ty,
+                                "step": si,
+                                "tgt": tgt,
+                                "instant": instant,
+                            }
+                        )
+                    pos[tgt] = [tx, ty]
+                last_step_for[tgt] = si
 
     return pos, arrows, last_step_for
 
@@ -3631,7 +4062,7 @@ def _editor_step_list_summary(index, step):
             parts.append(pos_s)
         _tip("target", t)
         _tip("pos", pos_s or step.get("pos"))
-        for k in ("dir", "wait", "force", "instant", "speed", "move_sync"):
+        for k in ("dir", "wait", "force", "instant", "speed", "move_sync", "group", "spacing"):
             _tip(k, step.get(k))
         ma = (step.get("move_anim") or step.get("path_anim") or "").strip()
         if ma:
@@ -3649,8 +4080,20 @@ def _editor_step_list_summary(index, step):
         _tip("target", t)
         _tip("action", act)
         _tip("pos", pos_s or step.get("pos"))
-        for k in ("dir", "appear", "layer", "visible"):
+        for k in ("dir", "appear", "layer", "visible", "behavior", "group", "spacing", "persist", "travel"):
             _tip(k, step.get(k))
+    elif st == "BEHAVIOR":
+        t = tg or "?"
+        beh = (step.get("behavior") or step.get("behavior_mode") or step.get("mode") or "").strip()
+        parts.append(t)
+        if beh:
+            parts.append(beh)
+        _tip("target", t)
+        _tip("behavior", beh)
+        _tip("radius", step.get("radius"))
+        _tip("interval_ms", step.get("interval_ms"))
+        _tip("persist", step.get("persist"))
+        _tip("travel", step.get("travel"))
     elif st == "SAY":
         who = tg or "player"
         preview = _editor_step_preview_text(step)
@@ -3855,6 +4298,9 @@ def _editor_step_list_summary(index, step):
     elif st in ("FOLLOW_START", "FOLLOW_STOP"):
         parts.append(tg or "player")
         _tip("target", tg)
+        _tip("follower", step.get("follower"))
+        _tip("leader", step.get("leader"))
+        _tip("persist", step.get("persist"))
     else:
         if tg:
             parts.append(tg)
@@ -4267,6 +4713,7 @@ def editor_main():
             "map_entity_names": sorted(ent_names),
             "on_presence_area_pick": _on_presence_area_pick,
             "on_presence_zone_saved": _on_presence_zone_saved,
+            "on_map_field_defaults_saved": _on_map_field_defaults_saved,
         }
 
     def _on_presence_area_pick():
@@ -4286,6 +4733,15 @@ def editor_main():
         flow.save_editor_data(map_id, objs, npcs)
         _flow_refresh_entity_list()
 
+    def _on_map_field_defaults_saved(field_dict):
+        """world_data[map].field 저장. 빈 dict 면 field 키 제거(CONFIG 기본)."""
+        row = flow.world_data.setdefault(map_id, {})
+        if isinstance(field_dict, dict) and field_dict:
+            row["field"] = dict(field_dict)
+        else:
+            row.pop("field", None)
+        flow.save_editor_data(map_id, objs, npcs)
+
     # --- STEP 설정(추가/삽입/수정) 모달 ---
     show_step_config = False
     step_edit_index = None         # 수정이면 int, 추가/삽입이면 None
@@ -4296,6 +4752,7 @@ def editor_main():
         "MOVE",
         "PLACE",
         "TUNE",
+        "BEHAVIOR",
         "MAP",
         "SAY",
         "EMOTE",
@@ -4494,6 +4951,8 @@ def editor_main():
 
     map_list = list(flow.world_data.keys())
     cur_idx = 0
+    map_tab_scroll_x = 0  # 상단 맵 탭 가로 스크롤(px)
+    map_tab_bar_ui = {}
     # 초기 맵 로드
     map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": map_list[cur_idx]})
     bb_ed.on_map_switch(baseball_ed, flow, map_id, objs)
@@ -4575,6 +5034,7 @@ def editor_main():
     obj_height_buf = ""
     obj_layer_active = False
     obj_layer_buf = ""
+    obj_wall_angle_dragging = False
     last_m = (0,0)
     GRID_SIZE = 16
     EVENT_ADD_Y = TOP_BAR_H + 34
@@ -4724,6 +5184,10 @@ def editor_main():
         export_map_btn = pygame.Rect(int(sidebar_w + map_area_w - 80), 10, 72, 38)
         font_settings_btn = pygame.Rect(export_map_btn.x - 84, 10, 76, 38)
         merge_obj_btn = pygame.Rect(font_settings_btn.x - 84, 10, 76, 38)
+        map_tab_bar_ui = _editor_map_tab_bar_layout(
+            sidebar_w, merge_obj_btn.x, len(map_list), map_tab_scroll_x
+        )
+        map_tab_scroll_x = int(map_tab_bar_ui.get("scroll_x") or 0)
         pygame.event.pump()
         _editor_sync_text_input(
             _editor_wants_text_input(
@@ -5266,16 +5730,30 @@ def editor_main():
                     _tilt_r = _ins["tilt_rect"]
                     _ysort_r = _ins.get("ysort_rect")
                     _layer_r = _ins.get("layer_rect")
+                    _wall_sl = _ins.get("wall_slider_rect")
+                else:
+                    _wall_sl = None
+                if _wall_sl and _wall_sl.collidepoint(event.pos) and selected_nodes:
+                    n0w = selected_nodes[0]
+                    if isinstance(n0w, FieldItem):
+                        obj_wall_angle_dragging = True
+                        n0w.wall_angle = _editor_wall_angle_from_slider_x(_wall_sl, event.pos[0])
+                        obj_sprite_tilt_active = False
+                        obj_height_active = False
+                        obj_layer_active = False
+                        continue
                 if _height_r and _height_r.collidepoint(event.pos):
                     obj_height_active = True
                     obj_sprite_tilt_active = False
                     obj_layer_active = False
+                    obj_wall_angle_dragging = False
                     obj_height_buf = str(int(round(float(getattr(selected_nodes[0], "height", 0) or 0))))
                     continue
                 if _tilt_r and _tilt_r.collidepoint(event.pos):
                     obj_sprite_tilt_active = True
                     obj_height_active = False
                     obj_layer_active = False
+                    obj_wall_angle_dragging = False
                     obj_sprite_tilt_buf = str(getattr(selected_nodes[0], "sprite_tilt", 1.0))
                     continue
                 if _ysort_r and _ysort_r.collidepoint(event.pos):
@@ -5288,11 +5766,13 @@ def editor_main():
                     obj_sprite_tilt_active = False
                     obj_height_active = False
                     obj_layer_active = False
+                    obj_wall_angle_dragging = False
                     continue
                 if _layer_r and _layer_r.collidepoint(event.pos):
                     obj_layer_active = True
                     obj_sprite_tilt_active = False
                     obj_height_active = False
+                    obj_wall_angle_dragging = False
                     obj_layer_buf = str(int(getattr(selected_nodes[0], "layer", 0) or 0))
                     continue
                 if edit_mode == "MAP" and map_tool == "OBJECTS" and len(selected_nodes) == 1:
@@ -5365,6 +5845,11 @@ def editor_main():
                 if presence_zone_modal.show and presence_zone_modal.active_field:
                     presence_zone_modal.fields[presence_zone_modal.active_field] = (
                         presence_zone_modal.fields.get(presence_zone_modal.active_field, "") or ""
+                    ) + (event.text or "")
+                    continue
+                if map_field_defaults_modal.show and map_field_defaults_modal.active_field:
+                    map_field_defaults_modal.fields[map_field_defaults_modal.active_field] = (
+                        map_field_defaults_modal.fields.get(map_field_defaults_modal.active_field, "") or ""
                     ) + (event.text or "")
                     continue
                 if show_event_config and active_field:
@@ -5652,6 +6137,9 @@ def editor_main():
                     continue
             if presence_zone_modal.show:
                 if presence_zone_modal.handle_event(event, _editor_char_modal_ctx()):
+                    continue
+            if map_field_defaults_modal.show:
+                if map_field_defaults_modal.handle_event(event, _editor_char_modal_ctx()):
                     continue
 
             if show_zone_config:
@@ -6543,6 +7031,36 @@ def editor_main():
                                     ly = parse_float(step_fields.get("layer"), None)
                                     if ly is not None:
                                         new_step["layer"] = int(round(ly))
+                                    beh = (step_fields.get("behavior") or "").strip()
+                                    if beh:
+                                        new_step["behavior"] = beh
+                                    rad = parse_float(step_fields.get("radius"), None)
+                                    if rad is not None:
+                                        new_step["radius"] = max(0.0, rad)
+                                    iv = parse_float(step_fields.get("interval_ms"), None)
+                                    if iv is not None:
+                                        new_step["interval_ms"] = int(max(0, round(iv)))
+                                    grp = (step_fields.get("group") or "").strip().lower()
+                                    if grp:
+                                        new_step["group"] = grp
+                                    spc = parse_float(step_fields.get("spacing"), None)
+                                    if spc is not None:
+                                        new_step["spacing"] = max(0.0, float(spc))
+                                    if parse_bool(step_fields.get("persist")) is True:
+                                        new_step["persist"] = True
+                                    trv = parse_bool(step_fields.get("travel"))
+                                    if trv is True:
+                                        new_step["travel"] = True
+                                    elif trv is False and str(step_fields.get("travel") or "").strip():
+                                        new_step["travel"] = False
+                                if t == "BEHAVIOR":
+                                    if parse_bool(step_fields.get("persist")) is True:
+                                        new_step["persist"] = True
+                                    trv_b = parse_bool(step_fields.get("travel"))
+                                    if trv_b is True:
+                                        new_step["travel"] = True
+                                    elif trv_b is False and str(step_fields.get("travel") or "").strip():
+                                        new_step["travel"] = False
                                 if t == "MOVE":
                                     binst = parse_bool(step_fields.get("instant"))
                                     if binst is True:
@@ -6564,6 +7082,12 @@ def editor_main():
                                     ms = (step_fields.get("move_sync") or "").strip()
                                     if ms:
                                         new_step["move_sync"] = ms
+                                    grp = (step_fields.get("group") or "").strip().lower()
+                                    if grp:
+                                        new_step["group"] = grp
+                                    spc = parse_float(step_fields.get("spacing"), None)
+                                    if spc is not None:
+                                        new_step["spacing"] = max(0.0, float(spc))
                             elif t == "ACTION_ANIM":
                                 tg = (step_fields.get("target") or "").strip()
                                 if tg:
@@ -6592,6 +7116,26 @@ def editor_main():
                                 hj = parse_float(step_fields.get("height"), None)
                                 if hj is not None:
                                     new_step["height"] = max(0.0, min(4000.0, float(hj)))
+                            elif t == "BEHAVIOR":
+                                tg = (step_fields.get("target") or "").strip()
+                                if tg:
+                                    new_step["target"] = tg
+                                beh = (step_fields.get("behavior") or "").strip()
+                                if beh:
+                                    new_step["behavior"] = beh
+                                rad = parse_float(step_fields.get("radius"), None)
+                                if rad is not None:
+                                    new_step["radius"] = max(0.0, rad)
+                                iv = parse_float(step_fields.get("interval_ms"), None)
+                                if iv is not None:
+                                    new_step["interval_ms"] = int(max(0, round(iv)))
+                                if parse_bool(step_fields.get("persist")) is True:
+                                    new_step["persist"] = True
+                                trv_b = parse_bool(step_fields.get("travel"))
+                                if trv_b is True:
+                                    new_step["travel"] = True
+                                elif trv_b is False and str(step_fields.get("travel") or "").strip():
+                                    new_step["travel"] = False
                             elif t == "TUNE":
                                 if step_fields.get("target"):
                                     new_step["target"] = step_fields.get("target")
@@ -6683,10 +7227,14 @@ def editor_main():
                                 sp = parse_float(step_fields.get("speed"), None)
                                 if sp is not None:
                                     new_step["speed"] = sp
+                                if parse_bool(step_fields.get("persist")) is True:
+                                    new_step["persist"] = True
                             elif t == "FOLLOW_STOP":
                                 fol = (step_fields.get("follower") or "").strip()
                                 if fol:
                                     new_step["follower"] = fol
+                                if parse_bool(step_fields.get("persist")) is True:
+                                    new_step["persist"] = True
                             elif t == "EFFECT":
                                 if step_fields.get("name"):
                                     new_step["name"] = step_fields.get("name")
@@ -7110,6 +7658,20 @@ def editor_main():
 
             if event.type == pygame.MOUSEBUTTONDOWN:
                 # 휠(버튼 4/5): 일부 환경에서 MOUSEWHEEL 대신 들어옴 → 스크롤만, 선택 없음
+                # 상단 맵 탭 바: 가로 슬라이드
+                if event.button in (4, 5) and 0 <= my < TOP_BAR_H and sidebar_w < mx < SCREEN_W - right_panel_w:
+                    _mt = map_tab_bar_ui or {}
+                    _strip = _mt.get("strip_rect")
+                    if _strip is not None and _strip.collidepoint(mx, my) and int(_mt.get("max_scroll") or 0) > 0:
+                        _step = EDITOR_MAP_TAB_SCROLL_STEP
+                        if event.button == 4:
+                            map_tab_scroll_x = max(0, int(map_tab_scroll_x) - _step)
+                        else:
+                            map_tab_scroll_x = min(
+                                int(_mt.get("max_scroll") or 0),
+                                int(map_tab_scroll_x) + _step,
+                            )
+                        continue
                 if event.button in (4, 5) and my > TOP_BAR_H:
                     _wheel_dy = EDITOR_SIDEBAR_WHEEL_STEP if event.button == 4 else -EDITOR_SIDEBAR_WHEEL_STEP
                     if mx < sidebar_w:
@@ -7379,8 +7941,23 @@ def editor_main():
                             last_export_msg = "MERGE: 오브젝트만 선택하세요"
                             last_export_msg_t = pygame.time.get_ticks()
                         continue
-                    map_idx = (mx - sidebar_w - 10) // 112
-                    if 0 <= map_idx < len(map_list):
+                    # 맵 탭 ◀▶ / 탭 클릭
+                    _mt = map_tab_bar_ui or {}
+                    _la = _mt.get("left_arrow")
+                    _ra = _mt.get("right_arrow")
+                    if _la is not None and _la.collidepoint(mx, my):
+                        map_tab_scroll_x = max(
+                            0, int(map_tab_scroll_x) - EDITOR_MAP_TAB_SCROLL_STEP
+                        )
+                        continue
+                    if _ra is not None and _ra.collidepoint(mx, my):
+                        map_tab_scroll_x = min(
+                            int(_mt.get("max_scroll") or 0),
+                            int(map_tab_scroll_x) + EDITOR_MAP_TAB_SCROLL_STEP,
+                        )
+                        continue
+                    map_idx = _editor_map_tab_index_at(mx, my, _mt)
+                    if map_idx is not None and 0 <= map_idx < len(map_list):
                         cur_idx = map_idx
                         map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": map_list[cur_idx]})
                         scaled_cache.clear()
@@ -7396,6 +7973,10 @@ def editor_main():
                         zoom_idx = min(range(len(zoom_steps)), key=lambda i: abs(zoom_steps[i] - fit_zoom))
                         zoom_level = zoom_steps[zoom_idx]
                         cam_x = bg_w / 2
+                        _clip_w = int((_mt.get("clip") or pygame.Rect(0, 0, 0, 0)).width)
+                        map_tab_scroll_x = _editor_map_tab_scroll_to_index(
+                            cur_idx, _clip_w, len(map_list), map_tab_scroll_x
+                        )
                         cam_y = bg_h / 2
                         _flow_refresh_entity_list()
                 # [2. 좌측 리스트 클릭] (왼쪽 버튼만 — 휠은 위에서 스크롤 전용 처리)
@@ -7488,6 +8069,14 @@ def editor_main():
                             is_bgzone_dragging = False
                             box_select_start = None
                             box_select_current = None
+                            continue
+
+                        # MAP: 맵 화면(틸트/쉬어) 기본값 — world_data[map].field
+                        map_field_btn = pygame.Rect(
+                            8, left_list_tops["map_field_btn"], sidebar_w - 16, 28
+                        )
+                        if map_field_btn.collidepoint(mx, my):
+                            map_field_defaults_modal.open_for_map(map_id, flow.world_data)
                             continue
 
                         # OBJECTS: 뷰 숨김 토글 (큰것 / 선택숨김 / 칩해제)
@@ -7770,6 +8359,15 @@ def editor_main():
                                             scaled_cache.clear()
                                             _apply_view_hide_flags_to_entities()
                                             _flow_refresh_entity_list()
+                                            _clip_w = int(
+                                                (
+                                                    (map_tab_bar_ui or {}).get("clip")
+                                                    or pygame.Rect(0, 0, 0, 0)
+                                                ).width
+                                            )
+                                            map_tab_scroll_x = _editor_map_tab_scroll_to_index(
+                                                cur_idx, _clip_w, len(map_list), map_tab_scroll_x
+                                            )
                                             print(f"Map Switched to: {preview_map} for Event: {eid}")
                                         print(f"Event Selected: {eid}")
                                     y_ptr += LINE_H
@@ -7854,7 +8452,7 @@ def editor_main():
                                 step_edit_index = None
                                 step_insert_index = None
                                 active_step_field = None
-                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                             else:
                                 head_ins_rect = pygame.Rect(
                                     base_x + 10,
@@ -7868,7 +8466,7 @@ def editor_main():
                                     step_edit_index = None
                                     step_insert_index = 0
                                     active_step_field = None
-                                    step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                    step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                                 else:
                                     # 각 스텝 행 + View 버튼 + 삽입(+) 버튼
                                     for i, step in enumerate(steps):
@@ -7883,7 +8481,7 @@ def editor_main():
                                             step_edit_index = None
                                             step_insert_index = i
                                             active_step_field = None
-                                            step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                            step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                                             break
 
                                         if view_rect.collidepoint(mx, my):
@@ -7908,6 +8506,33 @@ def editor_main():
                                             step_fields["height"] = str(step.get("height", "") or "")
                                             step_fields["visible"] = str(step.get("visible", "") or "")
                                             step_fields["alpha"] = str(step.get("alpha", "") or "")
+                                            step_fields["behavior"] = str(
+                                                step.get("behavior")
+                                                or step.get("behavior_mode")
+                                                or (step.get("mode") if t == "BEHAVIOR" else "")
+                                                or ""
+                                            )
+                                            step_fields["radius"] = str(step.get("radius", "") or "")
+                                            step_fields["interval_ms"] = str(step.get("interval_ms", "") or "")
+                                            step_fields["group"] = str(
+                                                step.get("group")
+                                                or step.get("layout")
+                                                or step.get("group_layout")
+                                                or step.get("formation")
+                                                or ""
+                                            )
+                                            step_fields["spacing"] = str(step.get("spacing", "") or "")
+                                            if t in ("PLACE", "BEHAVIOR", "FOLLOW_START", "FOLLOW_STOP"):
+                                                step_fields["persist"] = (
+                                                    "true" if step.get("persist") else ""
+                                                )
+                                            if t in ("PLACE", "BEHAVIOR"):
+                                                if step.get("travel") is True:
+                                                    step_fields["travel"] = "true"
+                                                elif step.get("travel") is False:
+                                                    step_fields["travel"] = "false"
+                                                else:
+                                                    step_fields["travel"] = ""
                                             p = step.get("pos")
                                             step_fields["waypoints"] = ""
                                             if isinstance(p, (list, tuple)) and len(p) >= 2:
@@ -8423,16 +9048,14 @@ def editor_main():
                                     else:
                                         objs.append(FieldItem(selected_asset, swx, swy))
                                 else:
-                                    from char_behavior import attach_npc_from_entry
+                                    from char_behavior import attach_npc_from_entry, spawn_as_mask_walker
                                     ch_info = {}
-                                    if CHAR_ASSETS.get(selected_asset, {}).get("mask_nav"):
+                                    entry = {"name": selected_asset, "pos": [int(swx), int(swy)]}
+                                    if spawn_as_mask_walker(selected_asset, entry):
                                         ch = MaskWalkingCharacter(selected_asset, [swx, swy], ch_info)
                                     else:
                                         ch = BaseCharacter(selected_asset, [swx, swy], ch_info)
-                                    attach_npc_from_entry(
-                                        ch,
-                                        {"name": selected_asset, "pos": [int(swx), int(swy)]},
-                                    )
+                                    attach_npc_from_entry(ch, entry)
                                     npcs.append(ch)
 
                             elif map_tool == "OBJECTS":
@@ -8485,6 +9108,8 @@ def editor_main():
 
 
             if event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    obj_wall_angle_dragging = False
                 if edit_mode == "RACING":
                     rc_ed.handle_map_mouseup(racing_ed)
                 # [수정] 마우스를 떼도 selected_node는 유지 (ESC로 지우기 위해)
@@ -8581,6 +9206,13 @@ def editor_main():
 
 
             if event.type == pygame.MOUSEMOTION:
+                if obj_wall_angle_dragging and selected_nodes:
+                    n0w = selected_nodes[0]
+                    if isinstance(n0w, FieldItem):
+                        _ins_w = _editor_map_obj_inspector_layout(SCREEN_W, SCREEN_H, sidebar_w)
+                        _sl = _ins_w.get("wall_slider_rect")
+                        if _sl is not None:
+                            n0w.wall_angle = _editor_wall_angle_from_slider_x(_sl, mx)
                 if flow_panning and edit_mode == "FLOW":
                     flow_scroll_x -= mx - flow_pan_last[0]
                     flow_scroll_y -= my - flow_pan_last[1]
@@ -8776,6 +9408,20 @@ def editor_main():
                     sidebar_right_sb_drag = False
 
             if event.type == pygame.MOUSEWHEEL:
+                # 상단 맵 탭 가로 스크롤
+                if (
+                    0 <= my < TOP_BAR_H
+                    and sidebar_w < mx < SCREEN_W - right_panel_w
+                ):
+                    _mt = map_tab_bar_ui or {}
+                    _strip = _mt.get("strip_rect")
+                    _max_sx = int(_mt.get("max_scroll") or 0)
+                    if _strip is not None and _strip.collidepoint(mx, my) and _max_sx > 0:
+                        delta = -int(event.y) * EDITOR_MAP_TAB_SCROLL_STEP
+                        map_tab_scroll_x = max(
+                            0, min(_max_sx, int(map_tab_scroll_x) + delta)
+                        )
+                        continue
                 if mx < sidebar_w: # 좌측 리스트 휠 (스크롤만)
                     scroll_y_left += event.y * EDITOR_SIDEBAR_WHEEL_STEP
                     _lt, _lch = _editor_left_list_metrics(
@@ -9124,6 +9770,11 @@ def editor_main():
         
                 s_img = scaled_cache[cache_key]
                 h_draw = float(getattr(o, "height", 0) or 0)
+                try:
+                    wall_ang = float(getattr(o, "wall_angle", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    wall_ang = 0.0
+                wall_mode = isinstance(o, FieldItem) and field_wall_angle_active(wall_ang)
                 # 월드→맵: 배경과 동일 (ow,oh)→(sw_bg,sh_bg) 비율. wx*줌 반올림과 달리 배경 텍스처 열과 일치
                 foot_px_x, foot_px_y = world_to_map_surface_xy(
                     bg_blit_x,
@@ -9141,6 +9792,26 @@ def editor_main():
                 )
 
                 spr_rect = pygame.Rect(final_x, final_y, s_img.get_width(), s_img.get_height())
+                if wall_mode:
+                    # AABB from wall geometry in map surface space
+                    half = field_wall_native_half_w(orig_w)
+                    c, s = field_wall_dir_xy(wall_ang)
+                    xs, ys = [], []
+                    for sign in (-1.0, 1.0):
+                        wx = float(o.pos[0]) + sign * half * c
+                        wy = float(o.pos[1]) + sign * half * s
+                        fpx, fpy = world_to_map_surface_xy(
+                            bg_blit_x, bg_blit_y, wx, wy, bg_w, bg_h, sw_bg, sh_bg, h_draw
+                        )
+                        xs.extend((fpx, fpx))
+                        ys.extend((fpy, fpy - s_img.get_height()))
+                    if xs:
+                        spr_rect = pygame.Rect(
+                            int(min(xs)),
+                            int(min(ys)),
+                            max(1, int(math.ceil(max(xs) - min(xs)))),
+                            max(1, int(math.ceil(max(ys) - min(ys)))),
+                        )
                 _, anchor_y_scr = world_to_map_surface_xy(
                     bg_blit_x, bg_blit_y, float(o.pos[0]), float(o.pos[1]), bg_w, bg_h, sw_bg, sh_bg, 0.0
                 )
@@ -9200,7 +9871,42 @@ def editor_main():
                             font=font,
                         )
                     elif not skip_bb_ellipse:
-                        map_surf.blit(s_img, (final_x, final_y))
+                        if wall_mode:
+                            wall_rect = _editor_blit_field_wall_on_map(
+                                map_surf,
+                                o.image,
+                                float(o.pos[0]),
+                                float(o.pos[1]),
+                                wall_ang,
+                                bg_blit_x=bg_blit_x,
+                                bg_blit_y=bg_blit_y,
+                                bg_w=bg_w,
+                                bg_h=bg_h,
+                                sw_bg=sw_bg,
+                                sh_bg=sh_bg,
+                                zoom_level=zoom_level,
+                                height=h_draw,
+                            )
+                            if wall_rect is not None:
+                                spr_rect = wall_rect
+                            if o in selected_nodes or field_wall_angle_active(wall_ang):
+                                _editor_draw_wall_base_line(
+                                    map_surf,
+                                    float(o.pos[0]),
+                                    float(o.pos[1]),
+                                    orig_w,
+                                    wall_ang,
+                                    bg_blit_x=bg_blit_x,
+                                    bg_blit_y=bg_blit_y,
+                                    bg_w=bg_w,
+                                    bg_h=bg_h,
+                                    sw_bg=sw_bg,
+                                    sh_bg=sh_bg,
+                                    height=h_draw,
+                                    selected=(o in selected_nodes),
+                                )
+                        else:
+                            map_surf.blit(s_img, (final_x, final_y))
                         if isinstance(o, FieldItem):
                             draw_object_text_label(map_surf, o, float(foot_px_x), float(anchor_y_scr), zoom_level)
                     if o in selected_nodes:
@@ -9208,7 +9914,7 @@ def editor_main():
                             pygame.draw.rect(
                                 map_surf,
                                 (255, 255, 0),
-                                (final_x, final_y, s_img.get_width(), s_img.get_height()),
+                                spr_rect,
                                 2,
                             )
                         if edit_mode == "MAP" and o is not player:
@@ -9257,9 +9963,60 @@ def editor_main():
                 if sec_pv and sec_pv != current_event_type:
                     current_event_type = sec_pv
                 steps_pv = list((edata_pv or {}).get("steps") or []) if edata_pv else []
+                # 편집 중이면 현재 step_fields 를 반영해 단체 배치 미리보기
+                if show_step_config and isinstance(step_fields, dict):
+                    draft_t = (step_fields.get("type") or "").upper()
+                    if draft_t in ("MOVE", "PLACE"):
+                        draft = {"type": draft_t}
+                        tg = (step_fields.get("target") or "").strip()
+                        if tg:
+                            draft["target"] = tg
+                        try:
+                            px = float(step_fields.get("pos_x"))
+                            py = float(step_fields.get("pos_y"))
+                            draft["pos"] = [px, py]
+                        except (TypeError, ValueError):
+                            pass
+                        if draft_t == "MOVE":
+                            extras = _parse_waypoints_semicolon(step_fields.get("waypoints"))
+                            if extras:
+                                base = draft.get("pos")
+                                if isinstance(base, (list, tuple)) and len(base) >= 2:
+                                    draft["pos"] = [list(base)] + [
+                                        [float(ax), float(ay)] for ax, ay in extras
+                                    ]
+                                else:
+                                    draft["pos"] = [[float(ax), float(ay)] for ax, ay in extras]
+                            inst = (step_fields.get("instant") or "").strip().lower()
+                            if inst in ("1", "true", "yes", "on"):
+                                draft["instant"] = True
+                        act = (step_fields.get("action") or "").strip()
+                        if act:
+                            draft["action"] = act
+                        grp = (step_fields.get("group") or "").strip().lower()
+                        if grp:
+                            draft["group"] = grp
+                        spc = (step_fields.get("spacing") or "").strip()
+                        if spc:
+                            try:
+                                draft["spacing"] = float(spc)
+                            except ValueError:
+                                pass
+                        if step_edit_index is not None and 0 <= step_edit_index < len(steps_pv):
+                            steps_pv = list(steps_pv)
+                            steps_pv[step_edit_index] = draft
+                        elif step_insert_index is not None:
+                            steps_pv = list(steps_pv)
+                            ix = max(0, min(int(step_insert_index), len(steps_pv)))
+                            steps_pv.insert(ix, draft)
+                        elif not steps_pv:
+                            steps_pv = [draft]
                 upto_pv = _preview_upto_index(
                     show_step_config, step_edit_index, step_insert_index, steps_pv, selected_step_idx
                 )
+                if show_step_config and step_insert_index is not None:
+                    # 삽입 초안도 보이게 insert 위치까지 포함
+                    upto_pv = max(upto_pv, int(step_insert_index))
                 if upto_pv >= 0:
                     pos_sim, arrows_sim, last_st = _simulate_event_preview(
                         steps_pv, upto_pv, player, objs, npcs
@@ -9809,12 +10566,67 @@ def editor_main():
         pygame.draw.rect(screen, (55, 75, 95), export_map_btn, border_radius=5)
         pygame.draw.rect(screen, (140, 170, 210), export_map_btn, 2, border_radius=5)
         screen.blit(font.render("PNG", True, (240, 248, 255)), (export_map_btn.x + 18, export_map_btn.y + 10))
-        for i, m_name in enumerate(map_list):
-            m_color = (255, 215, 0) if i == cur_idx else (180, 180, 180)
-            m_rect = pygame.Rect(sidebar_w + 10 + (i * 112), 12, 104, 34)
-            pygame.draw.rect(screen, (60, 60, 60), m_rect, border_radius=5)
-            if i == cur_idx: pygame.draw.rect(screen, (255, 215, 0), m_rect, 2, border_radius=5)
-            screen.blit(font.render(m_name, True, m_color), (m_rect.x + 10, m_rect.y + 7))
+        # 맵 탭 가로 슬라이드 (넘치면 ◀▶)
+        _mt = map_tab_bar_ui or _editor_map_tab_bar_layout(
+            sidebar_w, merge_obj_btn.x, len(map_list), map_tab_scroll_x
+        )
+        _clip = _mt.get("clip") or pygame.Rect(0, 0, 0, 0)
+        _la = _mt.get("left_arrow")
+        _ra = _mt.get("right_arrow")
+        _sx = int(_mt.get("scroll_x") or 0)
+        _max_sx = int(_mt.get("max_scroll") or 0)
+        if _la is not None:
+            _en = _sx > 0
+            pygame.draw.rect(
+                screen, (70, 70, 70) if _en else (50, 50, 50), _la, border_radius=5
+            )
+            pygame.draw.rect(
+                screen, (200, 200, 200) if _en else (90, 90, 90), _la, 1, border_radius=5
+            )
+            screen.blit(
+                font.render("◀", True, (255, 255, 255) if _en else (120, 120, 120)),
+                (_la.x + 6, _la.y + 7),
+            )
+        if _ra is not None:
+            _en = _sx < _max_sx
+            pygame.draw.rect(
+                screen, (70, 70, 70) if _en else (50, 50, 50), _ra, border_radius=5
+            )
+            pygame.draw.rect(
+                screen, (200, 200, 200) if _en else (90, 90, 90), _ra, 1, border_radius=5
+            )
+            screen.blit(
+                font.render("▶", True, (255, 255, 255) if _en else (120, 120, 120)),
+                (_ra.x + 6, _ra.y + 7),
+            )
+        if _clip.width > 0 and map_list:
+            prev_clip = screen.get_clip()
+            screen.set_clip(_clip)
+            for i, m_name in enumerate(map_list):
+                m_rect = pygame.Rect(
+                    _clip.x + i * EDITOR_MAP_TAB_STRIDE - _sx,
+                    EDITOR_MAP_TAB_Y,
+                    EDITOR_MAP_TAB_W,
+                    EDITOR_MAP_TAB_H,
+                )
+                if m_rect.right < _clip.left or m_rect.left > _clip.right:
+                    continue
+                m_color = (255, 215, 0) if i == cur_idx else (180, 180, 180)
+                pygame.draw.rect(screen, (60, 60, 60), m_rect, border_radius=5)
+                if i == cur_idx:
+                    pygame.draw.rect(screen, (255, 215, 0), m_rect, 2, border_radius=5)
+                label = font.render(str(m_name), True, m_color)
+                # 긴 맵 이름: 탭 안에 맞게 살짝 클립
+                if label.get_width() > EDITOR_MAP_TAB_W - 12:
+                    try:
+                        label = pygame.transform.smoothscale(
+                            label,
+                            (EDITOR_MAP_TAB_W - 12, label.get_height()),
+                        )
+                    except Exception:
+                        pass
+                screen.blit(label, (m_rect.x + 6, m_rect.y + 7))
+            screen.set_clip(prev_clip)
 
 
 
@@ -9858,6 +10670,17 @@ def editor_main():
             screen.blit(font.render("EVT", True, (255, 255, 255)), (tool_btn_zone.x + 10, tool_btn_zone.y + 4))
             screen.blit(font.render("BG", True, (255, 255, 255)), (tool_btn_bgz.x + 12, tool_btn_bgz.y + 4))
             screen.blit(font.render("PRE", True, (255, 255, 255)), (tool_btn_pres.x + 8, tool_btn_pres.y + 4))
+
+            # MAP: 맵 화면 기본값 (틸트/쉬어) — 항상 표시
+            map_field_btn = pygame.Rect(8, left_list_tops["map_field_btn"], sidebar_w - 16, 28)
+            _mf = (flow.world_data.get(map_id, {}) or {}).get("field")
+            _mf_on = isinstance(_mf, dict) and bool(_mf)
+            pygame.draw.rect(screen, (55, 70, 55) if _mf_on else (60, 60, 60), map_field_btn)
+            pygame.draw.rect(screen, (140, 200, 140) if _mf_on else (120, 120, 120), map_field_btn, 1)
+            screen.blit(
+                font.render("맵 화면 기본 (틸트/FX)", True, (255, 255, 255)),
+                (map_field_btn.x + 8, map_field_btn.y + 6),
+            )
 
             # MAP / ZONES: Add Event Box 버튼
             add_zone_btn = pygame.Rect(8, left_list_tops["map_zone_btn"], sidebar_w - 16, 28)
@@ -10447,7 +11270,7 @@ def editor_main():
                     (btn_inst.x - 148, btn_inst.y + 4),
                 )
 
-        # [하단] 단일 오브젝트/NPC 선택 시 height / sprite_tilt (두 줄·좌측 정렬)
+        # [하단] 단일 오브젝트/NPC 선택 시 height / sprite_tilt / wall_angle
         if edit_mode == "MAP" and map_tool == "OBJECTS" and len(selected_nodes) == 1:
             L = _editor_map_obj_inspector_layout(SCREEN_W, SCREEN_H, sidebar_w)
             pygame.draw.rect(screen, (22, 24, 28), L["bar"])
@@ -10455,7 +11278,10 @@ def editor_main():
             tr = L["tilt_rect"]
             yr = L.get("ysort_rect")
             lr = L.get("layer_rect")
+            wr = L.get("wall_slider_rect")
+            wv = L.get("wall_val_rect")
             ix, row_h, row_t = L["ix"], L["row_h"], L["row_t"]
+            row_w = L.get("row_w", row_t + 26)
             n0 = selected_nodes[0]
             screen.blit(font.render("높이(px)", True, (195, 205, 225)), (ix, row_h + 3))
             pygame.draw.rect(screen, (14, 14, 18), hr)
@@ -10473,6 +11299,35 @@ def editor_main():
                 round(float(getattr(n0, "sprite_tilt", 1.0)), 4)
             )
             screen.blit(font.render(disp, True, (235, 240, 250)), (tr.x + 4, tr.y + 3))
+            # 벽 각도 슬라이더 (FieldItem만)
+            if isinstance(n0, FieldItem) and wr is not None:
+                screen.blit(font.render("벽각도°", True, (195, 205, 225)), (ix, row_w + 3))
+                try:
+                    wa = _clamp_wall_angle_deg(getattr(n0, "wall_angle", 0.0))
+                except Exception:
+                    wa = 0.0
+                pygame.draw.rect(screen, (40, 44, 52), wr, border_radius=4)
+                pygame.draw.rect(
+                    screen,
+                    (120, 200, 255) if obj_wall_angle_dragging else (90, 110, 140),
+                    wr,
+                    1,
+                    border_radius=4,
+                )
+                # 0/90/180/270 눈금
+                for tick_a in (0, 90, 180, 270):
+                    tx = wr.x + int(round((tick_a / 360.0) * wr.w))
+                    pygame.draw.line(screen, (70, 80, 95), (tx, wr.y), (tx, wr.bottom), 1)
+                knob_x = wr.x + int(round((wa / 360.0) * wr.w))
+                knob = pygame.Rect(knob_x - 5, wr.y - 3, 10, wr.h + 6)
+                pygame.draw.rect(screen, (100, 220, 255), knob, border_radius=3)
+                if wv is not None:
+                    pygame.draw.rect(screen, (14, 14, 18), wv)
+                    pygame.draw.rect(screen, (110, 120, 140), wv, 1)
+                    screen.blit(
+                        font.render(f"{wa:.0f}", True, (235, 240, 250)),
+                        (wv.x + 6, wv.y + 3),
+                    )
             if yr:
                 cur_m = str(getattr(n0, "ysort_mode", "ground") or "ground").strip().lower()
                 label = "정렬: 땅" if cur_m != "visual" else "정렬: 이미지"
@@ -10503,7 +11358,7 @@ def editor_main():
                 pygame.draw.rect(screen, (48, 42, 70), btn_oi)
                 pygame.draw.rect(screen, (150, 140, 200), btn_oi, 1)
                 screen.blit(font.render("맵 이벤트", True, (230, 225, 255)), (btn_oi.x + 10, btn_oi.y + 4))
-            hint = "NPC/OBJ: [C]spawn [D]progress [A]bindings · 숨김=청색 윤곽 고스트"
+            hint = "벽각도: 0=+X 90=+Y · [C]spawn [D]progress [A]bindings · 숨김=청색 고스트"
             screen.blit(font.render(hint, True, (120, 135, 160)), (ix, L["bar"].bottom - 16))
 
         # [하단 상태바] - 레이어 최상단에 배치하여 가림 방지
@@ -10519,7 +11374,7 @@ def editor_main():
             if len(selected_nodes) == 1:
                 status_txt += f" | SELECTED: {selected_nodes[0].name}"
                 if edit_mode == "MAP" and map_tool == "OBJECTS":
-                    status_txt += " | 높이·틸트: 바로 위 회색 줄 | H:선택숨김"
+                    status_txt += " | 높이·틸트·벽각도: 바로 위 회색 줄 | H:선택숨김"
             else:
                 status_txt += f" | SELECTED x{len(selected_nodes)}"
                 if edit_mode == "MAP" and map_tool == "OBJECTS":
@@ -10694,6 +11549,8 @@ def editor_main():
             obj_inst_modal.draw(screen, title_font, font, _editor_char_modal_ctx())
         if presence_zone_modal.show:
             presence_zone_modal.draw(screen, title_font, font, _editor_char_modal_ctx())
+        if map_field_defaults_modal.show:
+            map_field_defaults_modal.draw(screen, title_font, font, _editor_char_modal_ctx())
 
         if baseball_ed.get("show_settings"):
             ov = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)

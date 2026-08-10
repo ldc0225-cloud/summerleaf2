@@ -74,11 +74,16 @@
     "bg_jjangpu": {
         "bg_img": "bg_jjangpu2.png",
         "mask_img": "bg_jjangpu2_mask.png",
+        "field": {
+            "tilt_on": false,
+            "shear_on": true
+        },
         "event_zones": [
             {
                 "name": "테스트이벤트2",
                 "rect": [432, 1952, 41, 30],
-                "trigger": "contact_player",
+                "trigger": "contact_confirm",
+                "conditions": {},
                 "event_id": "ev_jjangpu_tutorial_010500"
             },
             {
@@ -117,11 +122,39 @@
                 "event_id": "ev_racing_enter"
             },
             {
+                "name": "황소개구리 보스(테스트용)",
+                "rect": [816, 2288, 32, 32],
+                "trigger": "contact_confirm",
+                "conditions": {},
+                "event_id": "ev_bullfrog_enter"
+            },
+            {
                 "name": "shake",
                 "rect": [624, 2368, 48, 32],
                 "trigger": "contact_confirm",
                 "conditions": {},
                 "event_id": "ev_shake_test"
+            },
+            {
+                "name": "DOOR 짱짱실내",
+                "rect": [543, 1896, 32, 32],
+                "trigger": "contact_confirm",
+                "conditions": {},
+                "event_id": "ev_jjangpu_inside"
+            },
+            {
+                "name": "DOOR 짱짱실내2",
+                "rect": [542, 1822, 32, 32],
+                "trigger": "contact_confirm",
+                "conditions": {},
+                "event_id": "ev_jjangpu_inside2"
+            },
+            {
+                "name": "DOOR 연못가",
+                "rect": [1392, 2448, 32, 112],
+                "trigger": "contact_confirm",
+                "conditions": {},
+                "event_id": "ev_gotothepond00"
             }
         ],
         "objects": [
@@ -147,22 +180,6 @@
             { "name": "jjangpu2_fence4", "pos": [952, 2416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2176], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1760], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1776], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1792], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1808], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1824], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1840], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1856], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1872], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1888], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1904], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1920], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1936], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1952], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1968], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 1984], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence4", "pos": [952, 2000], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence4", "pos": [952, 2144], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
@@ -207,15 +224,12 @@
             { "name": "jjangpu2_bench3-2", "pos": [512, 2385], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "swing1", "pos": [688, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
             { "name": "swing1", "pos": [704, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
-            { "name": "tree5", "pos": [764, 2181], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree5", "pos": [764, 2181], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 211.5 },
             { "name": "pole1", "pos": [660, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [960, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence1", "pos": [960, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence2", "pos": [976, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence2", "pos": [976, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence5", "pos": [944, 2016], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence5", "pos": [944, 2032], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_fence3", "pos": [944, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "jjangpu2_fence3", "pos": [944, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "apartment1", "pos": [800, 48], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "apartment1", "pos": [832, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
@@ -396,7 +410,7 @@
             },
             {
                 "name": "bed",
-                "pos": [656, 2384],
+                "pos": [656, 2336],
                 "sprite_tilt": 1.0,
                 "height": 0,
                 "ysort": "ground",
@@ -409,12 +423,22 @@
                 "height": 0,
                 "ysort": "ground",
                 "layer": 0
+            },
+            {
+                "name": "merge-fence1-1",
+                "pos": [944, 1864],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "wall_angle": 90.0
             }
         ],
         "npcs": [
             { "name": "flower_fairy1", "pos": [662, 2146], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "flower_fairy1@662_2141", "interact": { "range": 28.0 }
             },
-            { "name": "nachos_a", "pos": [912, 2304], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "nachos_a@912_2304" }
+            { "name": "nachos_a", "pos": [896, 2288], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "nachos_a@912_2304", "behavior": { "mode": "randomwalk" }
+            }
         ],
         "bg_zones": [
             { "name": "jjangpubgbox", "rect": [-48, -800, 1648, 2072], "layer": -50, "draw_only_when_tilt": true, "update_policy": "none", "sort_policy": "cached", "cull_margin_px": 160 }
@@ -463,17 +487,62 @@
             "exit_map": "bg_jjangpu"
         }
     },
+    "bg_jjangpu_inside": {
+        "bg_img": "bg_jjangpu_inside.png",
+        "mask_img": "bg_jjangpu_inside_mask.png",
+        "start_pos": [127, 194],
+        "event_zones": [
+            {
+                "name": "DOOR 짱짱밖으로",
+                "rect": [112, 192, 32, 16],
+                "trigger": "contact_confirm",
+                "conditions": {},
+                "event_id": "ev_jjangpu_outside"
+            }
+        ],
+        "npcs": [
+            { "name": "rockie_k", "pos": [99, 194], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "rockie_k@99_194", "behavior": { "mode": "follow" }
+            },
+            { "name": "dani_k", "pos": [81, 196], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "dani_k@81_196", "behavior": { "mode": "follow" }
+            },
+            { "name": "igyeong_k", "pos": [81, 172], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "igyeong_k@81_172", "behavior": { "mode": "follow" }
+            },
+            { "name": "yuha_k", "pos": [81, 158], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "yuha_k@81_158", "behavior": { "mode": "follow" }
+            },
+            { "name": "hyeon_k", "pos": [81, 132], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "hyeon_k@81_132", "behavior": { "mode": "follow" }
+            }
+        ],
+        "field": {
+            "tilt_on": false,
+            "shear_on": false,
+            "screen_fx": {
+                "vignette": {}
+            }
+        },
+        "objects": []
+    },
+    "bg_jjangpu_inside2": {
+        "bg_img": "bg_jjangpu_inside2.png",
+        "mask_img": "bg_jjangpu_inside2_mask.png",
+        "start_pos": [127, 194],
+        "event_zones": [
+            { "name": "DOOR 짱짱밖으로2", "rect": [112, 192, 32, 16], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_outside2" }
+        ],
+        "npcs": [],
+        "field": {
+            "tilt_on": false,
+            "shear_on": false,
+            "screen_fx": {
+                "vignette": {}
+            }
+        },
+        "objects": []
+    },
     "bg_town": {
         "bg_img": "bg_town.png",
         "mask_img": "bg_town_mask.png",
         "event_zones": [
-            {
-                "name": "go to the jjangpu",
-                "rect": [560, 267, 47, 94],
-                "trigger": "contact_player",
-                "conditions": {},
-                "event_id": "ev_town_gotothejjangpu"
-            }
+            { "name": "go to the jjangpu", "rect": [560, 267, 47, 94], "trigger": "contact_player", "conditions": {}, "event_id": "ev_town_gotothejjangpu" }
         ],
         "objects": [
             { "name": "tree3", "pos": [264, 160], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
@@ -574,26 +643,26 @@
             { "name": "mountain03", "pos": [768, 736], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "mountain01", "pos": [784, 512], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "mountain01", "pos": [768, 912], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain01", "pos": [1040, 720], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain01", "pos": [496, 720], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain01", "pos": [1040, 720], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 55.13 },
+            { "name": "mountain01", "pos": [496, 720], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 99.0 },
             { "name": "mountain01", "pos": [608, 544], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain01", "pos": [928, 544], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain01", "pos": [928, 544], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 31.5 },
             { "name": "mountain01", "pos": [576, 816], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "mountain01", "pos": [944, 816], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "mountain04", "pos": [608, 880], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "mountain04", "pos": [912, 896], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [1088, 768], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [480, 752], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [528, 576], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain04", "pos": [1088, 768], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 93.38 },
+            { "name": "mountain04", "pos": [480, 752], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 87.75 },
+            { "name": "mountain04", "pos": [528, 576], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 105.75 },
             { "name": "mountain04", "pos": [672, 416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [880, 400], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [1008, 544], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [1072, 848], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [1040, 944], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [848, 992], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain04", "pos": [880, 400], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 20.25 },
+            { "name": "mountain04", "pos": [1008, 544], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 55.13 },
+            { "name": "mountain04", "pos": [1072, 848], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 131.62 },
+            { "name": "mountain04", "pos": [1040, 944], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 141.75 },
+            { "name": "mountain04", "pos": [848, 992], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 173.25 },
             { "name": "mountain04", "pos": [656, 992], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [480, 880], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "mountain04", "pos": [592, 432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain04", "pos": [480, 880], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 48.38 },
+            { "name": "mountain04", "pos": [592, 432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 144.0 },
             { "name": "mountain04", "pos": [784, 400], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
         ],
         "npcs": [],
@@ -1037,6 +1106,10 @@
         "bg_img": "bg_baseball1.png",
         "mask_img": "bg_baseball1_mask.png",
         "start_pos": [152, 512],
+        "field": {
+            "tilt_on": false,
+            "shear_on": false
+        },
         "event_zones": [
             { "name": "야구장_플레이", "rect": [240, 688, 64, 48], "trigger": "contact_player", "conditions": {}, "event_id": "ev_baseball_play" }
         ],
@@ -1134,6 +1207,74 @@
             "batter_face": "right",
             "exit_map": "bg_jjangpu",
             "mask_img": "bg_baseball1_mask.png"
+        }
+    },
+    "bg_pond01": {
+        "bg_img": "bg_pond01.png",
+        "mask_img": "bg_pond01_mask.png",
+        "start_pos": [160, 440],
+        "field": {
+            "tilt_on": false,
+            "shear_on": false
+        },
+        "event_zones": [],
+        "objects": [
+            { "name": "pond01_flower", "pos": [160, 192], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+        ],
+        "npcs": [],
+        "bullfrog": {
+            "exit_map": "bg_jjangpu",
+            "exit_pos": [816.0, 2304.0],
+            "cam_fixed": [160.0, 360.0],
+            "intro_cam_from": [160.0, 60.0],
+            "intro_cam_hold_sec": 0.8,
+            "intro_cam_pan_sec": 3.5,
+            "grid_origin_y": 256.0,
+            "sets_to_win": 3,
+            "attacks_before_counter": 3,
+            "dodges_before_counter": 3,
+            "player_lives": 3,
+            "safe_tiles_by_set": [
+                16,
+                14,
+                12
+            ],
+            "shadow_sec_by_set": [
+                2.5,
+                2.0,
+                1.7
+            ],
+            "drop_wave_count": 3,
+            "drop_wave_gap_sec": 2.0
+        }
+    },
+    "bg_pond00": {
+        "bg_img": "bg_pond00.png",
+        "mask_img": "bg_pond00_mask.png",
+        "start_pos": [160, 440],
+        "event_zones": [
+            {
+                "name": "DOOR 짱짱으로",
+                "rect": [0, 48, 16, 32],
+                "trigger": "contact_confirm",
+                "conditions": {},
+                "event_id": "ev_gotothejjangpu3"
+            }
+        ],
+        "objects": [
+            { "name": "merge-fence1-1", "pos": [160, 83], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "merge-fence1-1", "pos": [160, 45], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush2", "pos": [32, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [304, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [272, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [240, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [288, 112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [0, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+        ],
+        "npcs": [],
+        "field": {
+            "tilt_on": false,
+            "shear_on": false
         }
     }
 }

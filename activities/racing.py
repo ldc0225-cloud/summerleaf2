@@ -1,10 +1,10 @@
 """
-activities.racing — 옆시야(좌→우) 레이스 필드 미니게임 (SNES 마리오카트식 Mode7).
+activities.racing — 옆시야(좌→우) 레이스 필드 미니게임 (Mode7).
 
 [시야]
-  - 카메라는 플레이어 실제 진행(heading)의 오른쪽에서 비춘다 (경로 접선 스냅 금지).
-  - 코너에서도 heading/카메라가 서서히 돌며, 화면상 대체로 좌→우로 달린다.
-  - 트랙 차선 A(상)/B(중)/C(하). 화면 왼쪽 ▲▼ 버튼으로 한 칸씩 이동
+  - 카메라는 플레이어 heading(경로 접선)의 오른쪽에서 비춘다.
+  - heading/카메라는 서서히 추종해 코너에서 스냅하지 않는다.
+  - 트랙 차선 A(상)/B(중)/C(하). ▲▼/◀▶ 로 한 칸씩 이동
     (에셋 없으면 자동 생성, 있으면 assets/images/ui/racing/<anim>/ 애니 세트).
 
 [아이템·날씨·슬립스트림]
@@ -14,10 +14,10 @@ activities.racing — 옆시야(좌→우) 레이스 필드 미니게임 (SNES �
   - 슬립스트림: 최고속 90%↑ 노란 에프터(스피드업의 2배 길이). 뒤차가 1초 밟으면 +20%·초록 에프터.
     스피드업 아이템 에프터는 빨강. 추돌 시 앞 전진·뒤 감속.
 
-[경로]
-  - 월드 좌표 폴리라인(닫힌 루프 가능). 마스크 샘플 안 함.
-  - 자동 주행: heading 방향으로 관성 이동 + 앞 경로점을 chase 하며 선회.
-  - 경로에는 약한 인력만 (코너에서 밖으로 살짝 나가는 느낌).
+[경로·주행]
+  - 에디터 제어점 → Cardinal(Catmull-Rom) 스플라인 곡선 (닫힌 루프 가능).
+  - 레이서는 곡선 호장 s 위를 벗어나지 않음. 경쟁은 가속·감속(+레인·아이템).
+  - 코너 감속은 앞쪽 곡률(lookahead_turn)만 반영. 관성 이탈·path_pull 없음.
 
 [연동]
   DEV_CMD: start_racing / stop_racing / return_from_racing
@@ -27,7 +27,9 @@ activities.racing — 옆시야(좌→우) 레이스 필드 미니게임 (SNES �
 [탑승 애니]
   - 레이스 중 몸: seat_idle 유지 (walk/run 대신)
   - 뒤(underlay): assets/images/character/racing/moveinchworm_racing_left
-    자벌레 프레임 속도 ∝ RacerState.speed (정지 시 fps=0)
+    가속·정속(crawl): 자벌레 fps ∝ RacerState.speed
+      프레임 1~4=관성(속도 유지), 5~8=가속(속도 추가)
+    감속(slide): fps 속도 동조 → 잠시 후 프레임 고정(미끄러짐), 재가속 시 crawl 복귀
 
 [그리기 순서] (뒤→앞, main Mode7·ysort와 합쳐짐)
   7 상·하 배경색 — engine apply_rotate3d_mode7 (sky/ground fill)
@@ -637,7 +639,18 @@ def _map_display_name(map_id: str, world_data=None, *, slot=None) -> str:
 def _difficulty_params(diff_id: str) -> dict:
     did = str(diff_id or "normal").strip().lower()
     table = RACING_DIFFICULTY if isinstance(RACING_DIFFICULTY, dict) else {}
-    base = dict(table.get("normal") or {"label": "보통", "npc_speed_mul": 1.0, "ai_lane_min": 1.2, "ai_lane_max": 3.0})
+    base = dict(
+        table.get("normal")
+        or {
+            "label": "보통",
+            "npc_speed_mul": 1.0,
+            "ai_lane_min": 1.1,
+            "ai_lane_max": 2.4,
+            "ai_look_ahead_s": 150.0,
+            "ai_react_chance": 0.78,
+            "ai_idle_lane_chance": 0.12,
+        }
+    )
     hit = table.get(did)
     if isinstance(hit, dict):
         base.update(hit)
@@ -663,70 +676,188 @@ def _lerp(a: float, b: float, t: float) -> float:
     return float(a) + (float(b) - float(a)) * max(0.0, min(1.0, float(t)))
 
 
-class RacePath:
-    """월드 좌표 폴리라인. closed면 루프. s(거리) ↔ 위치/접선/꺾임."""
+def _cardinal_eval(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+    p3: Tuple[float, float],
+    t: float,
+    tension: float,
+) -> Tuple[float, float]:
+    """
+    Cardinal 스플라인 한 점 (tension=0 → 표준 Catmull-Rom, 1에 가까울수록 직선에 근접).
+    구간은 p1→p2, t∈[0,1].
+    """
+    s = (1.0 - float(tension)) * 0.5
+    t = max(0.0, min(1.0, float(t)))
+    t2 = t * t
+    t3 = t2 * t
+    h1 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h2 = -2.0 * t3 + 3.0 * t2
+    h3 = t3 - 2.0 * t2 + t
+    h4 = t3 - t2
+    m1x = s * (p2[0] - p0[0])
+    m1y = s * (p2[1] - p0[1])
+    m2x = s * (p3[0] - p1[0])
+    m2y = s * (p3[1] - p1[1])
+    x = h1 * p1[0] + h2 * p2[0] + h3 * m1x + h4 * m2x
+    y = h1 * p1[1] + h2 * p2[1] + h3 * m1y + h4 * m2y
+    return float(x), float(y)
 
-    def __init__(self, points: List[Tuple[float, float]], *, closed: bool = True):
-        pts = [(float(p[0]), float(p[1])) for p in points if len(p) >= 2]
-        if len(pts) < 2:
-            pts = [(160.0, 240.0), (480.0, 240.0)]
+
+def build_race_path(
+    points: List[Tuple[float, float]],
+    *,
+    closed: bool = True,
+    cfg: Optional[dict] = None,
+) -> "RacePath":
+    """
+    맵/전역 설정에서 곡선 파라미터를 읽어 RacePath 생성.
+    cfg 키: curve_tension (0=둥글, 1=거의 직선), curve_samples_per_seg (세그먼트당 샘플 수).
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    try:
+        tension = float(cfg.get("curve_tension", _cfg("curve_tension", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        tension = 0.0
+    tension = max(0.0, min(1.0, tension))
+    try:
+        sps = int(cfg.get("curve_samples_per_seg", _cfg("curve_samples_per_seg", 20)) or 20)
+    except (TypeError, ValueError):
+        sps = 20
+    sps = max(4, min(64, sps))
+    return RacePath(points, closed=bool(closed), tension=tension, samples_per_seg=sps)
+
+
+class RacePath:
+    """
+    에디터 제어점 → Cardinal 곡선 → 호장 s 파라미터.
+
+    - points: 제어점(루프라도 첫 점 중복 저장 안 함). 에디터·미니맵 폴백용.
+    - _poly / seg_lens / cum: 곡선 샘플 폴리라인 (sample·nearest_s·도로 페인트가 사용).
+    """
+
+    def __init__(
+        self,
+        points: List[Tuple[float, float]],
+        *,
+        closed: bool = True,
+        tension: float = 0.0,
+        samples_per_seg: int = 20,
+    ):
+        raw = [(float(p[0]), float(p[1])) for p in points if len(p) >= 2]
+        if len(raw) < 2:
+            raw = [(160.0, 240.0), (480.0, 240.0)]
+        # 닫힌 루프: 끝=시작 중복 제거 (스플라인 인덱싱용)
+        if closed and len(raw) >= 2 and raw[0] == raw[-1]:
+            raw = list(raw[:-1])
+        if len(raw) < 2:
+            raw = [(160.0, 240.0), (480.0, 240.0)]
         self.closed = bool(closed)
-        if self.closed and pts[0] != pts[-1]:
-            pts = list(pts) + [pts[0]]
-        self.points = pts
+        self.points = raw
+        self.tension = max(0.0, min(1.0, float(tension)))
+        self.samples_per_seg = max(4, int(samples_per_seg))
+        self._poly: List[Tuple[float, float]] = []
         self.seg_lens: List[float] = []
         self.cum: List[float] = [0.0]
-        for i in range(len(pts) - 1):
-            dx = pts[i + 1][0] - pts[i][0]
-            dy = pts[i + 1][1] - pts[i][1]
-            L = math.hypot(dx, dy)
-            self.seg_lens.append(max(1e-6, L))
-            self.cum.append(self.cum[-1] + self.seg_lens[-1])
+        self._build_curve_polyline()
         self.length = float(self.cum[-1]) if self.cum else 1.0
+
+    def _ctrl(self, i: int) -> Tuple[float, float]:
+        n = len(self.points)
+        if self.closed:
+            return self.points[i % n]
+        if i < 0:
+            return self.points[0]
+        if i >= n:
+            return self.points[n - 1]
+        return self.points[i]
+
+    def _build_curve_polyline(self) -> None:
+        """제어점 사이 Cardinal 곡선을 촘촘히 샘플해 호장 테이블을 만든다."""
+        n = len(self.points)
+        if n < 2:
+            self._poly = list(self.points)
+            self.seg_lens = []
+            self.cum = [0.0]
+            return
+        seg_count = n if self.closed else (n - 1)
+        sps = self.samples_per_seg
+        poly: List[Tuple[float, float]] = []
+        for si in range(seg_count):
+            p0 = self._ctrl(si - 1)
+            p1 = self._ctrl(si)
+            p2 = self._ctrl(si + 1)
+            p3 = self._ctrl(si + 2)
+            # 마지막 세그먼트만 끝점 포함 (중복 방지)
+            steps = sps if (si < seg_count - 1) else sps + 1
+            for k in range(steps):
+                t = k / float(sps)
+                poly.append(_cardinal_eval(p0, p1, p2, p3, t, self.tension))
+        if self.closed and poly:
+            # 루프 닫기: 시작점과 동일하게 맞춤
+            poly.append(poly[0])
+        self._poly = poly
+        self.seg_lens = []
+        self.cum = [0.0]
+        for i in range(len(poly) - 1):
+            dx = poly[i + 1][0] - poly[i][0]
+            dy = poly[i + 1][1] - poly[i][1]
+            L = max(1e-6, math.hypot(dx, dy))
+            self.seg_lens.append(L)
+            self.cum.append(self.cum[-1] + L)
 
     def wrap_s(self, s: float) -> float:
         if self.closed and self.length > 1e-6:
             return float(s) % self.length
         return max(0.0, min(self.length, float(s)))
 
+    def _seg_index_at(self, s: float) -> int:
+        """호장 s 가 속한 샘플 세그먼트 인덱스."""
+        if not self.seg_lens:
+            return 0
+        s = self.wrap_s(s)
+        # 이진 탐색 (cum[i] <= s <= cum[i+1])
+        lo, hi = 0, len(self.seg_lens) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if s > self.cum[mid + 1]:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
     def sample(self, s: float) -> Tuple[float, float, float, float]:
         """
-        return: x, y, tangent_rad, turn_rad (다음 구간과의 heading 차 · 코너 강도)
+        return: x, y, tangent_rad, turn_rad
+        turn_rad ≈ 바로 앞 짧은 구간의 접선 변화(곡률 강도, 코너 감속용).
         """
         s = self.wrap_s(s)
-        if self.length <= 1e-6 or len(self.points) < 2:
-            p0 = self.points[0]
+        if self.length <= 1e-6 or len(self._poly) < 2:
+            p0 = self.points[0] if self.points else (0.0, 0.0)
             return p0[0], p0[1], 0.0, 0.0
-        # 구간 찾기
-        i = 0
-        for j in range(len(self.seg_lens)):
-            if s <= self.cum[j + 1]:
-                i = j
-                break
-            i = j
+        i = self._seg_index_at(s)
         seg0 = self.cum[i]
         seg_L = self.seg_lens[i]
         t = 0.0 if seg_L <= 1e-9 else (s - seg0) / seg_L
         t = max(0.0, min(1.0, t))
-        x0, y0 = self.points[i]
-        x1, y1 = self.points[i + 1]
+        x0, y0 = self._poly[i]
+        x1, y1 = self._poly[i + 1]
         x = _lerp(x0, x1, t)
         y = _lerp(y0, y1, t)
         tang = math.atan2(y1 - y0, x1 - x0)
-        # 다음 세그먼트 꺾임
-        ni = (i + 1) % max(1, len(self.seg_lens)) if self.closed else min(i + 1, len(self.seg_lens) - 1)
-        if ni == i and not self.closed:
-            turn = 0.0
-        else:
-            n0 = self.points[ni]
-            n1 = self.points[min(ni + 1, len(self.points) - 1)]
-            tang2 = math.atan2(n1[1] - n0[1], n1[0] - n0[0])
-            turn = abs(_angle_wrap(tang2 - tang))
+        # 앞쪽 ~12px 접선과 비교해 국소 꺾임
+        look = min(12.0, max(4.0, self.length * 0.01))
+        j = self._seg_index_at(s + look)
+        ax0, ay0 = self._poly[j]
+        ax1, ay1 = self._poly[min(j + 1, len(self._poly) - 1)]
+        tang2 = math.atan2(ay1 - ay0, ax1 - ax0)
+        turn = abs(_angle_wrap(tang2 - tang))
         return x, y, tang, turn
 
     def lookahead_turn(self, s: float, dist: float) -> float:
-        """앞에 dist 만큼의 최대 꺾임(rad)."""
-        steps = 6
+        """앞에 dist 만큼의 최대 꺾임(rad). 레일 주행의 코너 감속에 사용."""
+        steps = 8
         best = 0.0
         for k in range(1, steps + 1):
             _, _, _, turn = self.sample(s + dist * (k / float(steps)))
@@ -735,16 +866,16 @@ class RacePath:
         return float(best)
 
     def nearest_s(self, wx: float, wy: float) -> float:
-        """월드 점에 가장 가까운 경로 거리 s (세그먼트 투영)."""
+        """월드 점에 가장 가까운 경로 호장 s (곡선 샘플 세그먼트 투영)."""
         wx = float(wx)
         wy = float(wy)
         best_s = 0.0
         best_d2 = 1e30
-        if len(self.points) < 2:
+        if len(self._poly) < 2:
             return 0.0
         for i, seg_L in enumerate(self.seg_lens):
-            x0, y0 = self.points[i]
-            x1, y1 = self.points[i + 1]
+            x0, y0 = self._poly[i]
+            x1, y1 = self._poly[i + 1]
             dx = x1 - x0
             dy = y1 - y0
             if seg_L <= 1e-9:
@@ -788,6 +919,10 @@ class RacerState:
         "weather_slow_mul",
         "afterburner_t",
         "afterburner_yellow_on",
+        # 자벌레 underlay: crawl(기어감) / slide(감속 중 느려짐) / frozen(미끄러짐·애니 정지)
+        "inchworm_phase",
+        "inchworm_slide_t",
+        "inchworm_anim_fps",
     )
 
     def __init__(self, char_id: str, *, is_player: bool, s0: float, lane0: float, hud_role: str = ""):
@@ -821,6 +956,9 @@ class RacerState:
         self.weather_slow_mul = 1.0
         self.afterburner_t = 0.0
         self.afterburner_yellow_on = False
+        self.inchworm_phase = "crawl"
+        self.inchworm_slide_t = 0.0
+        self.inchworm_anim_fps = 0.0
 
 
 class RacingActivity(BaseFieldActivity):
@@ -895,9 +1033,10 @@ class RacingActivity(BaseFieldActivity):
         self._items: List[RaceItemPoint] = []
         self._item_msg = ""
         self._item_msg_t = 0.0
-        # "record" = 기록용(기존), "versus" = 경쟁(A/B/C 나란히·선착승)
+        # "record" = 기록용(솔로), "versus" = 경쟁(A/B/C 나란히·선착승)
         self._race_mode = "record"
         self._winner: Optional[RacerState] = None
+        self._record_save_info = None
         self._objs_list = None
         # 레인 화살표 HUD (캐릭터 기준 · 카메라 옆=상하 / 뒤=좌우)
         self._lane_btn_up = RaceLaneHudButton(
@@ -1157,7 +1296,11 @@ class RacingActivity(BaseFieldActivity):
                 continue
         if len(pts) < 2:
             pts = list(_cfg("path") or [(120.0, 240.0), (520.0, 240.0)])
-        self._path = RacePath(pts, closed=bool(self.field.get("closed", _cfg("closed", True))))
+        self._path = build_race_path(
+            pts,
+            closed=bool(self.field.get("closed", _cfg("closed", True))),
+            cfg=self.field,
+        )
         self._lap_goal = int(self.field.get("laps", _cfg("laps", 3)))
         self._lap_goal = max(1, min(99, self._lap_goal))
         # 메뉴 선택값 초기화 (맵 슬롯은 현재 맵에 맞춤)
@@ -1348,7 +1491,7 @@ class RacingActivity(BaseFieldActivity):
 
     def _inchworm_fps_for_speed(self, speed: float) -> float:
         """
-        레이스 속도 → 자벌레 초당 프레임.
+        레이스 속도 → 자벌레 초당 프레임 (crawl 기준).
         speed<=eps → 0(정지), speed>=max_speed → inchworm_fps_at_max, 사이는 선형.
         """
         eps = max(0.0, float(self._p("inchworm_speed_eps", 1.0)))
@@ -1360,10 +1503,148 @@ class RacingActivity(BaseFieldActivity):
         u = min(1.0, spd / max_spd)
         return float(fps_max * u)
 
+    def _inchworm_overlay_idx(self, r: RacerState) -> int:
+        """엔티티 자벌레 underlay 현재 프레임 인덱스(없으면 0)."""
+        ent = getattr(r, "entity", None)
+        if ent is None:
+            return 0
+        ov = getattr(ent, "_sprite_overlay", None)
+        if not isinstance(ov, dict):
+            return 0
+        try:
+            return max(0, int(ov.get("idx") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _inchworm_in_thrust_frames(self, r: RacerState) -> bool:
+        """
+        True = 몸을 펴는 가속 구간(기본 5~8프레임).
+        False = 구부리는 관성 구간(기본 1~4프레임).
+        """
+        try:
+            coast_n = max(0, int(self._p("inchworm_coast_frames", 4) or 4))
+        except (TypeError, ValueError):
+            coast_n = 4
+        frames = self._inchworm_frames()
+        n = len(frames) if frames else 8
+        n = max(1, int(n))
+        idx = self._inchworm_overlay_idx(r) % n
+        return idx >= min(coast_n, n)
+
+    def _inchworm_allow_thrust(self, r: RacerState) -> bool:
+        """crawl 중 가속 허용. 1~coast=관성, 이후 프레임=추력(정지 출발도 동일)."""
+        phase = str(getattr(r, "inchworm_phase", "crawl") or "crawl")
+        if phase != "crawl":
+            return False
+        return self._inchworm_in_thrust_frames(r)
+
+    def _update_inchworm_anim(
+        self, r: RacerState, dt: float, *, prev_speed: float, target_spd: float
+    ) -> None:
+        """
+        가속·정속(crawl): fps ∝ speed.
+        감속(slide): fps는 속도에 맞춰 느려지다 slide_freeze_sec 후 frozen(애니 정지·미끄러짐).
+        frozen은 다시 가속할 때까지 유지. 물리 속도 갱신과 별개.
+        """
+        spd = max(0.0, float(getattr(r, "speed", 0.0) or 0.0))
+        crawl_fps = self._inchworm_fps_for_speed(spd)
+        try:
+            band = max(0.0, float(self._p("inchworm_drive_band", 1.0) or 1.0))
+        except (TypeError, ValueError):
+            band = 1.0
+        try:
+            freeze_after = max(0.0, float(self._p("inchworm_slide_freeze_sec", 0.35) or 0.35))
+        except (TypeError, ValueError):
+            freeze_after = 0.35
+        try:
+            launch_fps = max(0.5, float(self._p("inchworm_launch_fps", 5.0) or 5.0))
+        except (TypeError, ValueError):
+            launch_fps = 5.0
+
+        prev = float(prev_speed)
+        tgt = float(target_spd)
+        if prev < tgt - band:
+            drive = "accel"
+        elif prev > tgt + band:
+            drive = "brake"
+        else:
+            drive = "hold"
+
+        phase = str(getattr(r, "inchworm_phase", "crawl") or "crawl")
+        if phase not in ("crawl", "slide", "frozen"):
+            phase = "crawl"
+
+        if crawl_fps <= 0.0:
+            # 정지→출발: 최소 fps로 기어 사이클을 돌려 5~8 가속 프레임에 도달
+            if drive == "accel":
+                r.inchworm_phase = "crawl"
+                r.inchworm_slide_t = 0.0
+                r.inchworm_anim_fps = float(launch_fps)
+                return
+            r.inchworm_phase = "frozen"
+            r.inchworm_slide_t = 0.0
+            r.inchworm_anim_fps = 0.0
+            return
+
+        if drive == "accel":
+            r.inchworm_phase = "crawl"
+            r.inchworm_slide_t = 0.0
+            r.inchworm_anim_fps = float(crawl_fps)
+            return
+
+        if drive == "brake":
+            if phase == "crawl":
+                phase = "slide"
+                r.inchworm_slide_t = 0.0
+            if phase == "frozen":
+                r.inchworm_phase = "frozen"
+                r.inchworm_anim_fps = 0.0
+                return
+            # slide: 속도에 동조하다 일정 시간 후 고정
+            r.inchworm_slide_t = max(0.0, float(getattr(r, "inchworm_slide_t", 0.0) or 0.0) + max(0.0, float(dt)))
+            if r.inchworm_slide_t >= freeze_after:
+                r.inchworm_phase = "frozen"
+                r.inchworm_anim_fps = 0.0
+            else:
+                r.inchworm_phase = "slide"
+                r.inchworm_anim_fps = float(crawl_fps)
+            return
+
+        # hold: crawl 유지 or slide→freeze 진행 / frozen 유지
+        if phase == "crawl":
+            r.inchworm_phase = "crawl"
+            r.inchworm_slide_t = 0.0
+            r.inchworm_anim_fps = float(crawl_fps)
+            return
+        if phase == "frozen":
+            r.inchworm_phase = "frozen"
+            r.inchworm_anim_fps = 0.0
+            return
+        # slide + hold → 아직 가속 전이면 미끄러짐 타이머 계속
+        r.inchworm_slide_t = max(0.0, float(getattr(r, "inchworm_slide_t", 0.0) or 0.0) + max(0.0, float(dt)))
+        if r.inchworm_slide_t >= freeze_after:
+            r.inchworm_phase = "frozen"
+            r.inchworm_anim_fps = 0.0
+        else:
+            r.inchworm_phase = "slide"
+            r.inchworm_anim_fps = float(crawl_fps)
+
+    def _inchworm_seat_lift_profile(self) -> List[float]:
+        """자벌레 프레임별 seat_idle 상승량. 잘못된 맵 설정은 기본 8프레임 값으로 복구한다."""
+        default = [8, 12, 16, 20, 24, 20, 16, 12]
+        raw = self._p("inchworm_seat_lift_px", default)
+        if not isinstance(raw, (list, tuple)) or not raw:
+            raw = default
+        try:
+            return [max(0.0, float(value)) for value in raw]
+        except (TypeError, ValueError):
+            return [float(value) for value in default]
+
     def _apply_racing_ride_pose(self, ent, r: RacerState) -> None:
         """
         레이스 탑승 포즈: seat_idle 몸 + 뒤쪽 moveinchworm_racing underlay.
-        underlay fps는 r.speed 에 연동 (정지 시 프레임 고정).
+        underlay fps는 r.inchworm_anim_fps (crawl=속도 연동, slide→frozen=미끄러짐).
+        몸 상승량은 underlay의 현재 프레임을 따라가 자벌레 허리 굴곡과 동기화된다.
         """
         if ent is None:
             return
@@ -1385,7 +1666,14 @@ class RacingActivity(BaseFieldActivity):
                 pass
 
         frames = self._inchworm_frames()
-        fps = self._inchworm_fps_for_speed(float(getattr(r, "speed", 0.0) or 0.0))
+        try:
+            fps = float(getattr(r, "inchworm_anim_fps", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            fps = 0.0
+        # 스폰 직후 등 아직 tick 전이면 속도로 초기값
+        if fps <= 0.0 and str(getattr(r, "inchworm_phase", "crawl") or "crawl") == "crawl":
+            fps = self._inchworm_fps_for_speed(float(getattr(r, "speed", 0.0) or 0.0))
+            r.inchworm_anim_fps = float(fps)
         ov = getattr(ent, "_sprite_overlay", None)
         same = (
             isinstance(ov, dict)
@@ -1396,6 +1684,9 @@ class RacingActivity(BaseFieldActivity):
         if same:
             old_fps = float(ov.get("fps") or 0.0)
             ov["fps"] = float(fps)
+            ov["body_lift_px_by_frame"] = self._inchworm_seat_lift_profile()
+            # 레이싱 탑승 중에는 발 그림자를 그리지 않는다.
+            ov["hide_shadow"] = True
             # 정지→재출발 직후 한 프레임에 여러 칸 점프하지 않게
             if old_fps <= 0.0 and fps > 0.0:
                 try:
@@ -1411,6 +1702,9 @@ class RacingActivity(BaseFieldActivity):
                 if isinstance(ov2, dict):
                     ov2["tag"] = tag
                     ov2["fps"] = float(fps)
+                    # engine.draw가 현재 자벌레 idx에 대응하는 값만큼 seat_idle 몸을 위로 그린다.
+                    ov2["body_lift_px_by_frame"] = self._inchworm_seat_lift_profile()
+                    ov2["hide_shadow"] = True
             except Exception:
                 pass
         else:
@@ -1488,6 +1782,153 @@ class RacingActivity(BaseFieldActivity):
         L = max(1e-6, float(path.length))
         d = abs(float(a) - float(b)) % L
         return float(min(d, L - d))
+
+    def _path_s_ahead(self, from_s: float, to_s: float) -> float:
+        """from_s 에서 진행 방향으로 to_s 까지 남은 호장(px). 닫힌 루프면 0..L."""
+        path = self._path
+        if path is None:
+            return max(0.0, float(to_s) - float(from_s))
+        L = max(1e-6, float(path.length))
+        if path.closed:
+            return float((float(to_s) - float(from_s)) % L)
+        return max(0.0, float(to_s) - float(from_s))
+
+    def _racer_progress(self, r: RacerState) -> float:
+        """랩·호장을 합친 진행도(클수록 앞섬)."""
+        path = self._path
+        L = float(path.length) if path is not None else 1.0
+        return float(r.lap) * max(1e-6, L) + float(r.s)
+
+    def _npc_is_behind_player(self, r: RacerState) -> bool:
+        """NPC가 플레이어보다 뒤(추격 중)인지."""
+        player = next((x for x in self._racers if x.is_player), None)
+        if player is None or r is None or r is player:
+            return False
+        return self._racer_progress(r) < self._racer_progress(player) - 2.0
+
+    def _npc_item_effect_id(self, it: RaceItemPoint) -> Optional[str]:
+        """레인 AI가 평가할 효과 type. secret/summon 은 무시."""
+        if it is None or bool(getattr(it, "taken", False)):
+            return None
+        kind = str(getattr(it, "kind", "normal") or "normal").lower()
+        if kind in ("secret", "summon"):
+            return None
+        if kind == "roulette":
+            tid = str(getattr(it, "inner_type_id", "") or it.type_id or "").strip().lower()
+        else:
+            tid = str(it.type_id or "").strip().lower()
+        if not tid or tid in ("secret", "summon_pad", "roulette_pad"):
+            return None
+        return tid
+
+    def _npc_desire_for_item(self, r: RacerState, it: RaceItemPoint, *, behind_player: bool) -> float:
+        """
+        아이템에 대한 레인 선호 점수.
+        + : speed 업 / (추격 중) swap
+        - : slow / (앞서 있을 때) swap
+        """
+        tid = self._npc_item_effect_id(it)
+        if not tid:
+            return 0.0
+        info = _item_type_info(tid)
+        effect = str(info.get("effect") or "").lower()
+        if effect == "swap" or tid == "swap":
+            # 뒤따라갈 때만 위치교환을 노림. 앞서면 먹으면 손해.
+            return 2.6 if behind_player else -2.4
+        try:
+            st = float(getattr(it, "strength", None) or info.get("strength", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            st = float(info.get("strength", 1.0) or 1.0)
+        if effect == "speed_mul" or tid in ("speed", "slow"):
+            if st > 1.05:
+                return 1.4 + (st - 1.0) * 2.0  # speed≈1.45 → ~2.3
+            if st < 0.95:
+                return -1.4 - (1.0 - st) * 2.0  # slow≈0.55 → ~-2.3
+        return 0.0
+
+    def _npc_score_lanes(self, r: RacerState, dcfg: dict) -> Dict[float, float]:
+        """앞쪽 아이템으로 A/B/C 레인 점수 집계."""
+        scores: Dict[float, float] = {
+            float(LANE_UPPER): 0.0,
+            float(LANE_CENTER): 0.0,
+            float(LANE_LOWER): 0.0,
+        }
+        cur = float(r.lane_target)
+        # 불필요한 레인 흔들림 방지용 약한 유지 보너스
+        if cur in scores:
+            scores[cur] += 0.2
+        try:
+            look = float(dcfg.get("ai_look_ahead_s", 150.0) or 150.0)
+        except (TypeError, ValueError):
+            look = 150.0
+        look = max(40.0, look)
+        behind = self._npc_is_behind_player(r)
+        for it in self._items or []:
+            if it is None or bool(getattr(it, "taken", False)):
+                continue
+            desire = self._npc_desire_for_item(r, it, behind_player=behind)
+            if abs(desire) < 1e-6:
+                continue
+            ahead = self._path_s_ahead(float(r.s), float(it.s))
+            if ahead < 4.0 or ahead > look:
+                continue
+            # 가까울수록 가중↑ (위협·기회 모두)
+            urgency = 1.0 - (ahead / look)
+            w = 0.30 + 0.70 * max(0.0, urgency)
+            lane = float(getattr(it, "lane", LANE_CENTER))
+            # 가장 가까운 스텝 레인으로 스냅
+            best_lane = float(LANE_CENTER)
+            best_d = 1e9
+            for lo in (LANE_UPPER, LANE_CENTER, LANE_LOWER):
+                d = abs(float(lo) - lane)
+                if d < best_d:
+                    best_d = d
+                    best_lane = float(lo)
+            scores[best_lane] = float(scores.get(best_lane, 0.0)) + desire * w
+        return scores
+
+    def _npc_choose_lane(self, r: RacerState) -> None:
+        """
+        아이템 기반 레인 선택 (난이도: 판단 주기·시야·반응 성공률).
+        speed→추적, slow→회피, swap→플레이어 추격 중일 때만 추적.
+        """
+        if r is None or r.is_player:
+            return
+        dcfg = self._difficulty_cfg()
+        try:
+            react = float(dcfg.get("ai_react_chance", 0.78) or 0.78)
+        except (TypeError, ValueError):
+            react = 0.78
+        react = max(0.0, min(1.0, react))
+        scores = self._npc_score_lanes(r, dcfg)
+        # 유지 보너스(0.2)를 뺀 실질 신호 세기
+        signal_strength = 0.0
+        for lo, sc in scores.items():
+            base = 0.2 if abs(float(lo) - float(r.lane_target)) < 0.05 else 0.0
+            signal_strength = max(signal_strength, abs(float(sc) - base))
+
+        if signal_strength > 0.08 and random.random() <= react:
+            # 점수 높은 레인부터 점유 가능 여부 확인
+            ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            for lane_off, _sc in ordered:
+                if self._try_set_lane(r, float(lane_off)):
+                    return
+            return
+
+        # 아이템 신호 무시/없음 → 가끔만 랜덤 이동 (쉬움일수록 잦음)
+        try:
+            idle = float(dcfg.get("ai_idle_lane_chance", 0.12) or 0.12)
+        except (TypeError, ValueError):
+            idle = 0.12
+        if random.random() > max(0.0, min(1.0, idle)):
+            return
+        candidates = [LANE_UPPER, LANE_CENTER, LANE_LOWER]
+        random.shuffle(candidates)
+        for cand in candidates:
+            if abs(float(cand) - float(r.lane_target)) < 0.05:
+                continue
+            if self._try_set_lane(r, float(cand)):
+                return
 
     def _lane_occupied(
         self,
@@ -1599,7 +2040,11 @@ class RacingActivity(BaseFieldActivity):
                 except (TypeError, ValueError):
                     pass
             return None
-        path = RacePath(pts, closed=bool(field.get("closed", _cfg("closed", True))))
+        path = build_race_path(
+            pts,
+            closed=bool(field.get("closed", _cfg("closed", True))),
+            cfg=field,
+        )
         try:
             s0 = float(field.get("start_s", _cfg("start_s", 0.0)) or 0.0)
         except (TypeError, ValueError):
@@ -1678,7 +2123,11 @@ class RacingActivity(BaseFieldActivity):
                 continue
         if len(pts) < 2:
             return False
-        self._path = RacePath(pts, closed=bool(self.field.get("closed", _cfg("closed", True))))
+        self._path = build_race_path(
+            pts,
+            closed=bool(self.field.get("closed", _cfg("closed", True))),
+            cfg=self.field,
+        )
         self._minimap_bg = None
         return True
 
@@ -1772,12 +2221,12 @@ class RacingActivity(BaseFieldActivity):
         start_s = float(self._p("start_s", 0.0))
         spacing = float(self._p("start_spacing", 18.0))
         self._winner = None
+        self._record_save_info = None  # 기록모드 완주 시 {is_best, best, entry}
 
         versus = str(self._race_mode or "record").strip().lower() == "versus"
-        npc1, npc2 = self._pick_npc_pair()
-
         if versus:
             # 경쟁: A=NPC1, B=플레이어, C=NPC2 — 같은 s 에 나란히
+            npc1, npc2 = self._pick_npc_pair()
             slots = [
                 (npc1, False, LANE_UPPER, "npc1"),      # A
                 (self._player_char, True, LANE_CENTER, "player"),  # B
@@ -1785,13 +2234,11 @@ class RacingActivity(BaseFieldActivity):
             ]
             s_list = [start_s, start_s, start_s]
         else:
-            # 기록용: 플레이어 앞·NPC 뒤 간격 + 레인 섞기
+            # 기록용: 플레이어 단독 (NPC 없음)
             slots = [
-                (self._player_char, True, LANE_UPPER, "player"),
-                (npc1, False, LANE_LOWER, "npc1"),
-                (npc2, False, LANE_CENTER, "npc2"),
+                (self._player_char, True, LANE_CENTER, "player"),
             ]
-            s_list = [start_s - i * spacing for i in range(3)]
+            s_list = [start_s]
 
         lane_w = float(self._p("lane_width", 26.0))
         for i, (cid, is_pl, lane0, role) in enumerate(slots):
@@ -1810,15 +2257,16 @@ class RacingActivity(BaseFieldActivity):
         self._apply_player_char(self._player_char)
         self._spawn_temp_npcs()
         self._sync_entities_to_racers()
+        npc_n = sum(1 for r in self._racers if (not r.is_player) and r.entity is not None)
         print(
-            f"[racing] grid player={self._player_char} npc1={npc1} npc2={npc2} "
-            f"spawned={sum(1 for r in self._racers if (not r.is_player) and r.entity is not None)}"
+            f"[racing] grid mode={'versus' if versus else 'record'} "
+            f"player={self._player_char} racers={len(self._racers)} npc_spawned={npc_n}"
         )
         self._countdown_t = float(self._p("countdown_sec", 3.0))
         self._race_time = 0.0
         self._won = False
         self.state = ST_COUNTDOWN
-        self._msg = "경쟁 출발!" if versus else "출발 준비"
+        self._msg = "경쟁 출발!" if versus else "기록 출발!"
         self.field_rotate3d_target = float(self._p("rotate3d_strength", 1.0))
         # 카메라: 저장된 모드 기준으로 초기 헤딩 (이후 스무스 추종)
         self._cam_heading = None
@@ -1988,7 +2436,8 @@ class RacingActivity(BaseFieldActivity):
     def _pick_mystery_effect(self) -> str:
         """
         시크릿·소환 결과 추첨.
-        기본 아이템 가중치 1.0, 위치 교환(swap)은 그 30%(0.3).
+        가중치: data.RACING_MYSTERY_EFFECT_WEIGHTS (swap 기본 0.12).
+        맵별 racing.mystery_effect_weights 로 덮어쓰기 가능.
         """
         pool = [str(x) for x in (RACING_MYSTERY_EFFECT_POOL or ("speed", "slow", "swap"))]
         if not pool:
@@ -2001,9 +2450,9 @@ class RacingActivity(BaseFieldActivity):
         weights = []
         for tid in pool:
             try:
-                w = float(wmap.get(tid, 0.3 if tid == "swap" else 1.0) or 0.0)
+                w = float(wmap.get(tid, 0.12 if tid == "swap" else 1.0) or 0.0)
             except (TypeError, ValueError):
-                w = 0.3 if tid == "swap" else 1.0
+                w = 0.12 if tid == "swap" else 1.0
             weights.append(max(0.0, w))
         if sum(weights) <= 1e-9:
             return pool[0]
@@ -2028,6 +2477,9 @@ class RacingActivity(BaseFieldActivity):
             except (TypeError, ValueError):
                 r.freeze_t = max(r.freeze_t, 1.0)
             r.speed = 0.0
+            r.inchworm_phase = "frozen"
+            r.inchworm_slide_t = 0.0
+            r.inchworm_anim_fps = 0.0
             if r.is_player:
                 self._item_msg = "번개!!"
                 self._item_msg_t = 1.5
@@ -2334,6 +2786,9 @@ class RacingActivity(BaseFieldActivity):
                 fs = 1.15
             r.freeze_t = max(float(r.freeze_t or 0.0), fs)
             r.speed = 0.0
+            r.inchworm_phase = "frozen"
+            r.inchworm_slide_t = 0.0
+            r.inchworm_anim_fps = 0.0
             lz["flash_t"] = max(float(lz.get("flash_t", 0.0) or 0.0), 0.65)
             self._add_weather_strike_fx(r, lz)
             if r.is_player:
@@ -2716,9 +3171,9 @@ class RacingActivity(BaseFieldActivity):
 
     def _update_racer(self, r: RacerState, dt: float, *, racing: bool) -> None:
         """
-        직선은 heading 으로 달리고, 코너에서는 관성으로 앞으로 나가며
-        앞쪽 경로점(룩어헤드)을 향해 heading 을 서서히 튼다.
-        위치는 경로에 강제 스냅하지 않음 — 약한 인력만.
+        ABC 레일 고정 주행: s 를 speed*dt 만큼만 전진하고
+        위치·heading 은 곡선 sample(s) + 레인 법선 오프셋으로 결정.
+        가속·감속(코너 곡률·버프·슬립)만으로 경쟁한다.
         """
         path = self._path
         if path is None:
@@ -2732,29 +3187,21 @@ class RacingActivity(BaseFieldActivity):
 
         look = float(self._p("corner_lookahead_px", 90.0))
         turn_ahead = path.lookahead_turn(r.s, look)
-        lane_w = float(self._p("lane_width", 30.0))
-        lane_off = float(r.lane) * lane_w
-        # 목표: 앞 경로점 chase (세그먼트 접선 스냅 대신 → 관성 코너)
-        # ★ 자기 레인 중심선을 chase — 중심선을 chase 하면 1·3레인 발 위치가
-        #   레인 중앙보다 안쪽으로 치우친다 (pull과의 평형점이 어긋남)
-        lx, ly, look_tang, _ = path.sample(r.s + look)
-        lx += -math.sin(look_tang) * lane_off
-        ly += math.cos(look_tang) * lane_off
-        desired = math.atan2(ly - r.pos[1], lx - r.pos[0])
-        # 자기 레인 중심선에서 많이 벗어나면 룩어헤드 접선 비중↑ (트랙 복귀)
-        cx, cy, tang0, _ = path.sample(r.s)
-        cx += -math.sin(tang0) * lane_off
-        cy += math.cos(tang0) * lane_off
-        off = math.hypot(r.pos[0] - cx, r.pos[1] - cy)
-        blend = max(0.0, min(0.55, off / 70.0))
-        err_to_pt = _angle_wrap(desired - r.heading)
-        err_to_tang = _angle_wrap(look_tang - r.heading)
-        desired = _angle_wrap(r.heading + err_to_pt * (1.0 - blend) + err_to_tang * blend)
 
-        turn_rate = float(self._p("turn_rate_rad", 2.2))
         if float(r.freeze_t or 0.0) > 0.0:
             r.freeze_t = max(0.0, float(r.freeze_t) - dt)
             r.speed = 0.0
+            r.inchworm_phase = "frozen"
+            r.inchworm_slide_t = 0.0
+            r.inchworm_anim_fps = 0.0
+            # 레일 위 위치는 유지 (멈춘 모습)
+            lane_w = float(self._p("lane_width", 30.0))
+            px, py, tang, _ = path.sample(r.s)
+            nx = -math.sin(tang)
+            ny = math.cos(tang)
+            r.pos[0] = px + nx * r.lane * lane_w
+            r.pos[1] = py + ny * r.lane * lane_w
+            r.heading = tang
             return
         # 시크릿 룰렛 중에도 정상 주행 — 효과는 확정 시점에만 적용
         if float(r.bump_slow_t or 0.0) > 0.0:
@@ -2770,9 +3217,6 @@ class RacingActivity(BaseFieldActivity):
         else:
             r.speed_mul = 1.0
 
-        turn_rate *= max(0.30, 1.0 - 0.40 * (r.speed / max(1.0, float(self._p("max_speed", 140.0)))))
-        r.heading = _angle_approach(r.heading, desired, turn_rate * dt)
-
         max_spd = float(self._p("max_speed", 140.0)) * max(0.15, float(r.speed_mul))
         max_spd *= max(0.2, float(getattr(r, "weather_slow_mul", 1.0) or 1.0))
         # 난이도: NPC만 속도 배율
@@ -2787,9 +3231,8 @@ class RacingActivity(BaseFieldActivity):
             max_spd *= slip_mul
         min_spd = float(self._p("min_corner_speed", 45.0)) * max(0.15, min(1.0, float(r.speed_mul)))
         corner_k = float(self._p("corner_brake", 1.35))
-        # 헤딩이 목표와 어긋난 정도도 감속에 반영 (관성으로 미끄러질 때)
-        steer_err = abs(_angle_wrap(desired - r.heading))
-        target_spd = max_spd / (1.0 + turn_ahead * corner_k + steer_err * 0.85)
+        # 앞 곡률만으로 목표 속도 (헤딩 오차 감속 없음 — 레일이라 항상 접선)
+        target_spd = max_spd / (1.0 + turn_ahead * corner_k)
         target_spd = max(min_spd, min(max_spd, target_spd))
         if not racing:
             target_spd = 0.0
@@ -2798,35 +3241,35 @@ class RacingActivity(BaseFieldActivity):
         brake = float(self._p("brake", 90.0))
         if slip_mul > 1.01:
             accel += float(self._p("slipstream_accel_bonus", 18.0) or 18.0)
+        try:
+            thrust_mul = max(0.1, float(self._p("inchworm_thrust_accel_mul", 2.0) or 2.0))
+        except (TypeError, ValueError):
+            thrust_mul = 2.0
+        prev_speed = float(r.speed)
+        # 애니 위상 먼저 갱신 → 이번 프레임 가속 게이트(1~4 관성 / 5~8 추력)에 반영
+        self._update_inchworm_anim(r, dt, prev_speed=prev_speed, target_spd=target_spd)
         if r.speed < target_spd:
-            r.speed = min(target_spd, r.speed + accel * dt)
+            if self._inchworm_allow_thrust(r):
+                r.speed = min(target_spd, r.speed + accel * thrust_mul * dt)
+            # else: 구부림 구간 — 속도 유지(관성), s 적분만 진행
         else:
             r.speed = max(target_spd, r.speed - brake * dt)
 
         self._update_afterburner_yellow(r)
 
-        # ★ 관성 이동: heading 방향으로 적분 (경로 세그먼트에 붙지 않음)
-        r.pos[0] += math.cos(r.heading) * r.speed * dt
-        r.pos[1] += math.sin(r.heading) * r.speed * dt
-
-        # 경로+차선으로 약한 인력 (코너에서 밖으로 살짝 나가게)
-        lane_w = float(self._p("lane_width", 26.0))
-        new_s = path.nearest_s(r.pos[0], r.pos[1])
-        px, py, tang, _ = path.sample(new_s)
+        # ★ 레일 전진: 호장 s 만 적분 → 위치·heading 은 곡선에서 읽음
+        r.prev_s = r.s
+        r.s = path.wrap_s(r.s + r.speed * dt)
+        lane_w = float(self._p("lane_width", 30.0))
+        px, py, tang, _ = path.sample(r.s)
         nx = -math.sin(tang)
         ny = math.cos(tang)
-        tx = px + nx * r.lane * lane_w
-        ty = py + ny * r.lane * lane_w
-        pull = float(self._p("path_pull", 2.2))
-        k = 1.0 - math.exp(-pull * dt)
-        r.pos[0] = _lerp(r.pos[0], tx, k)
-        r.pos[1] = _lerp(r.pos[1], ty, k)
+        r.pos[0] = px + nx * r.lane * lane_w
+        r.pos[1] = py + ny * r.lane * lane_w
+        r.heading = tang
 
-        # 랩: nearest_s 랩어라운드 (이미 완주한 차는 랩 카운트 안 함)
-        r.prev_s = r.s
-        r.s = path.wrap_s(new_s)
+        # 랩: s 랩어라운드 (이미 완주한 차는 랩 카운트 안 함)
         if path.closed and racing and path.length > 1.0 and not r.finished:
-            # 큰 역행이 아닌 전진 랩 크로스
             if r.prev_s > path.length * 0.75 and r.s < path.length * 0.25:
                 r.lap += 1
                 if r.lap >= self._lap_goal:
@@ -2839,19 +3282,15 @@ class RacingActivity(BaseFieldActivity):
             if r.ai_timer <= 0.0:
                 dcfg = self._difficulty_cfg()
                 try:
-                    amin = float(dcfg.get("ai_lane_min", 1.2) or 1.2)
-                    amax = float(dcfg.get("ai_lane_max", 3.0) or 3.0)
+                    amin = float(dcfg.get("ai_lane_min", 1.1) or 1.1)
+                    amax = float(dcfg.get("ai_lane_max", 2.4) or 2.4)
                 except (TypeError, ValueError):
-                    amin, amax = 1.2, 3.0
+                    amin, amax = 1.1, 2.4
                 if amax < amin:
                     amin, amax = amax, amin
-                r.ai_timer = random.uniform(max(0.2, amin), max(amin, amax))
-                # 비어 있는 레인만 (가까우면 같은 레인 금지)
-                candidates = [LANE_UPPER, LANE_CENTER, LANE_LOWER]
-                random.shuffle(candidates)
-                for cand in candidates:
-                    if self._try_set_lane(r, cand):
-                        break
+                # 판단 주기 = 아이템 반응 속도 (난이도별)
+                r.ai_timer = random.uniform(max(0.12, amin), max(amin, amax))
+                self._npc_choose_lane(r)
 
     def _update_camera_heading(self, dt: float = 0.016) -> None:
         """
@@ -2860,7 +3299,7 @@ class RacingActivity(BaseFieldActivity):
         - back: 플레이어 바로 뒤
         - oblique(비스듬히): 뒤에서 쫓아가되 45°만 틀기 (좌/우 애니 유지용)
         세레모니(ST_FINISH): 옆/뒤 시야에서 서서히 정면(플레이어를 마주 봄)으로 이동.
-        경로 접선을 쓰면 코너에서 카메라가 재설정(스냅)되므로 금지.
+        플레이어 heading(=경로 접선)을 cam_turn_rate 로 추종해 코너 스냅을 막는다.
         """
         player_r = next((x for x in self._racers if x.is_player), None)
         if player_r is None:
@@ -2930,6 +3369,7 @@ class RacingActivity(BaseFieldActivity):
             self._sync_entities_to_racers()
             self._update_camera_heading(dt)
             self._tick_lane_buttons(dt)
+            self._compute_places()
             if self._countdown_t <= 0.0:
                 self.state = ST_RACE
                 self._msg = "레이스!"
@@ -2946,6 +3386,8 @@ class RacingActivity(BaseFieldActivity):
             self._sync_entities_to_racers()
             self._update_camera_heading(dt)
             self._tick_lane_buttons(dt)
+            # 실시간 순위 (네임박스·미니맵)
+            self._compute_places()
             # 선착승: 누구든 먼저 랩 달성하면 세레모니 (경쟁). 기록용은 플레이어 골만.
             versus = str(self._race_mode or "record").strip().lower() == "versus"
             if versus:
@@ -2962,7 +3404,7 @@ class RacingActivity(BaseFieldActivity):
             return
 
     def _begin_finish_ceremony(self, finisher: Optional[RacerState]) -> None:
-        """완주 세레모니 시작 — 계속 주행 + 카메라 정면 + 플레이어 등수."""
+        """완주 세레모니 시작 — 계속 주행 + 카메라 정면 + 플레이어 등수/기록."""
         self._winner = finisher
         self._won = bool(finisher is not None and finisher.is_player)
         self.state = ST_FINISH
@@ -2975,12 +3417,52 @@ class RacingActivity(BaseFieldActivity):
         self._race_options_open = False
         self._race_quit_confirm = False
         self._compute_places()
-        if finisher is not None and finisher.is_player:
+        versus = str(self._race_mode or "record").strip().lower() == "versus"
+        if (not versus) and finisher is not None and finisher.is_player:
+            self._record_save_info = self._save_racing_record(finisher)
+            info = self._record_save_info or {}
+            entry = info.get("entry") or {}
+            tstr = str(entry.get("time_str") or self._format_race_time())
+            laps = int(entry.get("laps") or self._lap_goal or 0)
+            if info.get("is_best"):
+                self._msg = f"신기록! {laps}랩 {tstr}"
+            else:
+                best = info.get("best") or {}
+                bstr = str(best.get("time_str") or "")
+                self._msg = f"골인 {laps}랩 {tstr}" + (f" (베스트 {bstr})" if bstr else "")
+        elif finisher is not None and finisher.is_player:
             self._msg = "1등!" if int(getattr(finisher, "place", 0) or 0) == 1 else "골인!"
         elif finisher is not None:
             self._msg = f"{self._char_label(finisher.char_id)} 우승"
         else:
             self._msg = "골인!"
+
+    def _save_racing_record(self, pr: RacerState) -> dict:
+        """기록모드 완주 → minigame_records.json (맵·랩수·시간)."""
+        try:
+            t = float(pr.finish_time if pr.finish_time is not None else self._race_time)
+        except (TypeError, ValueError):
+            t = float(self._race_time or 0.0)
+        entry = {
+            "mode": "record",
+            "map_id": str(self.map_id or ""),
+            "char": str(self._player_char or pr.char_id or ""),
+            "laps": int(self._lap_goal),
+            "time_sec": round(max(0.0, t), 3),
+            "time_str": self._format_time_value(t),
+        }
+        try:
+            from flow import append_racing_record
+
+            return append_racing_record(entry)
+        except Exception as e:
+            print(f"[racing] record save fail: {e}")
+            return {"is_best": True, "best": entry, "entry": entry}
+
+    def _format_time_value(self, t: float) -> str:
+        t = max(0.0, float(t))
+        m, s = divmod(t, 60.0)
+        return f"{int(m)}:{s:05.2f}"
 
     def _compute_places(self) -> None:
         """완주 시각 우선, 미완주는 진행도(랩+s)로 순위."""
@@ -3770,6 +4252,33 @@ class RacingActivity(BaseFieldActivity):
             return "?"
         return self._char_label(getattr(r, "char_id", "") or "")
 
+    def _racer_place_tag(self, r: RacerState) -> str:
+        """순위 표기. 플레이어 '(P)1', NPC '1'."""
+        if r is None:
+            return ""
+        try:
+            place = int(getattr(r, "place", 0) or 0)
+        except (TypeError, ValueError):
+            place = 0
+        if place < 1:
+            return "(P)" if r.is_player else ""
+        if r.is_player:
+            return f"(P){place}"
+        return str(place)
+
+    def _racer_namebox_text(self, r: RacerState) -> str:
+        """네임박스 전체 문구: '이름 1' / '이름 (P) 1'."""
+        name = self._racer_hud_label(r) or "?"
+        try:
+            place = int(getattr(r, "place", 0) or 0)
+        except (TypeError, ValueError):
+            place = 0
+        if place < 1:
+            return f"{name} (P)" if r.is_player else name
+        if r.is_player:
+            return f"{name} (P) {place}"
+        return f"{name} {place}"
+
     def _racer_hud_pastel(self, r: RacerState) -> Tuple[int, int, int]:
         """NPC1=파란 / 플레이어=녹색 / NPC2=빨간 파스텔."""
         role = str(getattr(r, "hud_role", "") or "")
@@ -3825,7 +4334,7 @@ class RacingActivity(BaseFieldActivity):
         """
         레이서 머리 위 네임박스 (원근 스케일 없음).
         layer2 맨 뒤 — 미니맵·랩·메시지 등 글자 오버레이보다 아래, 버튼(layer1)보다도 아래.
-        폰트 ~11(320기준), 오른쪽에 현재 레인 A/B/C.
+        문구: '이름 순위' / 플레이어 '이름 (P) 순위' (레인 문자 대신 순위).
         """
         if ctx is None or ctx.surf is None:
             return
@@ -3839,10 +4348,8 @@ class RacingActivity(BaseFieldActivity):
             return
         # 원근과 무관 — UI 텍스트 스케일만 (크기 일정). outline 없는 plain 폰트.
         name_px = max(10, int(round(scale_ui_text_px(11))))
-        lane_px = max(9, int(round(scale_ui_text_px(10))))
         try:
             name_font = self._plain_hud_font(name_px)
-            lane_font = self._plain_hud_font(lane_px)
         except Exception:
             return
         try:
@@ -3851,7 +4358,6 @@ class RacingActivity(BaseFieldActivity):
             head_off = 42.0
         head_off = max(24.0, min(80.0, head_off))
         pad_x, pad_y = 5, 2
-        gap = 4
 
         # 플레이어를 마지막에 그려 겹칠 때 이름이 가려지지 않게
         ordered = sorted(
@@ -3870,20 +4376,17 @@ class RacingActivity(BaseFieldActivity):
             except (TypeError, ValueError):
                 continue
 
-            name = self._racer_hud_label(r) or "?"
-            lane_ch = _lane_offset_to_letter(float(r.lane))
+            label = self._racer_namebox_text(r)
             fill = self._racer_hud_pastel(r)
             try:
-                name_s = name_font.render(str(name), True, (32, 36, 42))
-                lane_s = lane_font.render(str(lane_ch), True, (32, 36, 42))
+                name_s = name_font.render(str(label), True, (32, 36, 42))
             except Exception:
                 continue
             nw, nh = int(name_s.get_width()), int(name_s.get_height())
-            lw, lh = int(lane_s.get_width()), int(lane_s.get_height())
-            if nw < 1 and lw < 1:
+            if nw < 1:
                 continue
-            box_h = max(nh, lh) + pad_y * 2
-            box_w = max(1, nw + gap + lw + pad_x * 2)
+            box_h = nh + pad_y * 2
+            box_w = max(1, nw + pad_x * 2)
             # 박스 전체가 화면 안에 들어오게 — 중심만 클램프하면 왼쪽(이름)이 잘림
             rx = int(cx - box_w // 2)
             ry = int(cy - box_h)
@@ -3901,13 +4404,7 @@ class RacingActivity(BaseFieldActivity):
                 pygame.draw.rect(surf, border, rect, 1, border_radius=3)
             except TypeError:
                 pygame.draw.rect(surf, border, rect, 1)
-            if nw > 0:
-                surf.blit(name_s, (rect.x + pad_x, rect.y + (box_h - nh) // 2))
-            if lw > 0:
-                surf.blit(
-                    lane_s,
-                    (rect.right - pad_x - lw, rect.y + (box_h - lh) // 2),
-                )
+            surf.blit(name_s, (rect.x + pad_x, rect.y + (box_h - nh) // 2))
 
     # --- draw --------------------------------------------------------------
 
@@ -4008,12 +4505,21 @@ class RacingActivity(BaseFieldActivity):
             return
         ent = getattr(r, "entity", None)
         under = None
+        body_lift_px = 0.0
         if ent is not None:
             ov = getattr(ent, "_sprite_overlay", None)
             if isinstance(ov, dict) and ov.get("behind"):
                 getter = getattr(ent, "current_sprite_overlay_image", None)
                 if callable(getter):
                     under = getter()
+                # 플레이어(engine.draw)와 동일한 프레임별 seat_idle 상승 — 자벌레 허리 동기화
+                lift_profile = ov.get("body_lift_px_by_frame") or []
+                if isinstance(lift_profile, (list, tuple)) and lift_profile:
+                    try:
+                        overlay_idx = int(ov.get("idx") or 0) % len(lift_profile)
+                        body_lift_px = max(0.0, float(lift_profile[overlay_idx]))
+                    except (TypeError, ValueError):
+                        body_lift_px = 0.0
         sc = float(ctx.z)
         if m7:
             try:
@@ -4050,11 +4556,14 @@ class RacingActivity(BaseFieldActivity):
                     return
             except Exception:
                 pass
-        for img2 in (under2, body2):
+        # 몸(body)만 자벌레 프레임 상승량을 적용 — underlay(자벌레)는 발점 고정
+        # 레이싱 중에는 캐릭터 발 그림자를 그리지 않는다.
+        body_sy = int(round(float(sy) - body_lift_px * float(sc)))
+        for img2, draw_sy in ((under2, int(sy)), (body2, body_sy)):
             if img2 is None:
                 continue
             dx, dy = blit_topleft_bottom_center(
-                int(sx), int(sy), img2.get_width(), img2.get_height()
+                int(sx), draw_sy, img2.get_width(), img2.get_height()
             )
             try:
                 ctx.surf.blit(img2, (dx, dy))
@@ -4745,12 +5254,27 @@ class RacingActivity(BaseFieldActivity):
                     miss,
                     (empty.centerx - miss.get_width() // 2, empty.centery - miss.get_height() // 2),
                 )
-            # 이름
+            # 이름 + (기록모드면) 베스트 타임
             nm = small.render(label, True, (230, 238, 255) if exists else (150, 155, 170))
-            surf.blit(
-                nm,
-                (rect.centerx - nm.get_width() // 2, rect.bottom - nm.get_height() - 6),
-            )
+            name_y = rect.bottom - nm.get_height() - 6
+            surf.blit(nm, (rect.centerx - nm.get_width() // 2, name_y))
+            if exists and str(self._race_mode or "").strip().lower() != "versus":
+                try:
+                    from flow import racing_best_for_map
+
+                    best = racing_best_for_map(mid, int(self._lap_goal))
+                    if isinstance(best, dict) and best.get("time_str"):
+                        bt = small.render(
+                            f"베스트 {best.get('time_str')}",
+                            True,
+                            (255, 220, 120),
+                        )
+                        surf.blit(
+                            bt,
+                            (rect.centerx - bt.get_width() // 2, name_y - bt.get_height() - 1),
+                        )
+                except Exception:
+                    pass
         for rect, act in self._menu_rects:
             if act == "menu_back":
                 pygame.draw.rect(surf, (50, 50, 70), rect, border_radius=6)
@@ -4802,16 +5326,30 @@ class RacingActivity(BaseFieldActivity):
         mid = _resolve_world_map_id(slot, self._world_data) or str(self._selected_map_id or "")
         map_lab = _map_display_name(mid, self._world_data, slot=slot)
         dlab = str(self._difficulty_cfg().get("label") or self._difficulty)
+        versus = str(self._race_mode or "record").strip().lower() == "versus"
         lines = [
             f"맵: {map_lab}",
             f"랩: {int(self._lap_goal)}바퀴",
-            f"난이도: {dlab}",
         ]
-        y = int(h * 0.32)
+        if versus:
+            lines.append(f"난이도: {dlab}")
+        else:
+            best_line = "베스트: —"
+            try:
+                from flow import racing_best_for_map
+
+                best = racing_best_for_map(mid, int(self._lap_goal))
+                if isinstance(best, dict) and best.get("time_str"):
+                    best_line = f"베스트: {best.get('time_str')} ({int(best.get('laps', self._lap_goal))}랩)"
+            except Exception:
+                pass
+            lines.append(best_line)
+            lines.append("모드: 기록 (솔로)")
+        y = int(h * 0.28)
         for line in lines:
             t = small.render(line, True, (230, 238, 255))
             surf.blit(t, (w // 2 - t.get_width() // 2, y))
-            y += t.get_height() + 10
+            y += t.get_height() + 8
         for rect, act in self._menu_rects:
             if act == "confirm_yes":
                 pygame.draw.rect(surf, (40, 70, 50), rect, border_radius=6)
@@ -4854,14 +5392,19 @@ class RacingActivity(BaseFieldActivity):
         except Exception:
             mini = pygame.transform.scale(img, (mw, mh)).convert_alpha()
         self._minimap_map_wh = (float(max(1, img.get_width())), float(max(1, img.get_height())))
-        # 트랙 경로선을 살짝 얹어 코스 파악을 돕는다
+        # 트랙 곡선(호장 샘플)을 살짝 얹어 코스 파악을 돕는다
         path = self._path
-        if path is not None and len(path.points) >= 2:
+        if path is not None and path.length > 1.0:
             fx = mw / self._minimap_map_wh[0]
             fy = mh / self._minimap_map_wh[1]
-            pts = [(int(round(x * fx)), int(round(y * fy))) for x, y in path.points]
+            steps = max(24, int(path.length / 8.0))
+            pts = []
+            for i in range(steps + (0 if path.closed else 1)):
+                x, y, _, _ = path.sample(path.length * (i / float(steps)))
+                pts.append((int(round(x * fx)), int(round(y * fy))))
             try:
-                pygame.draw.lines(mini, (255, 255, 255), path.closed, pts, 1)
+                if len(pts) >= 2:
+                    pygame.draw.lines(mini, (255, 255, 255), path.closed, pts, 1)
             except Exception:
                 pass
         pygame.draw.rect(mini, (24, 28, 40), mini.get_rect(), 1)
@@ -4873,9 +5416,67 @@ class RacingActivity(BaseFieldActivity):
         return mini
 
     def _format_race_time(self) -> str:
-        t = max(0.0, float(self._race_time))
-        m, s = divmod(t, 60.0)
-        return f"{int(m)}:{s:05.2f}"
+        return self._format_time_value(self._race_time)
+
+    def _draw_finish_player_rank_overlay(self, surf, w: int, h: int) -> None:
+        """세레모니 중앙 문구: 경쟁=등수, 기록=시간·신기록."""
+        if surf is None:
+            return
+        versus = str(self._race_mode or "record").strip().lower() == "versus"
+        if not versus:
+            info = getattr(self, "_record_save_info", None) or {}
+            entry = info.get("entry") or {}
+            tstr = str(entry.get("time_str") or "")
+            if not tstr:
+                pr = next((x for x in self._racers if x.is_player), None)
+                if pr is not None and pr.finish_time is not None:
+                    tstr = self._format_time_value(float(pr.finish_time))
+                else:
+                    tstr = self._format_race_time()
+            laps = int(entry.get("laps") or self._lap_goal or 0)
+            if info.get("is_best"):
+                label = f"신기록! {laps}랩 {tstr}"
+                col = (255, 230, 80)
+            else:
+                best = info.get("best") or {}
+                bstr = str(best.get("time_str") or "")
+                label = f"{laps}랩 {tstr}"
+                if bstr:
+                    label = f"{label}  /  베스트 {bstr}"
+                col = (220, 230, 245)
+        else:
+            pr = next((x for x in self._racers if x.is_player), None)
+            if pr is None:
+                return
+            place = int(getattr(pr, "place", 0) or 0)
+            if place < 1:
+                return
+            label = self._finish_rank_message(place)
+            colors = {
+                1: (255, 230, 80),
+                2: (220, 230, 245),
+                3: (255, 190, 120),
+            }
+            col = colors.get(place, (255, 240, 180))
+        try:
+            from engine import resolve_font_profile
+
+            logo_px = max(18, int(round(scale_ui_text_px(26))))
+            logo = resolve_font_profile("logo", size_px=logo_px)
+        except Exception:
+            logo = self._plain_hud_font(max(18, int(round(scale_ui_text_px(22)))))
+        try:
+            ts = logo.render(label, True, col)
+        except Exception:
+            return
+        tx = w // 2
+        ty = int(h * 0.36)
+        try:
+            sh = logo.render(label, True, (20, 16, 8))
+            surf.blit(sh, (tx - sh.get_width() // 2 + 2, ty - sh.get_height() // 2 + 2))
+        except Exception:
+            pass
+        surf.blit(ts, (tx - ts.get_width() // 2, ty - ts.get_height() // 2))
 
     def _draw_minimap(self, surf: pygame.Surface, w: int, h: int, small) -> Optional[int]:
         """오른쪽 위 exit 버튼 밑 미니맵 + 레이서 점 + 경과 시간. 반환: 시간 텍스트 하단 y."""
@@ -4887,10 +5488,15 @@ class RacingActivity(BaseFieldActivity):
         mx = w - mw - max(2, margin)
         my = int(round(h * float(self._p("minimap_top_frac", 0.075) or 0.075)))
         surf.blit(mini, (mx, my))
-        # 레이서 위치 점 (플레이어 빨강 / NPC 파랑·노랑)
+        # 레이서 위치 점 + 오른쪽 순위 (플레이어 '(P)1')
         fx = mw / self._minimap_map_wh[0]
         fy = mh / self._minimap_map_wh[1]
         rdot = max(2, int(round(mw * 0.022)))
+        rank_px = max(8, int(round(scale_ui_text_px(8))))
+        try:
+            rank_font = self._plain_hud_font(rank_px)
+        except Exception:
+            rank_font = small
         for r in self._racers:
             try:
                 px = mx + int(round(float(r.pos[0]) * fx))
@@ -4902,6 +5508,23 @@ class RacingActivity(BaseFieldActivity):
             col = self._MINIMAP_DOT_COLORS.get(r.hud_role, (200, 200, 200))
             pygame.draw.circle(surf, (10, 10, 16), (px, py), rdot + 1)
             pygame.draw.circle(surf, col, (px, py), rdot)
+            tag = self._racer_place_tag(r)
+            if not tag:
+                continue
+            try:
+                ts = rank_font.render(tag, True, (255, 248, 220))
+                sh = rank_font.render(tag, True, (16, 18, 24))
+            except Exception:
+                continue
+            tx = px + rdot + 2
+            ty = py - ts.get_height() // 2
+            # 미니맵 오른쪽 밖으로 나가면 점 왼쪽에
+            if tx + ts.get_width() > mx + mw - 1:
+                tx = px - rdot - 2 - ts.get_width()
+            tx = max(mx, min(mx + mw - ts.get_width(), tx))
+            ty = max(my, min(my + mh - ts.get_height(), ty))
+            surf.blit(sh, (tx + 1, ty + 1))
+            surf.blit(ts, (tx, ty))
         # 경과 시간 (미니맵 바로 밑, 오른쪽 정렬)
         tt = small.render(self._format_race_time(), True, (255, 248, 220))
         pad = 3
@@ -4923,43 +5546,6 @@ class RacingActivity(BaseFieldActivity):
                 return str(msg)
         defaults = {1: "1등이야 오예~", 2: "2등이야~", 3: "3등이다 힝~"}
         return defaults.get(p, f"{p}등이야~")
-
-    def _draw_finish_player_rank_overlay(self, surf, w: int, h: int) -> None:
-        """플레이어 등수만 화면 중앙 살짝 위에 표시."""
-        if surf is None:
-            return
-        pr = next((x for x in self._racers if x.is_player), None)
-        if pr is None:
-            return
-        place = int(getattr(pr, "place", 0) or 0)
-        if place < 1:
-            return
-        label = self._finish_rank_message(place)
-        try:
-            from engine import resolve_font_profile
-
-            logo_px = max(20, int(round(scale_ui_text_px(28))))
-            logo = resolve_font_profile("logo", size_px=logo_px)
-        except Exception:
-            logo = self._plain_hud_font(max(20, int(round(scale_ui_text_px(24)))))
-        colors = {
-            1: (255, 230, 80),
-            2: (220, 230, 245),
-            3: (255, 190, 120),
-        }
-        col = colors.get(place, (255, 240, 180))
-        try:
-            ts = logo.render(label, True, col)
-        except Exception:
-            return
-        tx = w // 2
-        ty = int(h * 0.36)
-        try:
-            sh = logo.render(label, True, (20, 16, 8))
-            surf.blit(sh, (tx - sh.get_width() // 2 + 2, ty - sh.get_height() // 2 + 2))
-        except Exception:
-            pass
-        surf.blit(ts, (tx - ts.get_width() // 2, ty - ts.get_height() // 2))
 
     def draw_screen(self, ctx: FieldDrawContext) -> None:
         if ctx is None or ctx.surf is None:
@@ -5041,7 +5627,7 @@ class RacingActivity(BaseFieldActivity):
                 if versus:
                     hint = small.render("경쟁: A레인 NPC · B레인 나 · C레인 NPC (나란히)", True, (180, 200, 220))
                 else:
-                    hint = small.render("고르면 나머지 2명은 랜덤 NPC", True, (180, 200, 220))
+                    hint = small.render("기록 모드 — 혼자 달려 최단 시간 갱신", True, (180, 200, 220))
                 surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.13)))
                 self._layout_char_pick_rects(w, h)
                 for rect, ix in self._char_pick_rects:

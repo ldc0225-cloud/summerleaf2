@@ -7,6 +7,12 @@ CONFIG = {
     #"OUTPUT_MODE": "UPSCALE_320",  # "UPSCALE_320" | "NATIVE_640"
     "OUTPUT_MODE": "NATIVE_640",  # "UPSCALE_320" | "NATIVE_640"
     "UPSCALE_FACTOR": 2,           # UPSCALE_320에서만 사용(정수배)
+    # 물리 창 크기 고정. None이면 기존처럼 논리×UPSCALE(보통 640×480).
+    # "320x240": OS 창을 항상 320×240으로 유지(줌2/UPSCALE_320 시야에 맞춤).
+    #   - 논리 320이면 1:1, 논리 640(NATIVE/줌아웃)이면 다운스케일 present.
+    #   - AUTO_OUTPUT_MODE·F5 전환은 그대로 동작하되 창 크기만 바뀌지 않음.
+    "FIXED_PHYSICAL_WINDOW": "320x240",  # None | "320x240" | "640x480"
+    # "FIXED_PHYSICAL_WINDOW": None,  # None | "320x240" | "640x480"
     "FULLSCREEN": False,
     # Android: 기기 해상도에 맞춰 640x480 비율 유지 스케일(레터박스). main.py가 런타임에 자동 적용.
     "ANDROID_DISPLAY_FIT": True,
@@ -98,7 +104,8 @@ CONFIG = {
 
 
     "START_MAP": "bg_title",  # 처음 시작할 맵 ID
-    # 온보딩: 매 실행 인트로→데모 후 본편. 조건식의 gamestart는 세이브가 아니라 GameFlow.boot_phase(0/1/2)로만 평가
+    # 온보딩: 매 실행 인트로→데모 후 본편. 세이브 없으면 데모 뒤 캐릭터 선택(boot_phase=15).
+    # 조건식의 gamestart는 세이브가 아니라 GameFlow.boot_phase(0/1/15/2)로만 평가
     "INTRO_EVENT_ID": "ev_intro_scene",
     "DEMO_EVENT_ID": "ev_gl_demo_02",
     "NEW_GAME_SPAWN_MAP": "bg_jjangpu",
@@ -113,7 +120,39 @@ CONFIG = {
     "HELD_ITEM_FOOT_OFFSET_Y": 6,
 
     # 세이브 없음·merge 기본값 / load_map 플레이어 생성 시 CHAR_ASSETS 키
+    # (세이브에 player_char 가 있으면 그쪽이 우선 — 첫 시작 캐릭터 선택 결과)
     "DEFAULT_PLAYER_CHAR": "summer_k",
+    # 짱짱어린이집 조작 가능 아이들 — 첫 시작 선택·야구 p2_chars·레이스 char_pick 과 공유.
+    # 조력자 별칭 ally1~ally5 는 이 목록에서 주인공을 뺀 순서(인덱스)로 매핑됨.
+    "PLAYABLE_KIDS": [
+        "summer_k",   # 여름이
+        "dani_k",     # 단이
+        "igyeong_k",  # 이경이
+        "yuha_k",     # 유하
+        "hyeon_k",    # 현이
+        "rockie_k",   # 록희
+    ],
+    # 주인공(아이) → 부모(어른) CHAR_ASSETS 키.
+    # 이벤트 PLACE/MOVE/SAY 의 target·bubble_target·who:
+    #   "player_parent" / "ally1_parent"…"ally5_parent" / "summer_k_parent" 등
+    #   → 이 맵으로 치환됨.
+    # 짱짱 아이들 동료는 summer_k 등 직접 id 대신 "ally1"…"ally5" 를 쓴다.
+    "PLAYER_PARENTS": {
+        "summer_k": "carrot_a",        # 여름이 → 당근
+        "igyeong_k": "redtilefish_a",  # 이경이 → 옥돔
+        "dani_k": "jjanga_a",          # 단이 → 짱아
+        "yuha_k": "firefly_a",         # 유하 → 반디
+        "hyeon_k": "travel_a",         # 현이 → 여행
+        "rockie_k": "sugar_a",         # 록희 → 슈가
+    },
+    # 세이브 키 player_char_selected: 캐릭터 선택 UI 완료 여부.
+    # False/없음이면 데모 후 선택 화면 (세이브 파일이 데모 중 생겨도 동일).
+    "CHAR_SELECT_BOOT_PHASE": 15,
+    # 세이브 없이 첫 시작 시 캐릭터 선택 UI 문구 (activities/char_select.py)
+    "CHAR_SELECT_WELCOME": "짱짱 어드벤처에 오신 것을 환영 합니다.",
+    "CHAR_SELECT_PROMPT": "여러분과 함께 모험을 떠날 친구를 선택 해 주세요",
+    "CHAR_SELECT_CONFIRM_FMT": "{name}로 선택 하시겠어요?",  # {name}=캐릭터 UI 이름
+    "CHAR_SELECT_FAREWELL": "그럼 짱짱 친구들과 함께 신나는 모험의 세계로 떠나 볼까요~",
     "CHAR_SPEED": 1.6, "CURSOR_SPEED": 3.5,
     # 클릭 이동
     "DOUBLE_CLICK_MS": 500,
@@ -482,6 +521,8 @@ CONFIG = {
     "CAMERA_FOLLOW_LERP": 0.1,
 
     "SAVE_FILE": "save_data.json",
+    # 미니게임 아케이드 기록(야구·레이스). 세이브 초기화와 무관. Android도 cwd(앱 files)에 기록.
+    "MINIGAME_RECORDS_FILE": "minigame_records.json",
 
     # 키 한 번 → 글로벌 이벤트 ID (해당 이벤트는 trigger: hotkey, steps 에 DEV_CMD 등)
     # key: 한 글자/숫자 또는 F9 처럼 F숫자, 또는 K_ESCAPE 처럼 pygame 상수명
@@ -496,7 +537,16 @@ CONFIG = {
         {"key": "F9", "event_id": "ev_hotkey_jump_shadow"},  # 점프 그림자 토글
         {"key": "x", "event_id": "ev_hotkey_zoom_cycle"},  # 줌 순환
         {"key": "y", "event_id": "ev_hotkey_cloud"},  # 구름 효과
+        # e: 이벤트 피커(목록 모달) — GLOBAL_EVENT_HOTKEYS 가 아님. field_runtime EventPicker
     ],
+    # 필드 플레이 중 E 키 — 등록 이벤트 목록 모달(클릭/Enter 즉시 실행). False면 비활성
+    "EVENT_PICKER_HOTKEY_ENABLED": True,
+    # EVENT_PICKER_HOTKEY: 피커 토글 키 (한 글자 / F키 / K_*). 기본 e
+    "EVENT_PICKER_HOTKEY": "e",
+    # EVENT_PICKER_ROW_H: 목록 한 줄 높이(논리 px)
+    "EVENT_PICKER_ROW_H": 18,
+    # EVENT_PICKER_VISIBLE_ROWS: 한 화면에 보이는 줄 수
+    "EVENT_PICKER_VISIBLE_ROWS": 12,
     # --- 3D_ROTATE / Mode7 (레이싱 전용 맵 원근). 사다리꼴 레거시 키는 사용하지 않음. ---
     "ROTATE3D_DEFAULT_STRENGTH": 1.0,   # 이벤트/토글 on 시 목표 strength(0~1)
     "ROTATE3D_DEFAULT_DURATION_SEC": 0.4,  # 이벤트 스텝 기본 보간 시간(초)
@@ -620,6 +670,11 @@ CONFIG = {
     "JUMP_DUR_SPAN_MUL_MAX": 1.15,
     "JUMP_MIN_DURATION_MS": 220,
     "JUMP_MAX_DURATION_MS": 520,
+    # 제자리 hop(ACTION_ANIM jump 등): 도랑 점프 MIN(~220ms)과 별도 — 기본 연출 길이
+    "JUMP_HOP_DURATION_MS": 750,
+    "JUMP_HOP_DURATION_MAX_MS": 1800,
+    # jump 스프라이트 프레임 간격(ms). 미지정 시 ANIM_DELAY(150) — 연출용으로 더 느리게
+    "JUMP_ANIM_DELAY": 280,
     "JUMP_PATH_MERGE_EPS": 1.6,
     "JUMP_LAND_GOAL_SNAP_PX": 4.0,
     # 도랑 점프 착지 보정: 착지점에서 진행 방향으로 추가 전진(px) 시도 (walk 위에서만)
@@ -632,6 +687,10 @@ CONFIG = {
     "TARGET_SNAP_STEP_PX": 2,
     # 이벤트 MOVE: force 생략 시 마스크·이동불가 타일 무시(스크립트 연출). false 로 두면 A*·walkable 적용.
     "EVENT_MOVE_FORCE_DEFAULT": True,
+    # 다중 target MOVE/PLACE: 앵커 좌표에서 멤버마다 떨어뜨릴 간격/반경(px)
+    "EVENT_GROUP_SPACING_PX": 50,
+    # 단체 배치 기본: circle | left | right | up | down
+    "EVENT_GROUP_LAYOUT": "circle",
 
     # 길찾기(A*): 큰 격자는 빠르지만 좁은 모서리에선 이웃이 전부 막혀 실패하기 쉬움 → 세밀 격자·코너 탈출 BFS
     "PATHFIND_GRID_PX": 5,
@@ -662,6 +721,16 @@ CONFIG = {
     # 리더 뒤 목표점을 픽셀 격자로 반올림(미세 플로트 변동으로 인한 불필요 재계획·떨림 완화)
     "FOLLOW_SLOT_QUANTIZE_PX": 4, #4
 
+    # PLACE persist + behavior:follow(또는 travel:true) 동행 — 맵 전환 시 플레이어 근처 스폰
+    # PLACED_FOLLOW_SPAWN_OFFSET_PX: 첫 동행 NPC를 플레이어 왼쪽으로 띄울 거리(px)
+    "PLACED_FOLLOW_SPAWN_OFFSET_PX": 28,
+    # PLACED_FOLLOW_SPAWN_SPACING_PX: 동행이 여러 명일 때 가로로 벌리는 간격(px)
+    "PLACED_FOLLOW_SPAWN_SPACING_PX": 20,
+    # PLACED_FOLLOW_SPAWN_MIN_SEP_PX: 동행끼리 최소 간격(겹쳐 스폰 방지)
+    "PLACED_FOLLOW_SPAWN_MIN_SEP_PX": 14,
+    # PLACED_FOLLOW_SPAWN_SNAP_R_PX: 막힌 칸일 때 주변 walk 탐색 반경(px)
+    "PLACED_FOLLOW_SPAWN_SNAP_R_PX": 72,
+
     # 캐릭터 발밑 타원 그림자 (비스듬한 시점용). 점프 시 동작은 세이브 jump_shadow_mode
     "CHARACTER_SHADOW_ENABLED": True,
     "SHADOW_COLOR": (18, 18, 38),
@@ -682,45 +751,439 @@ CONFIG = {
     "progress_frog_minigame_win": 0,
     "progress_frog_seed": 0,
     "progress_frog_minigame_tried": 0,
+    # 황소개구리 보스(activities/bullfrog) 클리어 플래그
+    "progress_bullfrog_win": 0,
     "progress_fishing_win": 0,
     "score_frog_trial_best": 0,
     "score_frog_trial_last": 0,
 }
 
-# 맵별 필드 틸트·쉬어 기본값 (맵 진입 시 field_runtime.apply_map_field_defaults)
-MAP_FIELD_DEFAULTS = {
-    "default": {
-        "tilt_on": None,
-        "shear_on": None,
-    },
-    "bg_jjangpu": {
-        "tilt_on": False,
-        "shear_on": True,
-    },
-    "bg_baseball1": {
-        "tilt_on": False,
-        "shear_on": False,
-    },
-}
+
+# ---------------------------------------------------------------------------
+# 주인공·조력자·부모 연동 (세이브 player_char / 이벤트 player_parent·ally1~5)
+#
+# [세이브]
+#   player_char  — 조작 캐릭터 id (없으면 DEFAULT_PLAYER_CHAR)
+#   parent_char  — 선택 시 같이 기록(없으면 PLAYER_PARENTS 로 유도)
+#   조력자 5명은 세이브에 두지 않고 get_ally_char_ids() 로 유도
+#     (PLAYABLE_KIDS 순서에서 주인공만 뺀 나머지 → ally1=첫 번째 … ally5=다섯 번째)
+#
+# [이벤트·맵]
+#   짱짱 아이들 NPC는 summer_k 등 직접 id 대신 ally1~ally5 를 쓴다.
+#   target / bubble_target / who / world_data npcs[].name:
+#     "player_parent" → 주인공 부모 char id
+#     "ally1"…"ally5" → 조력자 char id (주인공 제외 인덱스)
+#     "ally1_parent"…"ally5_parent" → 해당 조력자의 부모
+#     "summer_k_parent" 등 → PLAYABLE_KIDS/PLAYER_PARENTS 키의 부모
+#   player 는 엔진이 엔티티로 특별 처리하므로 그대로 둔다.
+#   SAY 문구 {player_name} {player_call} {parent_name} {parent_call}
+#           {ally1_name}…{ally5_name} {ally1_call}…{ally5_call}
+#           {ally1_parent_name}…{ally5_parent_call}
+#           {summer_k_parent_name} 등 (아이 id + _parent_name/_parent_call)
+# ---------------------------------------------------------------------------
+
+def get_playable_kids(config=None) -> list:
+    """조작·선택 가능한 짱짱어린이집 아이들 id 목록."""
+    cfg = config if isinstance(config, dict) else CONFIG
+    raw = cfg.get("PLAYABLE_KIDS") or []
+    out = []
+    for x in raw:
+        cid = str(x or "").strip()
+        if cid and cid not in out:
+            out.append(cid)
+    if out:
+        return out
+    return ["summer_k", "dani_k", "igyeong_k", "yuha_k", "hyeon_k", "rockie_k"]
 
 
-def resolve_map_field_defaults(map_id: str) -> dict:
-    """맵 ID → {tilt_on: bool, shear_on: bool}."""
+def get_player_char_id(save_data=None, config=None) -> str:
+    """세이브·CONFIG 에서 현재 주인공 캐릭터 id."""
+    cfg = config if isinstance(config, dict) else CONFIG
+    default = str(cfg.get("DEFAULT_PLAYER_CHAR", "summer_k") or "summer_k").strip()
+    sd = save_data if isinstance(save_data, dict) else {}
+    pc = str(sd.get("player_char") or "").strip()
+    return pc or default
+
+
+def get_player_parent_id(save_data=None, *, player_char=None, config=None) -> str:
+    """주인공에 연동된 부모 캐릭터 id (PLAYER_PARENTS / 세이브 parent_char)."""
+    cfg = config if isinstance(config, dict) else CONFIG
+    sd = save_data if isinstance(save_data, dict) else {}
+    stored = str(sd.get("parent_char") or "").strip()
+    pc = str(player_char or "").strip() or get_player_char_id(sd, cfg)
+    parents = cfg.get("PLAYER_PARENTS") if isinstance(cfg.get("PLAYER_PARENTS"), dict) else {}
+    mapped = str((parents or {}).get(pc) or "").strip()
+    # 선택 직후 맵을 우선 — 역할 교체 시 parent_char 와 일치 유지
+    if mapped:
+        return mapped
+    if stored:
+        return stored
+    return str((parents or {}).get("summer_k") or "carrot_a").strip() or "carrot_a"
+
+
+def get_parent_id_for_char(char_id, config=None) -> str:
+    """아이 char id → PLAYER_PARENTS 부모 id. 없으면 빈 문자열."""
+    cfg = config if isinstance(config, dict) else CONFIG
+    cid = str(char_id or "").strip()
+    if not cid:
+        return ""
+    parents = cfg.get("PLAYER_PARENTS") if isinstance(cfg.get("PLAYER_PARENTS"), dict) else {}
+    return str((parents or {}).get(cid) or "").strip()
+
+
+def get_ally_char_ids(player_char=None, save_data=None, config=None) -> list:
+    """주인공을 제외한 나머지 짱짱 친구들(조력자) id 목록. PLAYABLE_KIDS 순서 유지."""
+    cfg = config if isinstance(config, dict) else CONFIG
+    pc = str(player_char or "").strip() or get_player_char_id(save_data, cfg)
+    return [c for c in get_playable_kids(cfg) if c != pc]
+
+
+def get_ally_char_id(slot, player_char=None, save_data=None, config=None) -> str:
+    """
+    1-based 조력자 슬롯(1..5) → 실제 char id.
+    범위 밖이거나 해당 슬롯이 없으면 빈 문자열.
+    """
+    try:
+        i = int(slot)
+    except Exception:
+        return ""
+    allies = get_ally_char_ids(player_char=player_char, save_data=save_data, config=config)
+    if 1 <= i <= len(allies):
+        return str(allies[i - 1] or "").strip()
+    return ""
+
+
+def parse_ally_slot(token) -> int:
+    """
+    'ally1'…'ally5' → 1…5. 아니면 0.
+    (대소문자 무시. ally01 같은 선행 0도 허용)
+    """
+    key = str(token or "").strip().lower()
+    if not key.startswith("ally"):
+        return 0
+    rest = key[4:]
+    if not rest.isdigit():
+        return 0
+    try:
+        n = int(rest)
+    except Exception:
+        return 0
+    if 1 <= n <= 5:
+        return n
+    return 0
+
+
+def _is_known_kid_char_id(cid, config=None) -> bool:
+    """PLAYABLE_KIDS 또는 PLAYER_PARENTS 키에 있는 아이 id인지."""
+    cfg = config if isinstance(config, dict) else CONFIG
+    key = str(cid or "").strip()
+    if not key:
+        return False
+    if key in get_playable_kids(cfg):
+        return True
+    parents = cfg.get("PLAYER_PARENTS") if isinstance(cfg.get("PLAYER_PARENTS"), dict) else {}
+    return key in (parents or {})
+
+
+def parse_parent_alias_kid(token, save_data=None, config=None) -> str:
+    """
+    부모 별칭 → 아이 char id (부모 조회용).
+    - player_parent / parent / mom / dad / guardian → 현재 주인공
+    - ally1_parent…ally5_parent → 해당 조력자
+    - summer_k_parent 등 → 그 아이 id
+    매칭 실패 시 빈 문자열.
+    """
+    cfg = config if isinstance(config, dict) else CONFIG
+    key = str(token or "").strip().lower()
+    if not key:
+        return ""
+    if key in ("player_parent", "parent", "mom", "dad", "guardian"):
+        return get_player_char_id(save_data, cfg)
+    if not key.endswith("_parent"):
+        return ""
+    base = key[: -len("_parent")]
+    if not base:
+        return ""
+    slot = parse_ally_slot(base)
+    if slot:
+        return get_ally_char_id(slot, save_data=save_data, config=cfg)
+    # summer_k_parent 등 — 원본 대소문자 보존을 위해 token 쪽 base 사용
+    raw_base = str(token or "").strip()
+    if raw_base.lower().endswith("_parent"):
+        raw_base = raw_base[: -len("_parent")]
+    if _is_known_kid_char_id(raw_base, cfg) or _is_known_kid_char_id(base, cfg):
+        # PLAYER_PARENTS / PLAYABLE_KIDS 에 있는 표기 우선
+        for kid in get_playable_kids(cfg):
+            if kid.lower() == base:
+                return kid
+        parents = cfg.get("PLAYER_PARENTS") if isinstance(cfg.get("PLAYER_PARENTS"), dict) else {}
+        for kid in (parents or {}):
+            if str(kid).lower() == base:
+                return str(kid)
+        return raw_base or base
+    return ""
+
+
+def is_story_target_alias(token, config=None) -> bool:
+    """이벤트 target/who 가 스토리 별칭(해석 대상)인지."""
+    key = str(token or "").strip().lower()
+    if not key:
+        return False
+    if key in ("player_parent", "parent", "mom", "dad", "guardian"):
+        return True
+    if parse_ally_slot(key):
+        return True
+    if key.endswith("_parent"):
+        base = key[: -len("_parent")]
+        if parse_ally_slot(base):
+            return True
+        return _is_known_kid_char_id(base, config)
+    return False
+
+
+def apply_player_char_choice(save_data: dict, char_id: str, config=None, *, selected=False) -> dict:
+    """
+    캐릭터 선택 결과를 세이브 dict 에 기록.
+    player_char / parent_char 설정. (조력자는 유도만 하므로 저장하지 않음)
+    selected=True 일 때만 player_char_selected 를 켠다 (선택 UI 완료 표시).
+    """
+    cfg = config if isinstance(config, dict) else CONFIG
+    sd = save_data if isinstance(save_data, dict) else {}
+    cid = str(char_id or "").strip() or str(cfg.get("DEFAULT_PLAYER_CHAR", "summer_k") or "summer_k")
+    sd["player_char"] = cid
+    sd["parent_char"] = get_player_parent_id(sd, player_char=cid, config=cfg)
+    if selected:
+        sd["player_char_selected"] = True
+    return sd
+
+
+def needs_player_char_select(save_data=None, config=None) -> bool:
+    """
+    첫 주인공 선택 UI가 필요한지.
+    player_char_selected 가 없으면/False 이면 True.
+    (세이브 파일이 데모 중·강제종료로 생겨도, 선택을 안 했으면 다시 고르게 함)
+    """
+    sd = save_data if isinstance(save_data, dict) else {}
+    return not bool(sd.get("player_char_selected"))
+
+
+def resolve_story_target_id(target, save_data=None, config=None) -> str:
+    """
+    이벤트·맵 target / bubble_target / who / npc name 별칭 해석.
+    player 는 엔진이 엔티티로 특별 처리하므로 그대로 두고,
+    player_parent / allyN_parent / {kid}_parent → 부모 char id,
+    ally1…ally5 → 주인공 제외 조력자 char id.
+    매칭 실패 시 원문 반환.
+    """
+    t = str(target or "").strip()
+    if not t:
+        return t
+    cfg = config if isinstance(config, dict) else CONFIG
+    key = t.lower()
+    kid_for_parent = parse_parent_alias_kid(t, save_data=save_data, config=cfg)
+    if kid_for_parent:
+        # player_parent 계열은 세이브 parent_char 보정 포함
+        if key in ("player_parent", "parent", "mom", "dad", "guardian"):
+            return get_player_parent_id(save_data, player_char=kid_for_parent, config=cfg)
+        pid = get_parent_id_for_char(kid_for_parent, cfg)
+        if pid:
+            return pid
+        # PLAYER_PARENTS 에 없으면 주인공 부모 조회 경로로 한 번 더
+        return get_player_parent_id(save_data, player_char=kid_for_parent, config=cfg) or t
+    slot = parse_ally_slot(key)
+    if slot:
+        cid = get_ally_char_id(slot, save_data=save_data, config=cfg)
+        if cid:
+            return cid
+    return t
+
+
+def resolve_story_who_label(who, save_data=None, config=None) -> str:
+    """
+    SAY who 표시용.
+    ally1~5 / player_parent / allyN_parent / {kid}_parent 별칭이면 실제 캐릭터 UI 이름.
+    그 외(이미 쓴 표시명·일반 id)는 원문 유지.
+    """
+    raw = str(who or "").strip()
+    if not raw:
+        return raw
+    if not is_story_target_alias(raw, config):
+        return raw
+    cid = resolve_story_target_id(raw, save_data=save_data, config=config)
+    if not cid:
+        return raw
+    try:
+        from char_behavior import get_char_ui_name
+
+        return str(get_char_ui_name(cid) or cid)
+    except Exception:
+        return cid
+
+
+def resolve_story_alias_ui_name(token, save_data=None, config=None) -> str:
+    """
+    스토리 별칭 → 표시 이름.
+    player / ally1…ally5 / player_parent / allyN_parent / {kid}_parent 등.
+    해석 불가면 빈 문자열.
+    """
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    cfg = config if isinstance(config, dict) else CONFIG
+    key = raw.lower()
+    try:
+        from char_behavior import get_char_ui_name
+    except Exception:
+        def get_char_ui_name(cid):  # noqa: N802
+            return str(cid or "")
+
+    if key == "player":
+        return str(get_char_ui_name(get_player_char_id(save_data, cfg)) or "")
+    if not is_story_target_alias(raw, cfg):
+        return ""
+    cid = resolve_story_target_id(raw, save_data=save_data, config=cfg)
+    if not cid:
+        return ""
+    if str(cid).strip().lower() == key and parse_ally_slot(key):
+        return ""
+    return str(get_char_ui_name(cid) or "")
+
+
+def expand_story_text(text, save_data=None, config=None) -> str:
+    """
+    SAY 등 스토리 문구 템플릿.
+    {player_name} {player_call} {parent_name} {parent_call}
+    {ally1_name}…{ally5_name} {ally1_call}…{ally5_call}
+    {ally1_parent_name}…{ally5_parent_call}
+    {summer_k_parent_name} 등 (아이 id + _parent_name / _parent_call)
+    call = 호칭(여름이→여름아, 유하→유하야).
+
+    따옴표 별칭: "ally5" "player" "ally1_parent" → 표시 이름
+      예: "\"ally5\"가 위험에 쳐했어!!" → "록희가 위험에 쳐했어!!"
+    단축 중괄호: {ally5} {player} {parent} → 표시 이름 ({ally5_name} 과 동일)
+    """
+    import re
+
+    raw = str(text or "")
+    if not raw:
+        return raw
+    need_brace = "{" in raw
+    need_quoted = '"' in raw
+    if not need_brace and not need_quoted:
+        return raw
+    try:
+        from char_behavior import get_char_call_name, get_char_ui_name
+    except Exception:
+        def get_char_ui_name(cid):  # noqa: N802
+            return str(cid or "")
+
+        get_char_call_name = get_char_ui_name
+    cfg = config if isinstance(config, dict) else CONFIG
+    sd = save_data if isinstance(save_data, dict) else {}
+    pc = get_player_char_id(sd, cfg)
+    parent = get_player_parent_id(sd, player_char=pc, config=cfg)
+    mapping = {
+        "player_name": get_char_ui_name(pc),
+        "player_call": get_char_call_name(pc),
+        "parent_name": get_char_ui_name(parent),
+        "parent_call": get_char_call_name(parent),
+        # 단축: {player} {parent}
+        "player": get_char_ui_name(pc),
+        "parent": get_char_ui_name(parent),
+    }
+    allies = get_ally_char_ids(player_char=pc, save_data=sd, config=cfg)
+    for i in range(1, 6):
+        cid = allies[i - 1] if i - 1 < len(allies) else ""
+        mapping[f"ally{i}_name"] = get_char_ui_name(cid) if cid else ""
+        mapping[f"ally{i}_call"] = get_char_call_name(cid) if cid else ""
+        mapping[f"ally{i}"] = mapping[f"ally{i}_name"]
+        pid = get_parent_id_for_char(cid, cfg) if cid else ""
+        mapping[f"ally{i}_parent_name"] = get_char_ui_name(pid) if pid else ""
+        mapping[f"ally{i}_parent_call"] = get_char_call_name(pid) if pid else ""
+        mapping[f"ally{i}_parent"] = mapping[f"ally{i}_parent_name"]
+    # 고정 아이 id 부모 템플릿
+    kids = list(get_playable_kids(cfg))
+    parents_map = cfg.get("PLAYER_PARENTS") if isinstance(cfg.get("PLAYER_PARENTS"), dict) else {}
+    for kid in (parents_map or {}):
+        ks = str(kid or "").strip()
+        if ks and ks not in kids:
+            kids.append(ks)
+    for kid in kids:
+        pid = get_parent_id_for_char(kid, cfg)
+        mapping[f"{kid}_parent_name"] = get_char_ui_name(pid) if pid else ""
+        mapping[f"{kid}_parent_call"] = get_char_call_name(pid) if pid else ""
+    out = raw
+    if need_brace:
+        # 긴 키 먼저(ally1_parent_name 이 ally1_parent / ally1 보다 먼저)
+        for key in sorted(mapping.keys(), key=len, reverse=True):
+            out = out.replace("{" + key + "}", str(mapping.get(key) or ""))
+    if need_quoted:
+        # "ally5" / "player" / "ally1_parent" → 표시 이름 (스토리 별칭만)
+        def _repl_quoted(m):
+            tok = m.group(1)
+            kl = str(tok or "").strip().lower()
+            if kl in mapping and mapping.get(kl):
+                return str(mapping[kl])
+            name = resolve_story_alias_ui_name(tok, sd, cfg)
+            return name if name else m.group(0)
+
+        out = re.sub(r'"([A-Za-z_][A-Za-z0-9_]*)"', _repl_quoted, out)
+    return out
+
+
+
+# 맵별 필드 기본값 (틸트·쉬어·화면 FX ambient)
+# - 저장: world_data.json → [맵ID].field
+#   예: "field": {
+#         "tilt_on": false, "shear_on": true,
+#         "screen_fx": {
+#           "cloud": {"dir":"RANDOM","speed":15,"freq":0.5},
+#           "rain": {"density":0.4,"speed":280,"angle":82},
+#           "vignette": {"strength":0.55,"size":0.42,"softness":0.65},
+#           "tone": {"preset":"warm","strength":0.35}
+#         }
+#       }
+# - 맵 진입 시 field_runtime.apply_map_field_defaults
+# - tilt_on/shear_on 생략 → CONFIG (FIELD_PERSPECTIVE_DEFAULT_ON / TILT_SHEAR_ENABLED)
+# - screen_fx 의 kind 키가 있으면 ON (엔진 build_*_from_step 과 동일 파라미터). 없으면 해당 FX OFF.
+# - presence_zones[].field 는 존 체류 중 틸트/쉬어만 덮어쓰기. 맵 루트 field 는 진입 시 1회.
+
+
+def get_map_field_raw(map_id: str, world_data=None) -> dict:
+    """world_data[map_id].field 원본 dict (없으면 {})."""
+    mid = str(map_id or "").strip()
+    if not isinstance(world_data, dict) or not mid:
+        return {}
+    row = world_data.get(mid)
+    field = row.get("field") if isinstance(row, dict) else None
+    return dict(field) if isinstance(field, dict) else {}
+
+
+def resolve_map_field_defaults(map_id: str, world_data=None) -> dict:
+    """맵 ID → {tilt_on: bool, shear_on: bool, screen_fx: dict}.
+
+    screen_fx 는 kind→파라미터 dict (키가 있으면 해당 FX ON). 없으면 {}.
+    """
     out: dict = {}
-    for src in (
-        MAP_FIELD_DEFAULTS.get("default"),
-        MAP_FIELD_DEFAULTS.get(str(map_id or "").strip()),
-    ):
-        if not isinstance(src, dict):
+    field = get_map_field_raw(map_id, world_data)
+    for key in ("tilt_on", "shear_on"):
+        val = field.get(key)
+        if val is None or (isinstance(val, str) and not str(val).strip()):
             continue
-        for key in ("tilt_on", "shear_on"):
-            val = src.get(key)
-            if val is not None:
-                out[key] = bool(val)
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("1", "true", "t", "yes", "y", "on"):
+                out[key] = True
+            elif s in ("0", "false", "f", "no", "n", "off"):
+                out[key] = False
+        else:
+            out[key] = bool(val)
     if "tilt_on" not in out:
         out["tilt_on"] = bool(CONFIG.get("FIELD_PERSPECTIVE_DEFAULT_ON", False))
     if "shear_on" not in out:
         out["shear_on"] = bool(CONFIG.get("TILT_SHEAR_ENABLED", False))
+    sfx = field.get("screen_fx")
+    out["screen_fx"] = dict(sfx) if isinstance(sfx, dict) else {}
     return out
 
 
@@ -732,16 +1195,27 @@ BASEBALL_DEFAULTS = {
     "default_player_char": "nachos_a",
     "story_win_flag": "progress_baseball_story",
     "story_seed_flag": "progress_baseball_seed",
-    "p2_chars": [       
-        "summer_k", "boy2_k", "boy3_k", "girl1_k", "girl2_k", "girl3_k"
+    # CONFIG["PLAYABLE_KIDS"] 와 동일 풀 (첫 시작 캐릭터 선택과 호환)
+    "p2_chars": list(CONFIG["PLAYABLE_KIDS"]) if "PLAYABLE_KIDS" in CONFIG else [
+        "summer_k", "dani_k", "igyeong_k", "yuha_k", "hyeon_k", "rockie_k"
     ],
     "exit_map": "bg_jjangpu",
     "exit_pos": [850.0, 2310.0],
     "swings": 5,
     "gauge_time_limit_sec": 5.0,
     "gauge_sweep_end_speed_mul": 1.5,
+    # NPC 기본 타격(레거시 폴백) + 플래시 연출
     "npc_skill": 0.62,
     "npc_flash_sec": 0.55,
+    # NPC 타격 AI — 비거리 스케일 0~100 을 5등분(a~e) + 파울.
+    # 가중치 순서: foul, a(0~20), b(21~40), c(41~60), d(61~80), e(81~100)
+    # 기본(중급): d 최고, c·e 그다음, a·b·파울은 낮음. 쉬움은 단타·파울↑, 어려움은 장타↑.
+    "difficulty_easy_npc_band_weights": [0.14, 0.20, 0.24, 0.18, 0.14, 0.10],
+    "difficulty_normal_npc_band_weights": [0.08, 0.10, 0.12, 0.22, 0.30, 0.18],
+    "difficulty_hard_npc_band_weights": [0.04, 0.06, 0.08, 0.20, 0.36, 0.26],
+    "difficulty_easy_npc_skill": 0.45,
+    "difficulty_normal_npc_skill": 0.62,
+    "difficulty_hard_npc_skill": 0.80,
     "tilt_compressed": 0.3,
     "result_hold_sec": 2.5,
     "fan_half_deg": 37.0,
@@ -851,13 +1325,14 @@ BASEBALL_DEFAULTS = {
 # 레이스 필드 미니게임 — 전역 기본값.
 # 맵별 path·exit 는 world_data.json → [맵ID].racing 에서 덮어씀.
 # exit_map/exit_pos: 서킷 맵 세이브 금지 → 여기(또는 맵별 racing.exit_*)로 저장/스폰.
-# path: 월드 좌표 폴리라인(닫힌 루프 권장). 마스크 경로 대신 가벼움.
+# path: 에디터 제어점 목록. 런타임은 Cardinal(Catmull-Rom) 곡선으로 잇고 호장 s 로 주행.
 RACING_DEFAULTS = {
     "default_map_id": "bg_town",
     "default_player_char": "summer_k",
-    "char_pick": [
-        "summer_k", "boy1_k", "boy2_k", "boy3_k", "girl1_k", "girl2_k", "girl3_k",
-    ],
+    # CONFIG["PLAYABLE_KIDS"] 와 동일 풀 (첫 시작 캐릭터 선택과 호환)
+    "char_pick": list(CONFIG.get("PLAYABLE_KIDS") or [
+        "summer_k", "dani_k", "igyeong_k", "yuha_k", "hyeon_k", "rockie_k"
+    ]),
     "exit_map": "bg_jjangpu",
     "exit_pos": [850.0, 2310.0],
     # bg_town(640x480) 임시 루프 — 도로가 생기면 world_data.racing.path 로 교체
@@ -872,6 +1347,11 @@ RACING_DEFAULTS = {
         [180.0, 340.0],
     ],
     "closed": True,
+    # --- 경로 곡선 (제어점 → 스플라인) ---
+    # curve_tension: 0=Catmull-Rom(가장 둥근 코너), 1에 가까울수록 제어점 사이 직선에 근접
+    "curve_tension": 0.0,
+    # curve_samples_per_seg: 제어점 한 구간당 호장 샘플 수(클수록 곡선·도로가 매끈, 비용↑)
+    "curve_samples_per_seg": 20,
     "start_s": 0.0,
     "start_spacing": 22.0,   # 스타트 그리드: 플레이어 뒤로 NPC 간격(px along path)
     "lane_width": 30.0,      # 상/하 차선 오프셋(경로 법선 방향, 월드 px) = 도로 레인 1개 폭
@@ -887,13 +1367,12 @@ RACING_DEFAULTS = {
     "road_border_color": [40, 40, 46],  # 도로 가장자리 테두리색
     "road_border_px": 3.0,              # 테두리 두께(월드 px)
     "laps": 3,
-    "max_speed": 200.0,      # 직선 최고속 (월드 px/s)
-    "min_corner_speed": 50.0,
+    "max_speed": 200.0,      # 직선 최고속 (월드 px/s, 레일 호장 진행)
+    "min_corner_speed": 50.0,  # 급커브에서도 이 속도 이하로 안 떨어짐
     "accel": 80.0,           # 출발·가속 (서서히 붙는 느낌)
-    "brake": 40.0,           # 코너 감속
-    "corner_brake": 1.4,     # 앞 꺾임(rad)에 비례한 목표속도 감소
-    "corner_lookahead_px": 90.0,  # 앞 경로점 chase 거리(클수록 일찍 돌기 시작)
-    "turn_rate_rad": 2.2,    # 헤딩이 목표 방향으로 따라가는 각속도 — 코너 관성
+    "brake": 40.0,           # 목표속도보다 빠를 때 감속
+    "corner_brake": 1.4,     # 앞 곡률(rad)에 비례한 목표속도 감소
+    "corner_lookahead_px": 90.0,  # 앞쪽 곡률을 미리 보는 거리(클수록 일찍 감속)
     "lane_lerp": 4.2,        # 차선 목표로 붙는 속도
     # 같은 레인에 다른 레이서가 이 경로거리(px) 이내면 진입 불가(겹침 방지)
     "lane_occupy_s": 40.0,
@@ -916,8 +1395,10 @@ RACING_DEFAULTS = {
     "lane_btn_alpha": 128,            # 반투명 (~50%)
     "lane_btn_margin_x_frac": 0.03,   # (레거시·폴백) 화면 왼쪽 여백
     "lane_btn_center_y_frac": 0.55,   # (레거시·폴백) 세로 중심
-    "path_pull": 2.2,        # 경로로 끌어당기는 힘(작을수록 코너에서 바깥으로 더 나감)
-    "path_soft_follow": 0.5, # (레거시·미사용) path_pull 사용
+    # (레거시·미사용) 예전 자유체 관성 주행용. 레일 고정 후 무시. world_data 옛 키 호환용으로만 남김.
+    "turn_rate_rad": 2.2,
+    "path_pull": 2.2,
+    "path_soft_follow": 0.5,
     "cam_side_sign": -1.0,   # Mode7: heading + sign*π/2 = 진행 방향의 오른쪽에서 비춤
     "cam_oblique_rad": 0.4,  # 비스듬히: 뒤 추적 + 이 각만큼 yaw (≈45°)
     "cam_turn_rate_rad": 3.4,  # 카메라가 플레이어 heading을 따라 도는 각속도(스냅 방지)
@@ -988,10 +1469,20 @@ RACING_DEFAULTS = {
     "summon_flash_sec": 1.6,
     # --- 레이스 탑승 애니 (몸=seat_idle + 뒤쪽 자벌레 underlay) ---
     # 에셋: assets/images/character/racing/<inchworm_anim>_left/
-    # 자벌레 초당 프레임은 r.speed 에 비례 (0→정지, max_speed→inchworm_fps_at_max)
+    # 가속·정속(crawl): 자벌레 fps ∝ r.speed (0→정지, max_speed→inchworm_fps_at_max)
+    #   프레임 1~coast = 관성(속도 유지), 이후 프레임 = 가속(속도 추가). 자벌레 구부림→펼침.
+    # 감속(slide): fps는 속도에 맞춰 느려지다 inchworm_slide_freeze_sec 후 프레임 고정(미끄러짐)
+    # 다시 가속할 때까지 frozen 유지. 물리 속도는 그대로 감속.
     "inchworm_anim": "moveinchworm_racing",  # load_racing_overlay_frames 애니 세트명
     "inchworm_fps_at_max": 14.0,             # 최고속(max_speed)일 때 자벌레 프레임/초
     "inchworm_speed_eps": 1.0,               # 이 속도(px/s) 이하면 애니 완전 정지(fps=0)
+    "inchworm_drive_band": 1.0,              # target_spd 대비 이 이내면 hold(가속/감속 판정 데드존)
+    "inchworm_slide_freeze_sec": 1.0,        # 감속 시작 후 이 시간 지나면 애니 고정(미끄러짐)
+    "inchworm_coast_frames": 4,              # 앞 N프레임(1~N)=관성 유지, 나머지=가속 펄스
+    "inchworm_thrust_accel_mul": 2.0,        # 가속 프레임에만 쓰이므로 평균 가속 보정 배율
+    "inchworm_launch_fps": 5.0,              # 정지→출발 시 최소 자벌레 fps (프레임 게이트 시동)
+    # 자벌레 0~7번 프레임별 seat_idle 상승량(px). 화면 Y좌표에서는 이 값을 빼서 몸만 위로 올린다.
+    "inchworm_seat_lift_px": [8, 12, 16, 20, 24, 20, 16, 12],
     # --- 메뉴: 맵·랩·난이도 ---
     # map_pick: bg_circuit01~04. 월드 키가 bg_circurt* 이면 aliases 로 매칭.
     "map_pick": [
@@ -1017,25 +1508,39 @@ RACING_DEFAULTS = {
     "mode7_quality_scales_android": {"high": 1.0, "medium": 0.72, "low": 0.50, "lowest": 0.35},
 }
 
-# 레이스 난이도 — NPC AI 레인 변경 주기·속도 배율
+# 레이스 난이도 — NPC 속도 + 레인 AI(아이템 반응)
+# npc_speed_mul: NPC 최고속 배율
+# ai_lane_min/max: 레인 판단 주기(초). 짧을수록 아이템·위협에 빨리 반응
+# ai_look_ahead_s: 앞쪽 아이템을 보는 호장 거리(px)
+# ai_react_chance: 아이템 신호를 따를 확률(낮으면 자주 무시 → 쉬움)
+# ai_idle_lane_chance: 앞 아이템이 없을 때 랜덤 레인 변경 확률
 RACING_DIFFICULTY = {
     "easy": {
         "label": "쉬움",
-        "npc_speed_mul": 0.82,
+        "npc_speed_mul": 0.9,
         "ai_lane_min": 2.0,
         "ai_lane_max": 3.8,
+        "ai_look_ahead_s": 90.0,
+        "ai_react_chance": 0.60,
+        "ai_idle_lane_chance": 0.35,
     },
     "normal": {
         "label": "보통",
         "npc_speed_mul": 1.0,
-        "ai_lane_min": 1.2,
-        "ai_lane_max": 3.0,
+        "ai_lane_min": 1.1,
+        "ai_lane_max": 2.4,
+        "ai_look_ahead_s": 150.0,
+        "ai_react_chance": 0.78,
+        "ai_idle_lane_chance": 0.12,
     },
     "hard": {
         "label": "어려움",
-        "npc_speed_mul": 1.18,
-        "ai_lane_min": 0.55,
-        "ai_lane_max": 1.5,
+        "npc_speed_mul": 1.00,
+        "ai_lane_min": 0.35,
+        "ai_lane_max": 0.9,
+        "ai_look_ahead_s": 220.0,
+        "ai_react_chance": 0.96,
+        "ai_idle_lane_chance": 0.04,
     },
 }
 
@@ -1098,13 +1603,217 @@ RACING_ITEM_TYPES = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# 황소개구리 보스전 (activities/bullfrog) — 전역 기본값
+# 맵별 덮어쓰기: world_data.json → [맵ID].bullfrog
+# 진입: bg_jjangpu 이벤트존 → MAP bg_pond01 → start_bullfrog
+# 퇴장: result.quit + return_map → ev_bullfrog_exit → return_from_bullfrog
+# ---------------------------------------------------------------------------
+BULLFROG_DEFAULTS = {
+    # 기본 아레나 맵 ID (320×240 고정 화면)
+    "default_map_id": "bg_pond01",
+    # 세이브·강제종료 시 돌아갈 맵/좌표 (flow.resolve_activity_arena_exit)
+    "exit_map": "bg_jjangpu",
+    "exit_pos": [816.0, 2304.0],
+    # 클리어 시 save_patch / win_flag 키
+    "story_win_flag": "progress_bullfrog_win",
+    # True면 보스 전투 없이 연꽃잎 점프만 (단계별 제작용). False면 물방울·반격 전투 ON
+    "combat_enabled": True,
+    # --- 타일 그리드 (논리 320×240 기준) ---
+    # 화면 10×7.5타일 중 여백: 좌 32 / 우 32 / 위 16 → 플레이 그리드 8×7=56칸
+    # 중앙 boss 4×3=12칸 제외 → 연꽃잎 44칸. 아래쪽은 16+7*32=240으로 여백 없음
+    "tile_size": 32,
+    "grid_cols": 8,
+    "grid_rows": 7,
+    "grid_origin_x": 32.0,   # 좌 여백 32px
+    "grid_origin_y": 16.0,   # 위 여백 16px (배경·오브젝트 배치 공간)
+    # 황소개구리 점유 타일 (col,row) 좌상단 + 폭·높이(칸)
+    "boss_col": 2,
+    "boss_row": 2,
+    "boss_w": 4,
+    "boss_h": 3,
+    # 플레이어 시작 타일 (연꽃잎 칸). 화면 밖에서 이 칸으로 뛰어 들어옴
+    "start_col": 0,
+    "start_row": 6,
+    # 카메라 고정 중심 (아레나 / 게임 화면)
+    "cam_fixed": [160.0, 120.0],
+    # 인트로 카메라: 맵 상단(풍경) → cam_fixed(게임 장소)로 이동 후 캐릭터 등장
+    # intro_cam_from 생략 시 [cam_fixed.x, intro_cam_from_y]
+    "intro_cam_from": None,
+    "intro_cam_from_y": 60.0,   # 세로로 긴 맵(bg_pond01=480) 상단 쪽
+    "intro_cam_hold_sec": 0.8,  # 상단에서 머무는 시간
+    "intro_cam_pan_sec": 3.5,   # 상단 → 아레나 이동 시간
+    # 논리 320맵을 화면에 맞추기 — world_zoom 2.0 (AUTO_OUTPUT → UPSCALED 320)
+    "world_zoom_auto": True,
+    # arena_world_zoom: 아레나 진입 시 목표 월드 줌 (2.0 = 타일 32px가 화면 1칸)
+    "arena_world_zoom": 2.0,
+    # 반격 prep(숙이기) 중 플레이어 중심 확대 — 야구 초강력타격과 동일 계열
+    # (UPSCALE_320+줌2 상태에서 val=4 → 체감 2배 확대, 점프 시작 시 arena_world_zoom으로 복귀)
+    "counter_zoom_value": 4.0,
+    "counter_zoom_in_sec": 0.12,
+    "counter_zoom_restore_sec": 0.12,
+    "counter_zoom_cam_dur_sec": 0.12,
+    # --- 에셋 키 (폴더: assets/images/character/<name>/) ---
+    # bullfrog: idle / jump / splash / beattacked / lose
+    "bullfrog_char": "bullfrog",
+    # frog01: idle / jump — 반격 도움 개구리
+    "ally_frog_char": "frog01",
+    # 연꽃잎 3종(32×32). 기본 표시=land 루프, 캐릭터 착지 시 hit 1회 후 land 복귀
+    # 폴더: character/lotusleaf1|2|3/land_left/ , hit_left/
+    "lotus_leaf_sets": ["lotusleaf1", "lotusleaf2", "lotusleaf3"],
+    # 연꽃잎은 바닥에 누운 타일 (야구 bbzone과 동일 — sprite_tilt 0 = 원근에 붙음)
+    "lotus_sprite_tilt": 0.0,
+    # hit 애니 길이(초). 0이면 프레임수/anim_fps 로 자동
+    "leaf_hit_sec": 0.0,
+    # 물방울 — fall(낙하) / impact(바닥 충돌·퍼짐)
+    # waterdrop_char: character/ 폴더 캐릭터 방식 (fall_left, impact_left 서브폴더)
+    "waterdrop_char": "waterdrop",
+    # waterdrop_fx: 낙하 애니 (assets/images/fx/<name>/). 설정 시 fall에 우선
+    "waterdrop_fx": "waterdrop01",
+    "waterdrop_fx_dir": "assets/images/fx/waterdrop01",
+    # waterdrop_impact_fx: 착지 퍼짐 애니. 설정 시 impact에 우선
+    "waterdrop_impact_fx": "waterdrop02",
+    "waterdrop_impact_fx_dir": "assets/images/fx/waterdrop02",
+    # wave01 — 물결 FX. 폴더: assets/images/fx/wave01/wave01_0.png …
+    "wave_fx": "wave01",
+    "wave_fx_dir": "assets/images/fx/wave01",
+    # splash01 — 착수 물튀김 (공격 착수 / 반격 후 낙하 공통)
+    # splash02 준비되면 splash_counter_fx 만 바꾸면 됨
+    # 폴더: assets/images/fx/splash01/
+    "splash_attack_fx": "splash01",
+    "splash_attack_fx_dir": "assets/images/fx/splash01",
+    "splash_counter_fx": "splash01",
+    "splash_counter_fx_dir": "assets/images/fx/splash01",
+    # splash 위치/속도 보정
+    # offset_y: 양수=아래, 음수=위
+    "splash_fx_fps": 4.0,
+    "splash_attack_offset_y": -30.0,
+    "splash_counter_offset_y": -30.0,
+    # 공격 착수: 물튀김 + 라이트블루 화면 페이드(물방울에 가려짐) 후 그림자→낙하
+    "splash_fade_in_sec": 1.0,
+    "splash_fade_hold_sec": 0.5,
+    "splash_fade_out_sec": 1.5,
+    "splash_fade_color": [160, 210, 255],
+    "splash_fade_alpha_max": 255,
+    # --- 전투 밸런스 ---
+    # --- 진행 구조 ---
+    # 1차·2차·3차 병렬 물방울 = 1턴(splash 1회)
+    # 1턴→2턴→3턴(회피 성공) = 1세트 → 반격 기회
+    # 1세트→2세트→3세트(반격 성공) = 게임 클리어
+    # sets_to_win: 반격 성공(세트 클리어) 횟수 — 이만큼 성공하면 승리
+    "sets_to_win": 3,
+    # dodges_before_counter: 세트 안 반격 기회까지 필요한 "턴 회피 성공" 수
+    # (물방울에 안 맞고 버틴 턴 수. 피격은 카운트되지 않음)
+    # attacks_before_counter 는 구버전 호환 별칭
+    "dodges_before_counter": 3,
+    "attacks_before_counter": 3,
+    # player_lives: 물방울에 맞으면 1 감소, 0이면 패배
+    "player_lives": 3,
+    # --- 물방울 다단 웨이브 (일반 공격 1회 = splash 1턴, 병렬) ---
+    # 각 차는 독립 타이머: 그림자 예고 → 그 차 물방울 낙하.
+    # n차 그림자 시작 시각 = (n-1) * drop_wave_gap_sec.
+    # 예) gap=2, shadow=2.5 → t0:1차그림자 → t2:2차그림자 → t2.5:1차낙하 → t4:3차그림자 → t4.5:2차낙하 …
+    # drop_wave_count: 한 턴에 띄울 병렬 웨이브 수 (반격 실패 전타일 패널티는 1파 고정)
+    "drop_wave_count": 3,
+    # drop_wave_gap_sec: 다음 차 그림자가 뜨기까지의 간격(초). 시험값 2.0
+    "drop_wave_gap_sec": 2.0,
+    # safe_tiles_by_set: 웨이브마다 "물방울이 안 떨어지는" 연꽃잎 개수 (난이도↑ = 수↓)
+    # 액션성은 다단 회피로 올리고, 칸 수는 넉넉히 둬 회피 난이도는 낮춤.
+    # 배치는 완전 랜덤이 아니라 맨해튼 거리 최대화로 화면 전체에 골고루 분산.
+    "safe_tiles_by_set": [16, 14, 12],
+    # shadow_sec_by_set: 각 차 그림자가 떠 있는 시간(초). 짧을수록 그 차 낙하가 빨리 옴
+    # (페이드인·아웃 시간 포함 — 양끝 shadow_fade_sec 동안 서서히 나타나고 사라짐)
+    "shadow_sec_by_set": [1.2, 1.2, 1.2],
+    # shadow_fade_sec: 물방울 그림자 힌트 페이드인/아웃 각각 소요 시간(초)
+    "shadow_fade_sec": 0.3,
+    # 반격 실패(전타일 낙하) 그림자 예고 — 피할 수 없으므로 짧게 (단파)
+    "counter_miss_shadow_sec": 0.5,
+    # 황소개구리 일반 공격 1회: jump1(도약) → jump2(공중 대기) → jump3(복귀) → splash
+    "boss_jump1_sec": 0.5,
+    "boss_jump2_sec": 0.5,
+    "boss_jump3_sec": 0.5,
+    # (레거시) 공격 splash 페이즈는 splash_fade_in+hold+out 합으로 대체
+    "boss_splash_sec": 2.4,
+    # 반격 창: jump1(도약) 후 jumpfly를 counter_window_sec 끝날 때까지 유지 (창 중 하강 없음)
+    # boss_jumpfly_sec 는 프레임 진행 스케일용(애니 길이 느낌). 체공 유지는 counter_window_sec.
+    "boss_jumpfly_sec": 3.0,
+    # 일반/반격 체공 높이 (월드 높이 px)
+    "boss_jump_height": 80.0,
+    "boss_jumpfly_height": 80.0,
+    # 보스가 공중에 있을 때 화면 틸트 강도 (1.0=평평, 작을수록 더 강함)
+    "boss_jump_tilt_factor": 0.30,
+    # 틸트가 들어오고 빠지는 보간 시간(초)
+    "boss_tilt_in_sec": 0.25,
+    "boss_tilt_out_sec": 0.25,
+    # 일반 공격 사이 휴식(초): 점프→다이빙→물방울 뒤 다음 점프까지
+    "attack_interval_sec": 5.0,
+    # 3회 공격 후 반격 예고: frog01 등장까지 / 등장 후 특수 점프까지
+    "counter_spawn_delay_sec": 3.0,
+    "counter_ready_delay_sec": 3.0,
+    # 물방울 낙하·충돌 연출 시간
+    "drop_fall_sec": 0.5,      # 기본 0.28 → 1.5× 느리게 (waterdrop01 fx 기준)
+    "drop_impact_sec": 1.0,    # waterdrop02(5프레임) 1회 재생 분량
+    # 물방울 낙하 시작 높이 (월드 좌표 기준, 양수 = 화면 위쪽 밖)
+    # 카메라 뷰 높이보다 크면 화면 밖에서 시작
+    "drop_start_height": 200.0,
+    # 물방울 낙하 애니 fps (0 = 전역 anim_fps 사용)
+    "drop_anim_fps": 5.0,       # 기본 anim_fps(10) 절반
+    # 반격: 특수 점프 창 동안 frog01 타일 착지 → 반격 시퀀스 진입
+    # (창 동안 보스는 jumpfly 체공 유지. 이 값을 늘리면 반격 가능 시간도 늘어남)
+    "counter_window_sec": 3.0,
+    # frog01 착지 후 idle 첫 프레임 고정(숙이기) 대기 — 줄이면 바로 같이 점프
+    "counter_prep_sec": 1.2,
+    # 보스 배(중앙)로 뛰어오르는 점프 / 원래 타일 복귀 점프 (frog01 제자리 점프도 동일 길이)
+    "counter_ascent_sec": 0.8,
+    "counter_return_sec": 0.8,
+    # frog01이 플레이어를 밀어줄 때 제자리 점프 높이 (없으면 player_jump_height)
+    "ally_boost_jump_height": 30.0,
+    # 플레이어 tickle · 보스 down 전환은 여기부터 (반격 창/상승 중에는 jumpfly 유지)
+    "tickle_sec": 1.2,
+    # 보스 체공 높이보다 이만큼 낮게 = 배 위치
+    "tickle_belly_height_below": 5.0,
+    # 반격 성공 후 보스 하강(down) → sink → (잠수) → emerge
+    "boss_down_sec": 1.0,
+    "boss_counter_descend_sec": 0.55,
+    "sink_sec": 1.0,
+    "submerged_sec": 1.0,
+    "rise_sec": 1.0,
+    # 플레이어 타일 점프(인접 1칸) 시간·높이 (기존 0.22/14 → 1.5배)
+    "player_jump_sec": 0.4,
+    "player_jump_height": 25.0,
+    # 착지 후 다음 점프까지 쿨타임(초)
+    "player_land_cooldown_sec": 0.05,
+    # 착지 바운스: 연꽃잎이 가라앉았다가 튕기는 느낌. 휴식 발점 기준 Y오프셋(px, +아래)
+    # 프레임 간격은 anim_fps (기본 10 → 0.1초/칸)
+    "player_land_bob_y": [3, 1, 0, 0, -3, -1],
+    # 인트로: 화면 밖에서 시작 타일로 뛰어 들어오는 시간
+    "intro_enter_sec": 0.5,
+    # 착지 후 큰 타이틀("게임 시작!") 표시 시간
+    "intro_title_sec": 1.5,
+    "intro_title_text": "게임 시작!",
+    # 타이틀 끝난 뒤 첫 공격까지 쿨타임(초)
+    "intro_cooldown_sec": 3.0,
+    # 피격 — falldown 애니 총 길이(초). 끝나면 idle 복귀 후 진행
+    "falldown_sec": 2.0,
+    # 프레임별 지속시간(초) 목록. falldown은 2프레임: [0.5, 1.5]
+    # 합계가 falldown_sec 와 다르면 falldown_sec 가 우선 (비율 유지로 스케일)
+    "falldown_frame_sec": [0.5, 1.5],
+    # (구버전 호환) falldown_sec 없을 때 사용
+    "hit_stun_sec": 1.0,
+    # 결과 화면 유지 후 자동 퇴장
+    "result_hold_sec": 2.2,
+    # 애니 FPS (에셋 있을 때)
+    "anim_fps": 10.0,
+}
+
 # 시크릿 상자·소환 시 실제로 나올 수 있는 효과 풀
 RACING_MYSTERY_EFFECT_POOL = ("speed", "slow", "swap")
-# 추첨 가중치 — 기본 1.0, 위치 교환(swap)은 다른 아이템의 30%
+# 추첨 가중치 — 시크릿 룰렛·소환 아이템 공통 (_pick_mystery_effect)
+# 기본 1.0, 위치 교환(swap)은 더 희귀하게 (예전 0.3 → 0.12 ≈ 5.7%)
 RACING_MYSTERY_EFFECT_WEIGHTS = {
     "speed": 1.0,
     "slow": 1.0,
-    "swap": 0.3,
+    "swap": 0.12,
 }
 
 # 차선 문자 → 경로 법선 오프셋 부호 (racing.LANE_*)
@@ -1166,9 +1875,17 @@ FISHING_PONDS = {
 # UI 폰트 레지스트리: 논리 이름 → 프로젝트 루트 기준 .ttf 경로.
 # 값이 None 이거나 파일이 없으면 런타임에서 pygame 기본 폰트를 씁니다.
 # 에디터 FONT 창의「폰트 종류」는 이 키(default/dialog/logo)를 고릅니다.
+# 폰트 파일은 assets/fonts 폴더에 있습니다.
+# cafe24ssuround(16).ttf
+# dunggeunmo(8).ttf
+# galmuri11(8).ttf
+# mulmaru(16).ttf
+# NanumGothic.ttf
+# Pinkfong Baby Shark Font_ Bold.ttf
+
 UI_FONT_FILES = {
-    "default": "assets/fonts/NanumGothic.ttf",
-    "dialog": "assets/fonts/NanumGothic.ttf",
+    "default": "assets/fonts/mulmaru(16).ttf",
+    "dialog": "assets/fonts/mulmaru(16).ttf",
     "logo": "assets/fonts/Pinkfong Baby Shark Font_ Bold.ttf",
 }
 
@@ -1187,7 +1904,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "label": "대화 본문",
         "desc": "SAY 대사 텍스트(텍스트박스 안)",
         "font_key": "dialog",
-        "size_320": 10,
+        "size_320": 12,
         "color": (0, 0, 0),
         "outline_enabled": True,
         "outline_px_320": 1,
@@ -1213,7 +1930,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "label": "일반 UI / 오버레이",
         "desc": "OVERLAY_UI 버튼·문구, 나가기 확인 등",
         "font_key": "default",
-        "size_320": 14,
+        "size_320": 12,
         "color": (0, 0, 0),
         "outline_enabled": True,
         "outline_px_320": 1,
@@ -1226,7 +1943,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "label": "오브젝트 라벨",
         "desc": "맵 오브젝트 text_label (TV 등)",
         "font_key": "default",
-        "size_320": 16,
+        "size_320": 12,
         "color": (0, 0, 0),
         "outline_enabled": True,
         "outline_px_320": 1,
@@ -1265,7 +1982,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "label": "레이스 HUD",
         "desc": "레이스 메뉴·카운트다운·완주 문구",
         "font_key": "default",
-        "size_320": 14,
+        "size_320": 12,
         "color": (0, 0, 0),
         "outline_enabled": True,
         "outline_px_320": 1,
@@ -1291,7 +2008,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "label": "화면 전환 자막",
         "desc": "SCREEN 스텝 hold 텍스트",
         "font_key": "default",
-        "size_320": 14,
+        "size_320": 12,
         "color": (0, 0, 0),
         "outline_enabled": True,
         "outline_px_320": 1,
@@ -1327,6 +2044,35 @@ CONFIG["UI_FONT_PROFILES"] = {
 
 
 
+
+# ---------------------------------------------------------------------------
+# 가상(파생) 캐릭터 애니 세트 — 디스크에 <state>_left/ 폴더가 없을 때
+# 기존 세트를 변환해 런타임 생성. 실제 폴더가 있으면 폴더가 우선.
+# 이벤트 ACTION_ANIM / 에디터 / 미니게임에서 동일하게 사용.
+# ---------------------------------------------------------------------------
+# frames: 프레임별 소스 지정
+#   source: 원본 세트명 (idle, run, seat_idle …)
+#   index: 프레임 번호 (없으면 전체 세트)
+#   rotate_cw_deg: 시계방향 회전(도). 90 지원
+#   align_feet: True면 원본 발(하단 중앙)이 결과 하단 중앙에 오도록 패딩
+#   offset_y: 시각 Y 오프셋(원본 px). 양수=화면 아래, 음수=위 (발 월드 좌표는 유지)
+# source_set: 세트 전체를 동일 변환으로 복사할 때
+CHAR_DERIVED_ANIM_SETS = {
+    # 피격 쓰러짐: seat_idle_4 → idle_4 (각 시계방향 90° + 발 정렬)
+    "falldown": {
+        "offset_y": 20,
+        "frames": [
+            {"source": "seat_idle", "index": 4, "rotate_cw_deg": 90, "align_feet": True},
+            {"source": "idle", "index": 4, "rotate_cw_deg": 90, "align_feet": True},
+        ],
+    },
+    # 간질: run 세트 전체 시계방향 90° + 발 정렬
+    "tickle": {
+        "source_set": "run",
+        "rotate_cw_deg": 90,
+        "align_feet": True,
+    },
+}
 
 # path 규칙 (object_defs.json 주석용 요약):
 # - 단일: images/object/tree1.png
@@ -1496,6 +2242,12 @@ UI_ACTIVITY_DEFAULTS = {
     "fishing": {
         "hud_max_px": 14,
         "success_max_px": 18,
+    },
+    "bullfrog": {
+        "hud_px_320": 11,              # 세트·목숨 HUD
+        "announce_px_320": 16,         # 중앙 안내 문구
+        "result_px_320": 22,           # 승리/패배
+        "title_px_320": 32,            # 시작 타이틀(게임 시작!)
     },
 }
 

@@ -2,7 +2,7 @@
 activities.baseball — 야구장 맵 필드 타격 미니게임 (어린이 홈런 대결).
 
 [규칙]
-  - 5타석, 비거리(미터) 전 타 합산으로 승부 (NPC 대전 / 2P 교대).
+  - 기본 타석 수(swings, 보통 5). 플레이 스타일에 따라 승부 방식이 갈림.
   - 1단계: 부채꼴 방향 게이지 — 화살표=타구 방향(±소폭 변동). fan_half_deg_auto 시 마스크 파울라인에 맞춤.
   - 2단계: 가로 파워 게이지 — 가운데=강타. 1/3·2/3 함정=빗맞음(머리 뒤). 파울=착지 마스크만.
   - 타구 후: 공은 포물선(높이), 그림자는 지면 직선 → 입체감.
@@ -14,8 +14,12 @@ activities.baseball — 야구장 맵 필드 타격 미니게임 (어린이 홈�
   에셋: assets/minigames/baseball/ (없으면 도형 폴백)
 
 [모드 — 메뉴]
-  record_1p  — 1인: 캐릭터 선택 → 5타 → HIGH SCORE → 메뉴
-  record_2p  — 2인: 1P/2P 캐릭터 선택 → 각 5타 → 승패 → 메뉴
+  혼자서 하기
+    · NPC와 하기(npc_vs / npc_alt) — 플레이어↔NPC 번갈아 타격, 비거리 승점 + 합계비거리 보너스
+    · 기록 갱신하기(record_1p / solo_record) — 5타 합산 → HIGH SCORE
+  둘이서 하기
+    · 번갈아 하기(record_2p / duo_alt) — 1P↔2P 한 타씩 번갈아, 승점 대결
+    · 모아서 하기(record_2p / duo_batch) — 각자 횟수만큼 전부 친 뒤 HR+합계비거리 승부
   story/demo — 이벤트·데모용 (events.json mode 파라미터)
 """
 
@@ -83,6 +87,8 @@ from .fishing import _world_to_screen
 
 # --- 상태 ---
 ST_MENU = "menu"
+ST_MENU_SOLO = "menu_solo"  # 혼자서 하기 — NPC / 기록 갱신
+ST_MENU_DUO = "menu_duo"  # 둘이서 하기 — 번갈아 / 모아서
 ST_RECORDS = "records"
 ST_DIFFICULTY = "difficulty"
 ST_PICK_P2 = "pick_p2"
@@ -104,10 +110,44 @@ ST_REPLAY_ASK = "replay_ask"
 ST_LEADERBOARD = "leaderboard"
 ST_QUIT = "quit"
 
+# 메뉴·캐릭터 선택 등 UI 오버레이 상태 (필드 플레이 아님)
+_MENU_OVERLAY_STATES = (
+    ST_MENU,
+    ST_MENU_SOLO,
+    ST_MENU_DUO,
+    ST_DIFFICULTY,
+    ST_PICK_CHAR,
+    ST_PICK_P2,
+    ST_RECORDS,
+    ST_LEADERBOARD,
+    ST_QUIT,
+)
+
 MODE_STORY = "story"
 MODE_RECORD_1P = "record_1p"
 MODE_RECORD_2P = "record_2p"
+MODE_NPC_VS = "npc_vs"  # 1P vs NPC (번갈아 승점)
 MODE_DEMO = "demo"
+
+# 플레이 스타일 — 같은 mode 안에서도 승부 규칙을 나눔
+PLAY_SOLO_RECORD = "solo_record"  # 기록 갱신 (기존 1P)
+PLAY_NPC_ALT = "npc_alt"  # NPC와 번갈아
+PLAY_DUO_ALT = "duo_alt"  # 2P 번갈아 타격·승점
+PLAY_DUO_BATCH = "duo_batch"  # 2P 모아서 (기존 각자 전부 친 뒤 비교)
+
+# 캐릭터 선택 그리드 — NPC 랜덤 슬롯
+CHAR_PICK_RANDOM = "?"
+
+# NPC AI 비거리 밴드 (0~100 스케일 → max_carry 비율)
+# a:0~20  b:21~40  c:41~60  d:61~80  e:81~100
+_NPC_BAND_KEYS = ("foul", "a", "b", "c", "d", "e")
+_NPC_BAND_FRAC = {
+    "a": (0.00, 0.20),
+    "b": (0.21, 0.40),
+    "c": (0.41, 0.60),
+    "d": (0.61, 0.80),
+    "e": (0.81, 1.00),
+}
 
 BASEBALL_DIFFICULTY_OPTIONS = [
     ("easy", "짱짱(초급)"),
@@ -309,6 +349,8 @@ class BaseballActivity(BaseFieldActivity):
         self._rng = random.Random()
 
         self.mode = MODE_RECORD_1P
+        # 메뉴에서 고른 플레이 규칙 (solo_record / npc_alt / duo_alt / duo_batch)
+        self._play_style = PLAY_SOLO_RECORD
         self._story_cleared = False
         self._win_flag = str(_cfg("story_win_flag", "progress_baseball_story"))
         self._seed_flag = str(_cfg("story_seed_flag", "progress_baseball_seed"))
@@ -346,10 +388,12 @@ class BaseballActivity(BaseFieldActivity):
         self._char_idle_cache: Dict[str, Dict[str, List]] = {}
         self._char_anim_cache: Dict[str, List] = {}
         self._char_pending_ix: Optional[int] = None
-        self._char_pick_phase = "solo"  # solo | 1p | 2p
+        self._char_pick_phase = "solo"  # solo | 1p | 2p | npc
+        self._char_opts_base: List[str] = []  # "?" 제외한 선택 풀
         self._p1_char = ""
         self._p2_char = ""
         self._char_locked: set[str] = set()
+        self._npc_random_pick = False  # "?" 로 뽑았는지 (표시용)
         self._records_view = False
         self._orig_char_name = ""
         self._return_map = ""
@@ -366,6 +410,11 @@ class BaseballActivity(BaseFieldActivity):
         self._p2_hr = 0
         self._npc_dists: List[float] = []
         self._batting_as_p2 = False
+        # 번갈아 모드 승점 (라운드 비거리 비교 + 합계비거리 보너스)
+        self._p1_pts = 0
+        self._p2_pts = 0
+        # 2P/번갈아 페이드 전환 시 목표 타자 (True=2P, False=1P)
+        self._switch_batter_to_p2 = True
         self._save_data: Dict[str, Any] = {}
         self._difficulty_id = BASEBALL_DIFFICULTY_DEFAULT
 
@@ -572,6 +621,7 @@ class BaseballActivity(BaseFieldActivity):
             if cid and cid in CHAR_ASSETS and cid not in opts8:
                 opts8.append(cid)
         self._char_opts = opts8[:8]
+        self._char_opts_base = list(self._char_opts)
 
         # 히든 잠금: save_data.flags.unlock_<cid> 가 없으면 선택 불가(표시는 함)
         self._char_locked = set()
@@ -618,6 +668,7 @@ class BaseballActivity(BaseFieldActivity):
             self._start_story_match()
         elif req_mode == MODE_RECORD_1P:
             self.mode = MODE_RECORD_1P
+            self._play_style = PLAY_SOLO_RECORD
             self.state = ST_PICK_CHAR
             self._char_pick_phase = "solo"
             self._msg = "1P 캐릭터 선택"
@@ -625,13 +676,23 @@ class BaseballActivity(BaseFieldActivity):
             self._layout_menu_rects(lw, lh)
         elif req_mode == MODE_RECORD_2P:
             self.mode = MODE_RECORD_2P
+            self._play_style = PLAY_DUO_BATCH
             self.state = ST_PICK_CHAR
             self._char_pick_phase = "1p"
             self._msg = "1P 캐릭터 선택"
             lw, lh = self._logical_screen_size()
             self._layout_menu_rects(lw, lh)
+        elif req_mode == MODE_NPC_VS:
+            self.mode = MODE_NPC_VS
+            self._play_style = PLAY_NPC_ALT
+            self.state = ST_PICK_CHAR
+            self._char_pick_phase = "solo"
+            self._msg = "캐릭터 선택"
+            lw, lh = self._logical_screen_size()
+            self._layout_menu_rects(lw, lh)
         else:
             self.mode = MODE_RECORD_1P
+            self._play_style = PLAY_SOLO_RECORD
             self.state = ST_MENU
             self._msg = "메뉴 — 항목을 누르세요"
             lw, lh = self._logical_screen_size()
@@ -756,13 +817,18 @@ class BaseballActivity(BaseFieldActivity):
             "won": bool(self._won),
             "quit": self.state == ST_QUIT,
             "mode": self.mode,
+            "play_style": self._play_style,
             "win_flag": self._win_flag if self._won and self.mode == MODE_STORY else None,
             "win_value": 1,
             "save_patch": save_patch,
             "player_total": self._total_score_m(self._p1_dists),
             "opponent_total": self._total_score_m(
-                self._npc_dists if self.mode != MODE_RECORD_2P else self._p2_dists
+                self._p2_dists
+                if self.mode in (MODE_RECORD_2P, MODE_NPC_VS)
+                else self._npc_dists
             ),
+            "p1_pts": int(self._p1_pts),
+            "p2_pts": int(self._p2_pts),
         }
         if self._return_map and (self._should_return or self.state == ST_QUIT):
             out["return_map"] = self._return_map
@@ -1111,12 +1177,138 @@ class BaseballActivity(BaseFieldActivity):
 
     @staticmethod
     def _match_winner_side(p1_hr: int, p1_tot: float, p2_hr: int, p2_tot: float) -> int:
-        """1=P1 승, -1=P2 승, 0=무승부."""
+        """1=P1 승, -1=P2 승, 0=무승부. (모아서 하기: 홈런 우선, 동점이면 합계비거리)."""
         if int(p1_hr) != int(p2_hr):
             return 1 if int(p1_hr) > int(p2_hr) else -1
         if float(p1_tot) != float(p2_tot):
             return 1 if float(p1_tot) > float(p2_tot) else -1
         return 0
+
+    def _is_alternate_play(self) -> bool:
+        """번갈아 타격·승점 규칙 (2P 번갈아 / NPC와 하기)."""
+        return self._play_style in (PLAY_DUO_ALT, PLAY_NPC_ALT)
+
+    def _is_duo_batch(self) -> bool:
+        """둘이서 모아서 하기 — 각자 횟수만큼 전부 친 뒤 HR+합계 비교."""
+        return self._play_style == PLAY_DUO_BATCH
+
+    def _is_versus_match(self) -> bool:
+        """전광판·대기 상대 등 대결 UI가 필요한 모드."""
+        return self.mode in (MODE_RECORD_2P, MODE_NPC_VS)
+
+    def _opponent_display_name(self) -> str:
+        """대결 상대 표시명 (2P/NPC 캐릭터 UI명)."""
+        if self.mode == MODE_NPC_VS:
+            if self._p2_char and self._p2_char != CHAR_PICK_RANDOM:
+                return self._char_label(self._p2_char)
+            return str(self._npc_name or "NPC").strip() or "NPC"
+        return self._char_label(self._p2_char)
+
+    def _batter_overlay_char(self) -> str:
+        """타격 오버레이에 쓸 현재 타자 캐릭터 ID."""
+        return str(self._current_batter_char() or self._player_char or "")
+
+    def _difficulty_npc_skill(self) -> float:
+        """난이도별 NPC 레거시 스킬 (스토리 일괄 시뮬 폴백)."""
+        did = self._normalize_difficulty_id(self._difficulty_id)
+        fallback = {
+            "easy": float(_cfg("difficulty_easy_npc_skill", 0.45)),
+            "normal": float(_cfg("difficulty_normal_npc_skill", 0.62)),
+            "hard": float(_cfg("difficulty_hard_npc_skill", 0.80)),
+        }.get(did, float(_cfg("npc_skill", 0.62)))
+        try:
+            return max(0.05, min(0.98, float(_cfg(f"difficulty_{did}_npc_skill", fallback))))
+        except (TypeError, ValueError):
+            return max(0.05, min(0.98, float(fallback)))
+
+    def _npc_band_weights(self) -> List[float]:
+        """난이도별 [foul,a,b,c,d,e] 가중치. d 최고·c/e 다음이 기본."""
+        did = self._normalize_difficulty_id(self._difficulty_id)
+        defaults = {
+            "easy": [0.14, 0.20, 0.24, 0.18, 0.14, 0.10],
+            "normal": [0.08, 0.10, 0.12, 0.22, 0.30, 0.18],
+            "hard": [0.04, 0.06, 0.08, 0.20, 0.36, 0.26],
+        }
+        raw = _cfg(f"difficulty_{did}_npc_band_weights", defaults.get(did))
+        out: List[float] = []
+        if isinstance(raw, (list, tuple)) and len(raw) >= 6:
+            for i in range(6):
+                try:
+                    out.append(max(0.0, float(raw[i])))
+                except (TypeError, ValueError):
+                    out.append(0.0)
+        else:
+            out = list(defaults.get(did, defaults["normal"]))
+        s = sum(out)
+        if s <= 1e-9:
+            return list(defaults["normal"])
+        return [x / s for x in out]
+
+    def _npc_ai_roll_band(self) -> str:
+        """가중 랜덤으로 foul/a/b/c/d/e 중 하나."""
+        weights = self._npc_band_weights()
+        r = self._rng.random()
+        acc = 0.0
+        for key, w in zip(_NPC_BAND_KEYS, weights):
+            acc += float(w)
+            if r <= acc:
+                return str(key)
+        return "d"
+
+    def _npc_ai_plan_swing(self) -> Dict[str, Any]:
+        """
+        NPC 한 타 계획.
+        반환: {foul:bool, pop_foul:bool, dir_deg, pwr, carry_px, power_swing:bool, band:str}
+        비거리 0~100 스케일 → max_carry 비율로 환산해 실제 비행에 사용.
+        """
+        band = self._npc_ai_roll_band()
+        fan = max(8.0, float(self._fan_half_deg))
+        if band == "foul":
+            # 파울: 빗맞음(머리 뒤) 또는 방향 파울
+            if self._rng.random() < 0.55:
+                return {
+                    "foul": True,
+                    "pop_foul": True,
+                    "band": band,
+                    "dir_deg": 0.0,
+                    "pwr": 0.2,
+                    "carry_px": 0.0,
+                    "power_swing": False,
+                }
+            # 페어라인 밖 방향
+            side = 1.0 if self._rng.random() < 0.5 else -1.0
+            dir_deg = side * self._rng.uniform(fan * 0.92, fan * 1.15)
+            pwr = self._rng.uniform(0.25, 0.55)
+            return {
+                "foul": True,
+                "pop_foul": False,
+                "band": band,
+                "dir_deg": dir_deg,
+                "pwr": pwr,
+                "carry_px": float(_cfg("foul_carry_px", 20.0)),
+                "power_swing": False,
+            }
+        lo, hi = _NPC_BAND_FRAC.get(band, (0.61, 0.80))
+        # 밴드 안 균등 + 살짝 가우스로 중앙 쪽 편향
+        mid = (lo + hi) * 0.5
+        frac = max(lo, min(hi, self._rng.gauss(mid, (hi - lo) * 0.22)))
+        max_c = max(80.0, float(self._max_carry))
+        carry_px = max_c * float(frac)
+        # 페어 지역 방향 — 장타일수록 가운데로
+        center_bias = 0.35 + 0.45 * float(frac)
+        dir_deg = self._rng.gauss(0.0, fan * (1.0 - center_bias) * 0.55)
+        dir_deg = max(-fan * 0.95, min(fan * 0.95, dir_deg))
+        pwr = max(0.15, min(1.0, float(frac)))
+        power_swing = bool(band == "e" and frac >= 0.88)
+        return {
+            "foul": False,
+            "pop_foul": False,
+            "band": band,
+            "dir_deg": float(dir_deg),
+            "pwr": float(pwr),
+            "carry_px": float(carry_px),
+            "power_swing": power_swing,
+        }
 
     def _bind_field_objects(self, objs) -> None:
         self._ball_item = None
@@ -1262,7 +1454,7 @@ class BaseballActivity(BaseFieldActivity):
         except Exception:
             pass
         if self.state in (ST_PWR_CONFIRM, ST_SWING_PAUSE, ST_POWER_SWING_PAUSE):
-            _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
+            _freeze_baseball_batter_pose(pl, self._batter_overlay_char())
 
     @staticmethod
     def _parse_optional_xy(v) -> Optional[Tuple[float, float]]:
@@ -1318,14 +1510,14 @@ class BaseballActivity(BaseFieldActivity):
         return [(220.0 + ox, 500.0 + oy)]
 
     def _waiting_opponent_char(self) -> str:
-        if self.mode != MODE_RECORD_2P:
+        if self.mode not in (MODE_RECORD_2P, MODE_NPC_VS):
             return ""
         if self._batting_as_p2:
             return str(self._p1_char or self._player_char)
         return str(self._p2_char or "")
 
     def _waiting_opponent_xy(self) -> Optional[Tuple[float, float]]:
-        if self.mode != MODE_RECORD_2P:
+        if self.mode not in (MODE_RECORD_2P, MODE_NPC_VS):
             return None
         px, py = float(self.plate_xy[0]), float(self.plate_xy[1])
         if self._batting_as_p2 and self._p1_wait_pos is not None:
@@ -1369,9 +1561,9 @@ class BaseballActivity(BaseFieldActivity):
             pass
 
     def _draw_waiting_opponent(self, ctx: FieldDrawContext) -> None:
-        if self.mode != MODE_RECORD_2P:
+        if self.mode not in (MODE_RECORD_2P, MODE_NPC_VS):
             return
-        if self.state in (ST_MENU, ST_DIFFICULTY, ST_PICK_CHAR, ST_PICK_P2, ST_RECORDS, ST_LEADERBOARD, ST_QUIT):
+        if self.state in _MENU_OVERLAY_STATES:
             return
         cid = self._waiting_opponent_char()
         pos = self._waiting_opponent_xy()
@@ -1381,10 +1573,33 @@ class BaseballActivity(BaseFieldActivity):
 
     def _scoreboard_text_lines(self) -> List[str]:
         p1 = int(round(self._total_score_m(self._p1_dists)))
-        p2 = int(round(self._total_score_m(self._p2_dists))) if self.mode == MODE_RECORD_2P else 0
-        active = self.state not in (ST_MENU, ST_DIFFICULTY, ST_PICK_CHAR, ST_PICK_P2, ST_RECORDS, ST_LEADERBOARD, ST_MATCH_END, ST_DEMO_RESULT, ST_QUIT)
-        live1 = active and (self.mode != MODE_RECORD_2P or not self._batting_as_p2)
-        live2 = active and self.mode == MODE_RECORD_2P and self._batting_as_p2
+        versus = self._is_versus_match()
+        p2 = int(round(self._total_score_m(self._p2_dists))) if versus else 0
+        active = self.state not in (
+            ST_MENU,
+            ST_MENU_SOLO,
+            ST_MENU_DUO,
+            ST_DIFFICULTY,
+            ST_PICK_CHAR,
+            ST_PICK_P2,
+            ST_RECORDS,
+            ST_LEADERBOARD,
+            ST_MATCH_END,
+            ST_DEMO_RESULT,
+            ST_QUIT,
+        )
+        live1 = active and (not versus or not self._batting_as_p2)
+        live2 = active and versus and self._batting_as_p2
+        # 번갈아: 현재 라운드(1-based). 모아서/기록: 이번 타석 쪽 진행 수
+        if self._is_alternate_play():
+            set_n = min(self._swings_per_side, int(self._swing_ix) + 1)
+            set_line = f"라운드 {set_n}/{self._swings_per_side}"
+            opp = "NPC" if self.mode == MODE_NPC_VS else "2P"
+            return [
+                set_line,
+                f"1P {int(self._p1_pts)}점 합계{p1}m" + (" 경기중" if live1 else ""),
+                f"{opp} {int(self._p2_pts)}점 합계{p2}m" + (" 경기중" if live2 else ""),
+            ]
         return [
             f"세트 {self._swing_ix}/{self._swings_per_side}",
             f"1P 홈런 {int(self._p1_hr)} 합계{p1}m" + (" 경기중" if live1 else ""),
@@ -1434,7 +1649,16 @@ class BaseballActivity(BaseFieldActivity):
         return pygame.Rect(int(left), int(top), int(w), int(h))
 
     def _draw_scoreboards(self, ctx: FieldDrawContext) -> None:
-        if self.state in (ST_MENU, ST_DIFFICULTY, ST_PICK_CHAR, ST_PICK_P2, ST_RECORDS, ST_QUIT):
+        if self.state in (
+            ST_MENU,
+            ST_MENU_SOLO,
+            ST_MENU_DUO,
+            ST_DIFFICULTY,
+            ST_PICK_CHAR,
+            ST_PICK_P2,
+            ST_RECORDS,
+            ST_QUIT,
+        ):
             return
         if not self._scoreboard_objs:
             return
@@ -1738,7 +1962,7 @@ class BaseballActivity(BaseFieldActivity):
         ]
 
     def _current_batter_char(self) -> str:
-        if self.mode == MODE_RECORD_2P:
+        if self._is_versus_match():
             if self._batting_as_p2:
                 return str(self._p2_char or "")
             return str(self._p1_char or self._player_char or "")
@@ -1748,6 +1972,8 @@ class BaseballActivity(BaseFieldActivity):
         self, char_id: Optional[str] = None, *, as_p2: Optional[bool] = None
     ) -> str:
         cid = str(char_id or self._current_batter_char() or "").strip()
+        if self.mode == MODE_NPC_VS and (as_p2 is True or (as_p2 is None and self._batting_as_p2)):
+            return f"{self._opponent_display_name()} 차례!"
         label = self._char_label(cid)
         if self.mode == MODE_RECORD_2P:
             p2 = self._batting_as_p2 if as_p2 is None else bool(as_p2)
@@ -2062,6 +2288,7 @@ class BaseballActivity(BaseFieldActivity):
             self._intro_t = hold
 
     def _start_2p_switch_fade(self) -> None:
+        """타자 교체 페이드 — `_switch_batter_to_p2` 로 1P↔2P 방향 지정."""
         self._clear_scene_freeze(reset_camera=True)
         self._clear_power_swing_fx()
         self._show_rest_ball()
@@ -2084,9 +2311,16 @@ class BaseballActivity(BaseFieldActivity):
         if self._p2_switch_fade_phase == "out":
             self._p2_switch_fade_alpha = int(round(255.0 * (1.0 - left / dur)))
             if left <= 0.0:
-                self._batting_as_p2 = True
-                self._swing_ix = 0
-                self._apply_batter_char(self._p2_char)
+                self._batting_as_p2 = bool(getattr(self, "_switch_batter_to_p2", True))
+                # 모아서 하기: 1P 전부 끝난 뒤 2P 이닝 시작 시에만 타석 카운터 리셋
+                if self._is_duo_batch() and self._batting_as_p2:
+                    self._swing_ix = 0
+                char = (
+                    self._p2_char
+                    if self._batting_as_p2
+                    else (self._p1_char or self._player_char)
+                )
+                self._apply_batter_char(char)
                 hold = max(0.0, _field_num(self.field, "p2_switch_fade_hold_sec", 0.08))
                 if hold > 0.0:
                     self._p2_switch_fade_phase = "hold"
@@ -2112,16 +2346,50 @@ class BaseballActivity(BaseFieldActivity):
 
     def _run_2p_turn_announce_after_switch(self) -> None:
         swing_sec = float(_cfg("announce_swing_sec", 1.0))
+        char = (
+            self._p2_char
+            if self._batting_as_p2
+            else (self._p1_char or self._player_char)
+        )
         self._start_announce(
             [
-                self._turn_announce_step(self._p2_char, as_p2=True),
-                _ann_step(self._swing_announce_text(0), swing_sec),
+                self._turn_announce_step(char, as_p2=self._batting_as_p2),
+                _ann_step(self._swing_announce_text(self._swing_ix), swing_sec),
             ],
             self._begin_player_swing,
         )
 
     def _switch_to_2p_batting(self) -> None:
+        """모아서 하기 — 1P 이닝 종료 후 2P 이닝으로."""
+        self._switch_batter_to_p2 = True
         self._start_2p_switch_fade()
+
+    def _switch_alt_to_p2(self) -> None:
+        """번갈아 하기 — 이번 라운드 2P 타석."""
+        self._switch_batter_to_p2 = True
+        self._start_2p_switch_fade()
+
+    def _switch_alt_to_p1(self) -> None:
+        """번갈아 하기 — 다음 라운드 1P 타석."""
+        self._switch_batter_to_p2 = False
+        self._start_2p_switch_fade()
+
+    def _award_alt_round_point(self) -> str:
+        """방금 끝난 라운드 비거리 비교 → 승점 1. 동점이면 점수 없음."""
+        ix = min(len(self._p1_dists), len(self._p2_dists)) - 1
+        if ix < 0:
+            return ""
+        d1 = float(self._p1_dists[ix])
+        d2 = float(self._p2_dists[ix])
+        p1_name = self._char_label(self._p1_char or self._player_char)
+        p2_name = self._opponent_display_name()
+        if d1 > d2:
+            self._p1_pts += 1
+            return f"{p1_name} 1점!"
+        if d2 > d1:
+            self._p2_pts += 1
+            return f"{p2_name} 1점!"
+        return "동점!"
 
     def _schedule_after_swing(
         self,
@@ -2197,7 +2465,45 @@ class BaseballActivity(BaseFieldActivity):
                 )
             return
 
+        # --- 번갈아 (2P / NPC): 한 타씩 주고받기 → 비거리 승점 ---
+        if self._is_alternate_play():
+            if not self._batting_as_p2:
+                # 1P 타석 종료 → 상대(2P 또는 NPC) 타석 — 페이드 후 타격 연출
+                _start_next_at_plate(
+                    [
+                        _ann_step("", self._bat_cam_return_sec()),
+                        _ann_step("", pause_sec),
+                    ],
+                    self._switch_alt_to_p2,
+                )
+            else:
+                # 상대 타석 종료 → 승점 안내 후 다음 라운드 또는 결과
+                point_txt = self._award_alt_round_point()
+                self._swing_ix += 1
+                point_step = _ann_step(point_txt or "동점!", turn_sec)
+                if self._swing_ix >= self._swings_per_side:
+                    _start_next_at_plate(
+                        [
+                            point_step,
+                            _ann_step("", self._bat_cam_return_sec()),
+                            _ann_step("", pause_sec),
+                            _ann_step("경기 결과!!", end_sec),
+                        ],
+                        self._finish_alt_match,
+                    )
+                else:
+                    _start_next_at_plate(
+                        [
+                            point_step,
+                            _ann_step("", self._bat_cam_return_sec()),
+                            _ann_step("", pause_sec),
+                        ],
+                        self._switch_alt_to_p1,
+                    )
+            return
+
         if self.mode == MODE_RECORD_2P:
+            # 모아서 하기 — 각자 횟수만큼 전부
             if self._swing_ix >= self._swings_per_side:
                 if not self._batting_as_p2:
                     _start_next_at_plate(
@@ -2242,14 +2548,40 @@ class BaseballActivity(BaseFieldActivity):
     # ------------------------------------------------------------------ match flow
 
     def _start_solo_match(self) -> None:
-        """1인 — 캐릭터 선택 후 5타 (NPC 없음)."""
+        """기록 갱신 — 캐릭터 선택 후 N타 (NPC 없음)."""
         self.mode = MODE_RECORD_1P
+        self._play_style = PLAY_SOLO_RECORD
         self._p1_dists = []
         self._p1_hr = 0
+        self._p1_pts = 0
+        self._p2_pts = 0
         self._swing_ix = 0
         self._batting_as_p2 = False
         self._won = False
         self._save_patch = {}
+        self._apply_batter_char(self._p1_char or self._player_char)
+        self._show_rest_ball()
+        self._begin_match_intro(
+            show_turn=True, turn_char=self._p1_char or self._player_char
+        )
+
+    def _start_npc_alt_match(self) -> None:
+        """NPC와 하기 — 플레이어↔NPC 번갈아 타격·승점 (NPC도 스윙·비행 연출)."""
+        self.mode = MODE_NPC_VS
+        self._play_style = PLAY_NPC_ALT
+        self._p1_dists = []
+        self._p2_dists = []
+        self._npc_dists = []
+        self._p1_hr = 0
+        self._p2_hr = 0
+        self._p1_pts = 0
+        self._p2_pts = 0
+        self._swing_ix = 0
+        self._batting_as_p2 = False
+        self._won = False
+        self._save_patch = {}
+        if self._p2_char:
+            self._npc_name = self._char_label(self._p2_char)
         self._apply_batter_char(self._p1_char or self._player_char)
         self._show_rest_ball()
         self._begin_match_intro(
@@ -2267,12 +2599,16 @@ class BaseballActivity(BaseFieldActivity):
         self._begin_match_intro(show_turn=False)
 
     def _start_match_2p(self) -> None:
-        """2인 — 1P·2P 캐릭터 확정 후 교대 5타."""
+        """2인 — 1P·2P 캐릭터 확정 후 시작. `_play_style` 이 alt/batch 를 가름."""
         self.mode = MODE_RECORD_2P
+        if self._play_style not in (PLAY_DUO_ALT, PLAY_DUO_BATCH):
+            self._play_style = PLAY_DUO_BATCH
         self._p1_dists = []
         self._p2_dists = []
         self._p1_hr = 0
         self._p2_hr = 0
+        self._p1_pts = 0
+        self._p2_pts = 0
         self._swing_ix = 0
         self._batting_as_p2 = False
         self._won = False
@@ -2322,6 +2658,10 @@ class BaseballActivity(BaseFieldActivity):
         self._gauge_time_left = lim
 
     def _begin_player_swing(self, *, reset_camera: bool = False) -> None:
+        # NPC 타석이면 자동 타격 연출로
+        if self.mode == MODE_NPC_VS and self._batting_as_p2:
+            self._begin_npc_auto_swing(reset_camera=reset_camera)
+            return
         self._clear_scene_freeze(reset_camera=reset_camera)
         self._clear_power_swing_fx()
         self._show_rest_ball()
@@ -2340,7 +2680,70 @@ class BaseballActivity(BaseFieldActivity):
         self.field_tilt_target = float(_cfg("tilt_compressed", 0.68))
         pl = self._player_ref
         if pl is not None:
-            _sync_baseball_overlay_idle(pl, self._p1_char or self._player_char)
+            _sync_baseball_overlay_idle(pl, self._batter_overlay_char())
+
+    def _begin_npc_auto_swing(self, *, reset_camera: bool = False) -> None:
+        """NPC 타석 — AI가 비거리 밴드를 고르고 스윙·비행 연출까지 진행."""
+        self._clear_scene_freeze(reset_camera=reset_camera)
+        self._clear_power_swing_fx()
+        self._show_rest_ball()
+        self._reset_fielders()
+        self._is_pop_foul = False
+        self._turn_is_player = False
+        self._batting_as_p2 = True
+        self._apply_batter_char(self._p2_char)
+        self.field_tilt_target = float(_cfg("tilt_compressed", 0.68))
+        npc = self._opponent_display_name()
+        self._msg = f"{npc} 타격 {self._swing_ix + 1}/{self._swings_per_side}"
+        pl = self._player_ref
+        if pl is not None:
+            _sync_baseball_overlay_idle(pl, self._batter_overlay_char())
+        plan = self._npc_ai_plan_swing()
+        self._locked_dir_deg = float(plan.get("dir_deg", 0.0))
+        self._locked_pwr = float(plan.get("pwr", 0.5))
+        self._locked_pwr_marker_t = 0.5
+        self._is_power_swing = bool(plan.get("power_swing"))
+        self._update_batter_facing_from_gauge(self._locked_dir_deg)
+        if bool(plan.get("pop_foul")):
+            self._resolve_pop_foul_swing()
+            return
+        if bool(plan.get("foul")) and not bool(plan.get("pop_foul")):
+            # 방향 파울 — 짧은 비행 후 파울 판정
+            self._flight_angle_deg = float(self._locked_dir_deg)
+            self._carry_px = float(plan.get("carry_px") or _cfg("foul_carry_px", 20.0))
+            self._is_foul = True
+            self._is_pop_foul = False
+            self._fence_hit = False
+            self._ground_fence_bounced = False
+            self._planned_home_run = False
+            self._power_swing_pause_t = max(
+                0.25, float(_field_num(self.field, "normal_swing_pause_sec", 0.5))
+            )
+            self.state = ST_SWING_PAUSE
+            return
+        # 페어 타구 — AI 목표 비거리로 비행
+        self._flight_angle_deg = self._resolve_swing_angle(
+            float(self._locked_dir_deg), float(self._locked_pwr)
+        )
+        self._carry_px = float(plan.get("carry_px") or 0.0)
+        self._is_foul = False
+        self._is_pop_foul = False
+        self._fence_hit = False
+        self._ground_fence_bounced = False
+        self._planned_home_run = False
+        if pl is not None:
+            _freeze_baseball_batter_pose(pl, self._batter_overlay_char())
+        if self._is_power_swing:
+            self._start_power_swing_fx()
+            self._power_swing_pause_t = max(
+                0.0, _field_num(self.field, "power_swing_pause_sec", 1.5)
+            )
+            self.state = ST_POWER_SWING_PAUSE
+            return
+        self._power_swing_pause_t = max(
+            0.25, _field_num(self.field, "normal_swing_pause_sec", 0.5)
+        )
+        self.state = ST_SWING_PAUSE
 
     def _begin_pwr_phase(self) -> None:
         self.state = ST_BAT_PWR
@@ -2359,7 +2762,7 @@ class BaseballActivity(BaseFieldActivity):
     def _start_locked_swing_animation(self) -> None:
         pl = self._player_ref
         if pl is not None:
-            _sync_baseball_overlay_swing(pl, self._p1_char or self._player_char)
+            _sync_baseball_overlay_swing(pl, self._batter_overlay_char())
         self.state = ST_SWING
         self._swing_t = max(0.05, _field_num(self.field, "swing_anim_base_sec", 0.45)) / max(0.01, float(self._swing_speed_mul))
         self.field_tilt_target = 1.0
@@ -2379,7 +2782,7 @@ class BaseballActivity(BaseFieldActivity):
         self._planned_home_run = False
         pl = self._player_ref
         if pl is not None:
-            _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
+            _freeze_baseball_batter_pose(pl, self._batter_overlay_char())
         if self._is_power_swing:
             self._start_power_swing_fx()
             self._power_swing_pause_t = max(0.0, _field_num(self.field, "power_swing_pause_sec", 1.5))
@@ -2392,7 +2795,7 @@ class BaseballActivity(BaseFieldActivity):
         """파워 게이지 1/3·2/3 함정 — 빗맞아 머리 뒤로 짧게 뜨는 파울."""
         pl = self._player_ref
         if pl is not None:
-            _sync_baseball_overlay_swing(pl, self._p1_char or self._player_char)
+            _sync_baseball_overlay_swing(pl, self._batter_overlay_char())
         base_ang = float(
             _field_num(self.field, "pop_foul_angle_deg", 180.0)
         )
@@ -2550,22 +2953,27 @@ class BaseballActivity(BaseFieldActivity):
             self._p2_dists.append(carry_px)
         else:
             self._p1_dists.append(carry_px)
-        self._swing_ix += 1
+        # 번갈아 모드는 양쪽 타석이 끝난 뒤 `_schedule_after_swing` 에서 라운드 카운트
+        if not self._is_alternate_play():
+            self._swing_ix += 1
+        disp_ix = int(self._swing_ix) + (1 if self._is_alternate_play() else 0)
         who = "2P" if self._batting_as_p2 else "1P"
+        if self.mode == MODE_NPC_VS and self._batting_as_p2:
+            who = self._opponent_display_name()
         if was_pop:
-            self._msg = f"{who} — 빗맞음 ({self._swing_ix}/{self._swings_per_side})"
+            self._msg = f"{who} — 빗맞음 ({disp_ix}/{self._swings_per_side})"
         elif was_foul:
-            self._msg = f"{who} — 파울 ({self._swing_ix}/{self._swings_per_side})"
+            self._msg = f"{who} — 파울 ({disp_ix}/{self._swings_per_side})"
         elif is_home_run:
             zm = f" [{zone_label}]" if zone_label else ""
             self._msg = (
-                f"{who} — 홈런!!{zm} ({self._swing_ix}/{self._swings_per_side})"
+                f"{who} — 홈런!!{zm} ({disp_ix}/{self._swings_per_side})"
             )
         else:
             zm = f" [{zone_label}]" if zone_label else ""
             self._msg = (
                 f"{who} — {self._format_meters(carry_px)}m{zm} "
-                f"({self._swing_ix}/{self._swings_per_side})"
+                f"({disp_ix}/{self._swings_per_side})"
             )
         self._schedule_after_swing(
             was_foul,
@@ -2709,17 +3117,47 @@ class BaseballActivity(BaseFieldActivity):
         self._pwr_speed = base_pwr_speed * self._difficulty_pwr_speed_mul()
 
     def _run_npc_swings(self) -> None:
-        """NPC 5타석 일괄 시뮬 (짧은 연출 후 결과)."""
+        """스토리 모드 — NPC N타석 일괄 시뮬 (짧은 연출 후 결과)."""
         self._clear_scene_freeze()
         self._show_rest_ball()
         self._npc_dists = []
-        skill = float(self.field.get("npc_skill", _cfg("npc_skill", 0.62)))
         for _ in range(self._swings_per_side):
-            self._npc_dists.append(self._simulate_npc_distance(skill))
+            self._npc_dists.append(self._simulate_npc_distance())
         self.state = ST_NPC_SHOW
         self._npc_flash_ix = 0
         self._npc_flash_t = float(_cfg("npc_flash_sec", 0.55))
         self._npc_flash_dist = float(self._npc_dists[0] if self._npc_dists else 0.0)
+
+    def _simulate_npc_distance(self, skill: float = -1.0) -> float:
+        """스토리/폴백용 — 밴드 AI로 비거리(px)만 산출 (연출 없음)."""
+        del skill  # 밴드 가중치가 난이도를 반영
+        plan = self._npc_ai_plan_swing()
+        if bool(plan.get("foul")) or bool(plan.get("pop_foul")):
+            return 0.0
+        dir_deg = float(plan.get("dir_deg", 0.0))
+        carry = float(plan.get("carry_px", 0.0))
+        actual = self._resolve_swing_angle(dir_deg, float(plan.get("pwr", 0.5)))
+        ox, oy = float(self.ball_rest_xy[0]), float(self.ball_rest_xy[1])
+        ball_h = max(
+            24.0,
+            min(270.0, (36.0 + float(carry) * 0.18) * float(self._height_mul)),
+        )
+        land_plan = resolve_flight_landing(
+            ox,
+            oy,
+            float(actual),
+            float(carry),
+            ball_h,
+            self._mask_surf,
+            cfg=self.field,
+            fence_clear_height_px=float(_cfg("fence_clear_height_px", 18.0)),
+            trace_step_px=float(_cfg("fence_trace_step_px", 4.0)),
+        )
+        if bool(land_plan.get("is_foul")):
+            return 0.0
+        lx, ly = land_plan["land_xy"]
+        px, py = float(self.plate_xy[0]), float(self.plate_xy[1])
+        return max(0.0, math.hypot(float(lx) - px, float(ly) - py))
 
     def _ground_dist_blocked_by_fence(self, dist_along: float) -> bool:
         if self._mask_surf is None or float(dist_along) <= 1e-3:
@@ -2769,34 +3207,6 @@ class BaseballActivity(BaseFieldActivity):
         self._roll_left = float(self._roll_travel_total)
         return True
 
-    def _simulate_npc_distance(self, skill: float) -> float:
-        foul_edge = float(self._fan_half_deg)
-        dir_deg = self._rng.uniform(-foul_edge, foul_edge)
-        pwr = max(0.0, min(1.0, self._rng.gauss(skill, 0.18)))
-        actual = self._resolve_swing_angle(dir_deg, pwr)
-        carry = self._carry_from_locked_swing(dir_deg, pwr)
-        ox, oy = float(self.ball_rest_xy[0]), float(self.ball_rest_xy[1])
-        ball_h = max(
-            24.0,
-            min(270.0, (36.0 + float(carry) * 0.18) * float(self._height_mul)),
-        )
-        plan = resolve_flight_landing(
-            ox,
-            oy,
-            float(actual),
-            float(carry),
-            ball_h,
-            self._mask_surf,
-            cfg=self.field,
-            fence_clear_height_px=float(_cfg("fence_clear_height_px", 18.0)),
-            trace_step_px=float(_cfg("fence_trace_step_px", 4.0)),
-        )
-        if bool(plan.get("is_foul")):
-            return 0.0
-        lx, ly = plan["land_xy"]
-        px, py = float(self.plate_xy[0]), float(self.plate_xy[1])
-        return max(0.0, math.hypot(float(lx) - px, float(ly) - py))
-
     def _finish_match(self) -> None:
         self._clear_scene_freeze()
         self._show_rest_ball()
@@ -2833,6 +3243,49 @@ class BaseballActivity(BaseFieldActivity):
         self._hud_lines = [
             f"1P {self._p1_char}: HR {int(self._p1_hr)} / 합 {int(round(p_tot))}m",
             f"2P {self._p2_char}: HR {int(self._p2_hr)} / 합 {int(round(o_tot))}m",
+            win_line,
+        ]
+        self.state = ST_MATCH_END
+        self.field_tilt_target = 1.0
+        self._msg = "경기 종료"
+        self._sync_camera()
+
+    def _finish_alt_match(self) -> None:
+        """번갈아 모드 종료 — 합계비거리 보너스 1점 후 N 대 M 승자 안내."""
+        self._clear_scene_freeze()
+        self._show_rest_ball()
+        p_tot = self._total_score_m(self._p1_dists)
+        o_tot = self._total_score_m(self._p2_dists)
+        p1_name = self._char_label(self._p1_char or self._player_char)
+        p2_name = self._opponent_display_name()
+        bonus_line = ""
+        if float(p_tot) > float(o_tot):
+            self._p1_pts += 1
+            bonus_line = f"{p1_name} 합계비거리 보너스 1점!"
+        elif float(o_tot) > float(p_tot):
+            self._p2_pts += 1
+            bonus_line = f"{p2_name} 합계비거리 보너스 1점!"
+        else:
+            bonus_line = "합계비거리 동점!"
+        p1_pts = int(self._p1_pts)
+        p2_pts = int(self._p2_pts)
+        if p1_pts > p2_pts:
+            self._match_win_side = 1
+            self._won = True
+            win_line = f"{p1_pts} 대 {p2_pts} {p1_name} 승리!!"
+        elif p2_pts > p1_pts:
+            self._match_win_side = -1
+            self._won = False
+            win_line = f"{p1_pts} 대 {p2_pts} {p2_name} 승리!!"
+        else:
+            self._match_win_side = 0
+            self._won = False
+            win_line = f"{p1_pts} 대 {p2_pts} 무승부!!"
+        opp_tag = "NPC" if self.mode == MODE_NPC_VS else "2P"
+        self._hud_lines = [
+            f"1P {p1_name}: {p1_pts}점 / 합 {int(round(p_tot))}m",
+            f"{opp_tag} {p2_name}: {p2_pts}점 / 합 {int(round(o_tot))}m",
+            bonus_line,
             win_line,
         ]
         self.state = ST_MATCH_END
@@ -2900,14 +3353,14 @@ class BaseballActivity(BaseFieldActivity):
         elif self.state == ST_PWR_CONFIRM:
             pl = self._player_ref
             if pl is not None:
-                _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
+                _freeze_baseball_batter_pose(pl, self._batter_overlay_char())
             self._pwr_confirm_hold_t -= float(dt_sec)
             if self._pwr_confirm_hold_t <= 0.0:
                 self._actual_swing_after_confirm()
         elif self.state in (ST_SWING_PAUSE, ST_POWER_SWING_PAUSE):
             pl = self._player_ref
             if pl is not None:
-                _freeze_baseball_batter_pose(pl, self._p1_char or self._player_char)
+                _freeze_baseball_batter_pose(pl, self._batter_overlay_char())
             self._power_swing_pause_t -= float(dt_sec)
             if self._power_swing_pause_t <= 0.0:
                 self._start_locked_swing_animation()
@@ -3171,14 +3624,44 @@ class BaseballActivity(BaseFieldActivity):
         except Exception:
             return False
 
+    def _set_char_opts_for_phase(self, phase: str) -> None:
+        """플레이어/NPC 선택 단계에 맞게 그리드 옵션 구성. NPC 단계는 '?' 랜덤 슬롯 추가."""
+        base = [c for c in (self._char_opts_base or self._char_opts or []) if c and c != CHAR_PICK_RANDOM]
+        if phase == "npc":
+            self._char_opts = list(base[:8]) + [CHAR_PICK_RANDOM]
+        else:
+            self._char_opts = list(base[:8])
+
+    def _resolve_random_npc_char(self) -> str:
+        """'?' 선택 시 — 잠금·1P 제외 풀에서 랜덤."""
+        pool = []
+        for cid in (self._char_opts_base or []):
+            c = str(cid or "").strip()
+            if not c or c == CHAR_PICK_RANDOM:
+                continue
+            if c in (self._char_locked or set()):
+                continue
+            if c == str(self._p1_char or ""):
+                continue
+            pool.append(c)
+        if not pool:
+            pool = [
+                str(c)
+                for c in (self._char_opts_base or [])
+                if c and c != CHAR_PICK_RANDOM and c not in (self._char_locked or set())
+            ]
+        if not pool:
+            return str(self._p2_char_opts[0] if self._p2_char_opts else self._player_char)
+        return str(self._rng.choice(pool))
+
     def _layout_char_pick_rects(self, w: int, h: int) -> None:
         self._char_pick_rects = []
         opts = list(self._char_opts or [])
         if not opts:
             return
-        n = min(8, len(opts))
+        n = len(opts)
         cols = _CHAR_PICK_GRID_COLS
-        rows = _CHAR_PICK_GRID_ROWS
+        rows = max(_CHAR_PICK_GRID_ROWS, (n + cols - 1) // cols)
         pad_x = int(w * 0.03)
         pad_top = int(h * 0.22)
         pad_bot = int(h * 0.13)
@@ -3206,9 +3689,16 @@ class BaseballActivity(BaseFieldActivity):
         if self.mode == MODE_RECORD_2P and self._char_pick_phase == "2p":
             return "2P 캐릭터 선택"
         if self.mode == MODE_RECORD_2P:
-            return "1P 캐릭터 선택"
+            style = "번갈아" if self._play_style == PLAY_DUO_ALT else "모아서"
+            return f"1P 캐릭터 선택 ({style})"
+        if self.mode == MODE_NPC_VS and self._char_pick_phase == "npc":
+            return "NPC 캐릭터 선택"
+        if self.mode == MODE_NPC_VS:
+            return "플레이어 캐릭터 선택"
         if self.mode == MODE_DEMO:
             return "캐릭터 선택"
+        if self._play_style == PLAY_SOLO_RECORD:
+            return "캐릭터 선택 (기록 갱신)"
         return "1P 캐릭터 선택"
 
     def _char_pick_go_back(self) -> bool:
@@ -3223,6 +3713,13 @@ class BaseballActivity(BaseFieldActivity):
             return True
         if self.state != ST_PICK_CHAR:
             return False
+        if self.mode == MODE_NPC_VS and self._char_pick_phase == "npc":
+            self._char_pick_phase = "solo"
+            self._set_char_opts_for_phase("solo")
+            self._char_pick_ix = 0
+            self._char_pending_ix = None
+            self._msg = "플레이어 캐릭터 선택"
+            return True
         if self.mode == MODE_RECORD_2P and self._char_pick_phase == "2p":
             self._char_pick_phase = "1p"
             self._char_pick_ix = 0
@@ -3230,6 +3727,15 @@ class BaseballActivity(BaseFieldActivity):
             return True
         if self.mode == MODE_DEMO and self._return_map:
             self._quit_demo_return()
+            return True
+        # 서브메뉴로 복귀
+        if self.mode == MODE_RECORD_2P:
+            self.state = ST_MENU_DUO
+            self._msg = "둘이서 하기"
+            return True
+        if self.mode in (MODE_RECORD_1P, MODE_NPC_VS):
+            self.state = ST_MENU_SOLO
+            self._msg = "혼자서 하기"
             return True
         self._return_to_main_menu()
         return True
@@ -3289,7 +3795,7 @@ class BaseballActivity(BaseFieldActivity):
         overlay = pygame.Surface((w, h), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 140))
         surf.blit(overlay, (0, 0))
-        if self.mode == MODE_RECORD_2P:
+        if self.mode in (MODE_RECORD_2P, MODE_NPC_VS):
             self._draw_match_result_2p(ctx)
             return
         big = self._ui_font(ctx, 20)
@@ -3312,13 +3818,19 @@ class BaseballActivity(BaseFieldActivity):
         p1_cheer = win_side > 0
         p2_cheer = win_side < 0
         p1_frames = self._result_char_frames(self._p1_char, face="right", cheer=p1_cheer)
-        p2_frames = self._result_char_frames(self._p2_char, face="left", cheer=p2_cheer)
         self._blit_char_anim_frame(
             surf, p1_frames, (int(w * 0.20), foot_y)
         )
-        self._blit_char_anim_frame(
-            surf, p2_frames, (int(w * 0.80), foot_y)
-        )
+        if self.mode == MODE_RECORD_2P and self._p2_char:
+            p2_frames = self._result_char_frames(self._p2_char, face="left", cheer=p2_cheer)
+            self._blit_char_anim_frame(
+                surf, p2_frames, (int(w * 0.80), foot_y)
+            )
+        elif self.mode == MODE_NPC_VS and self._p2_char:
+            p2_frames = self._result_char_frames(self._p2_char, face="left", cheer=p2_cheer)
+            self._blit_char_anim_frame(
+                surf, p2_frames, (int(w * 0.80), foot_y)
+            )
         title_font = self._ui_font(ctx, 20)
         head = title_font.render("경기 결과!!", True, (255, 248, 210))
         surf.blit(head, (w // 2 - head.get_width() // 2, int(h * 0.08)))
@@ -3327,7 +3839,7 @@ class BaseballActivity(BaseFieldActivity):
         p_tot = int(round(self._total_score_m(self._p1_dists)))
         o_tot = int(round(self._total_score_m(self._p2_dists)))
         p1_nm = self._char_label(self._p1_char)
-        p2_nm = self._char_label(self._p2_char)
+        p2_nm = self._opponent_display_name()
         p1_hr = int(self._p1_hr)
         p2_hr = int(self._p2_hr)
         win_col = (255, 230, 120)
@@ -3337,27 +3849,38 @@ class BaseballActivity(BaseFieldActivity):
         tie_col = (220, 235, 255)
         if win_side == 0:
             p1_col = p2_col = tie_col
-        cy = int(h * 0.34)
+        cy = int(h * 0.30)
         p1_line1 = score_font.render(f"1P {p1_nm}", True, p1_col)
-        p2_line1 = score_font.render(f"2P {p2_nm}", True, p2_col)
+        opp_tag = "NPC" if self.mode == MODE_NPC_VS else "2P"
+        p2_line1 = score_font.render(f"{opp_tag} {p2_nm}", True, p2_col)
         gap = max(12, int(w * 0.06))
         mid = w // 2
         surf.blit(p1_line1, (mid - gap - p1_line1.get_width(), cy))
         surf.blit(p2_line1, (mid + gap, cy))
         cy += 20
-        p1_line2 = small.render(f"HR {p1_hr}  /  {p_tot}m", True, p1_col)
-        p2_line2 = small.render(f"HR {p2_hr}  /  {o_tot}m", True, p2_col)
+        if self._is_alternate_play():
+            p1_line2 = small.render(
+                f"{int(self._p1_pts)}점  /  {p_tot}m", True, p1_col
+            )
+            p2_line2 = small.render(
+                f"{int(self._p2_pts)}점  /  {o_tot}m", True, p2_col
+            )
+        else:
+            p1_line2 = small.render(f"HR {p1_hr}  /  {p_tot}m", True, p1_col)
+            p2_line2 = small.render(f"HR {p2_hr}  /  {o_tot}m", True, p2_col)
         surf.blit(p1_line2, (mid - gap - p1_line2.get_width(), cy))
         surf.blit(p2_line2, (mid + gap, cy))
-        cy += 28
-        win_line = ""
+        cy += 24
         for ln in self._hud_lines:
-            if "승리" in ln or "무승부" in ln:
-                win_line = str(ln)
-                break
-        if win_line:
-            wt = score_font.render(win_line, True, (255, 248, 180))
+            if not ln:
+                continue
+            # 상세 줄은 위에 이미 점수 표시 — 보너스·승패 문구만
+            if ln.startswith("1P ") or ln.startswith("2P ") or ln.startswith("NPC "):
+                continue
+            col = (255, 248, 180) if ("승리" in ln or "무승부" in ln or "보너스" in ln or "동점" in ln) else (230, 240, 255)
+            wt = score_font.render(str(ln), True, col)
             surf.blit(wt, (w // 2 - wt.get_width() // 2, cy))
+            cy += 22
         hint = small.render("화면을 탭하세요", True, (200, 210, 230))
         surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.92)))
 
@@ -3368,12 +3891,35 @@ class BaseballActivity(BaseFieldActivity):
         ix = int(ix) % len(opts)
         self._char_pick_ix = ix
         pick = str(opts[ix])
-        if pick in (self._char_locked or set()):
+        is_random = pick == CHAR_PICK_RANDOM
+        if (not is_random) and pick in (self._char_locked or set()):
             self._msg = "잠긴 캐릭터입니다"
             return False
         if self.mode == MODE_DEMO:
             self._apply_batter_char(pick)
             self._start_demo_match()
+            return True
+        # NPC와 하기 — 플레이어 고른 뒤 NPC 선택(?=랜덤)
+        if self.mode == MODE_NPC_VS:
+            if self._char_pick_phase == "npc":
+                self._npc_random_pick = bool(is_random)
+                if is_random:
+                    pick = self._resolve_random_npc_char()
+                self._p2_char = pick
+                self._npc_name = self._char_label(pick)
+                self._start_npc_alt_match()
+                return True
+            # 플레이어 선택 → NPC 선택 단계
+            if is_random:
+                self._msg = "플레이어는 캐릭터를 골라 주세요"
+                return False
+            self._p1_char = pick
+            self._apply_batter_char(pick)
+            self._char_pick_phase = "npc"
+            self._set_char_opts_for_phase("npc")
+            self._char_pick_ix = 0
+            self._char_pending_ix = None
+            self._msg = "NPC 캐릭터 선택"
             return True
         if self.mode == MODE_RECORD_1P:
             self._p1_char = pick
@@ -3404,7 +3950,7 @@ class BaseballActivity(BaseFieldActivity):
             self._menu_rects.append((self._menu_back_button_rect(w, h), "menu_back"))
             return
         if self.state == ST_MENU:
-            items = ["1p", "2p", "records", "difficulty", "exit"]
+            items = ["solo", "duo", "records", "difficulty", "exit"]
             bw, bh = int(w * 0.72), int(h * 0.09)
             bx = w // 2 - bw // 2
             y0 = int(h * 0.20)
@@ -3412,6 +3958,20 @@ class BaseballActivity(BaseFieldActivity):
                 self._menu_rects.append(
                     (pygame.Rect(bx, y0 + i * (bh + 8), bw, bh), act)
                 )
+            return
+        if self.state in (ST_MENU_SOLO, ST_MENU_DUO):
+            bw, bh = int(w * 0.72), int(h * 0.09)
+            bx = w // 2 - bw // 2
+            y0 = int(h * 0.32)
+            if self.state == ST_MENU_SOLO:
+                acts = ["solo_npc", "solo_record"]
+            else:
+                acts = ["duo_alt", "duo_batch"]
+            for i, act in enumerate(acts):
+                self._menu_rects.append(
+                    (pygame.Rect(bx, y0 + i * (bh + 10), bw, bh), act)
+                )
+            self._menu_rects.append((self._menu_back_button_rect(w, h), "menu_back"))
             return
         if self.state == ST_DIFFICULTY:
             bw, bh = int(w * 0.72), int(h * 0.09)
@@ -3469,25 +4029,27 @@ class BaseballActivity(BaseFieldActivity):
                 return action
         return None
 
+    def _begin_char_pick(self, *, mode: str, play_style: str, phase: str, msg: str) -> None:
+        """서브메뉴에서 캐릭터 선택으로 진입."""
+        self.mode = mode
+        self._play_style = play_style
+        self._char_pick_phase = phase
+        self._char_pick_ix = 0
+        self._char_pending_ix = None
+        self.state = ST_PICK_CHAR
+        self._msg = msg
+
     def _apply_menu_action(self, act: Optional[str]) -> bool:
         if not act:
             return False
         if self.state == ST_MENU:
-            if act == "1p":
-                self.mode = MODE_RECORD_1P
-                self._char_pick_phase = "solo"
-                self._char_pick_ix = 0
-                self._char_pending_ix = None
-                self.state = ST_PICK_CHAR
-                self._msg = "1P 캐릭터 선택"
+            if act == "solo":
+                self.state = ST_MENU_SOLO
+                self._msg = "혼자서 하기"
                 return True
-            if act == "2p":
-                self.mode = MODE_RECORD_2P
-                self._char_pick_phase = "1p"
-                self._char_pick_ix = 0
-                self._char_pending_ix = None
-                self.state = ST_PICK_CHAR
-                self._msg = "1P 캐릭터 선택"
+            if act == "duo":
+                self.state = ST_MENU_DUO
+                self._msg = "둘이서 하기"
                 return True
             if act == "records":
                 self.state = ST_RECORDS
@@ -3498,6 +4060,46 @@ class BaseballActivity(BaseFieldActivity):
                 return True
             if act == "exit":
                 self._quit_via_menu()
+                return True
+        if self.state == ST_MENU_SOLO:
+            if act == "menu_back":
+                self._return_to_main_menu()
+                return True
+            if act == "solo_npc":
+                self._begin_char_pick(
+                    mode=MODE_NPC_VS,
+                    play_style=PLAY_NPC_ALT,
+                    phase="solo",
+                    msg="캐릭터 선택",
+                )
+                return True
+            if act == "solo_record":
+                self._begin_char_pick(
+                    mode=MODE_RECORD_1P,
+                    play_style=PLAY_SOLO_RECORD,
+                    phase="solo",
+                    msg="1P 캐릭터 선택",
+                )
+                return True
+        if self.state == ST_MENU_DUO:
+            if act == "menu_back":
+                self._return_to_main_menu()
+                return True
+            if act == "duo_alt":
+                self._begin_char_pick(
+                    mode=MODE_RECORD_2P,
+                    play_style=PLAY_DUO_ALT,
+                    phase="1p",
+                    msg="1P 캐릭터 선택",
+                )
+                return True
+            if act == "duo_batch":
+                self._begin_char_pick(
+                    mode=MODE_RECORD_2P,
+                    play_style=PLAY_DUO_BATCH,
+                    phase="1p",
+                    msg="1P 캐릭터 선택",
+                )
                 return True
         if self.state == ST_DIFFICULTY:
             if act == "menu_back":
@@ -3576,6 +4178,8 @@ class BaseballActivity(BaseFieldActivity):
             ST_BAT_DIR,
             ST_BAT_PWR,
             ST_MENU,
+            ST_MENU_SOLO,
+            ST_MENU_DUO,
             ST_PICK_CHAR,
             ST_REPLAY_ASK,
             ST_LEADERBOARD,
@@ -3595,7 +4199,15 @@ class BaseballActivity(BaseFieldActivity):
                 if cb is not None:
                     cb()
             return True
-        if self.state in (ST_MENU, ST_DIFFICULTY, ST_PICK_CHAR, ST_PICK_P2, ST_REPLAY_ASK):
+        if self.state in (
+            ST_MENU,
+            ST_MENU_SOLO,
+            ST_MENU_DUO,
+            ST_DIFFICULTY,
+            ST_PICK_CHAR,
+            ST_PICK_P2,
+            ST_REPLAY_ASK,
+        ):
             act = self._menu_hit(screen_xy)
             if act and self._apply_menu_action(act):
                 return True
@@ -3609,6 +4221,9 @@ class BaseballActivity(BaseFieldActivity):
         if self.state == ST_ANNOUNCE:
             if self._announce_tap_wait:
                 self._announce_advance()
+            return True
+        # NPC 자동 타격 중에는 플레이어 입력 무시
+        if self.mode == MODE_NPC_VS and self._batting_as_p2:
             return True
         if self.state == ST_BAT_DIR:
             self._locked_dir_deg = self._dir_now_deg()
@@ -3627,6 +4242,8 @@ class BaseballActivity(BaseFieldActivity):
             ST_BAT_PWR,
             ST_PWR_CONFIRM,
             ST_MENU,
+            ST_MENU_SOLO,
+            ST_MENU_DUO,
             ST_DIFFICULTY,
             ST_RECORDS,
             ST_MATCH_END,
@@ -3722,18 +4339,16 @@ class BaseballActivity(BaseFieldActivity):
             self._draw_menu_back_button(surf, back_r, small)
             return
 
-        # 상위 메뉴 제목은 메인 메뉴(·2P 시작)에서만 — 서브메뉴(난이도·캐릭터 선택)는
-        # 자기 제목을 그리므로 여기서 같이 그리면 글자가 겹친다
-        if self.state in (ST_MENU, ST_PICK_P2):
+        # 상위 메뉴 제목은 메인·서브·2P 시작에서만 — 난이도·캐릭터는 자기 제목 사용
+        if self.state in (ST_MENU, ST_MENU_SOLO, ST_MENU_DUO, ST_PICK_P2):
             title = font.render("어린이 야구 — 홈런 대결", True, (255, 248, 220))
             surf.blit(title, (w // 2 - title.get_width() // 2, int(h * 0.08)))
 
         self._layout_menu_rects(w, h)
-        items = []
         if self.state == ST_MENU:
             items = [
-                ("1인 플레이 (기록 갱신)", "1p"),
-                ("2인 플레이", "2p"),
+                ("혼자서 하기", "solo"),
+                ("둘이서 하기", "duo"),
                 ("기록 보기", "records"),
                 (f"난이도 설정  [{self._difficulty_label()}]", "difficulty"),
                 ("나가기", "exit"),
@@ -3753,6 +4368,33 @@ class BaseballActivity(BaseFieldActivity):
                 pygame.draw.rect(surf, (120, 160, 220), rect, 2, border_radius=6)
                 t = small.render(label, True, (240, 248, 255))
                 surf.blit(t, (rect.centerx - t.get_width() // 2, rect.centery - t.get_height() // 2))
+            return
+
+        if self.state in (ST_MENU_SOLO, ST_MENU_DUO):
+            sub_title = "혼자서 하기" if self.state == ST_MENU_SOLO else "둘이서 하기"
+            st = font.render(sub_title, True, (255, 248, 220))
+            surf.blit(st, (w // 2 - st.get_width() // 2, int(h * 0.18)))
+            if self.state == ST_MENU_SOLO:
+                items = [
+                    ("NPC와 하기", "solo_npc"),
+                    ("기록 갱신하기", "solo_record"),
+                ]
+            else:
+                items = [
+                    ("번갈아 하기", "duo_alt"),
+                    ("모아서 하기", "duo_batch"),
+                ]
+            bw, bh = int(w * 0.72), int(h * 0.09)
+            bx = w // 2 - bw // 2
+            y0 = int(h * 0.32)
+            for i, (label, _act) in enumerate(items):
+                rect = pygame.Rect(bx, y0 + i * (bh + 10), bw, bh)
+                pygame.draw.rect(surf, (40, 58, 88), rect, border_radius=6)
+                pygame.draw.rect(surf, (120, 160, 220), rect, 2, border_radius=6)
+                t = small.render(label, True, (240, 248, 255))
+                surf.blit(t, (rect.centerx - t.get_width() // 2, rect.centery - t.get_height() // 2))
+            back_r = self._menu_back_button_rect(w, h)
+            self._draw_menu_back_button(surf, back_r, small)
             return
 
         if self.state == ST_DIFFICULTY:
@@ -3787,12 +4429,33 @@ class BaseballActivity(BaseFieldActivity):
             surf.blit(pt, (w // 2 - pt.get_width() // 2, int(h * 0.06)))
             if self._char_pending_ix is None:
                 # 선택 그리드 — 확인창(서브메뉴)이 떠 있으면 그리지 않는다 (겹침 방지)
-                hint = small.render("캐릭터를 탭하세요", True, (180, 200, 220))
+                hint_txt = (
+                    "NPC를 고르거나 ? 로 랜덤"
+                    if self._char_pick_phase == "npc"
+                    else "캐릭터를 탭하세요"
+                )
+                hint = small.render(hint_txt, True, (180, 200, 220))
                 surf.blit(hint, (w // 2 - hint.get_width() // 2, int(h * 0.13)))
                 self._layout_char_pick_rects(w, h)
                 grid_sprite_h = _CHAR_PICK_IDLE_GRID_H
                 for rect, ix in self._char_pick_rects:
                     cid = str(self._char_opts[ix])
+                    if cid == CHAR_PICK_RANDOM:
+                        pygame.draw.rect(surf, (48, 58, 90), rect, border_radius=8)
+                        pygame.draw.rect(surf, (180, 200, 255), rect, 2, border_radius=8)
+                        qf = font.render("?", True, (255, 248, 210))
+                        surf.blit(
+                            qf,
+                            (
+                                rect.centerx - qf.get_width() // 2,
+                                rect.centery - qf.get_height() // 2 - 6,
+                            ),
+                        )
+                        lbl = small.render("랜덤", True, (210, 225, 245))
+                        ly = rect.bottom - lbl.get_height() - 2
+                        if ly >= rect.top:
+                            surf.blit(lbl, (rect.centerx - lbl.get_width() // 2, ly))
+                        continue
                     frames = self._idle_frames_for_direction(cid, "right")
                     sprite_h = min(grid_sprite_h, max(16, int(rect.height * 0.55)))
                     sy = rect.centery - int(sprite_h * 0.15)
@@ -3813,11 +4476,18 @@ class BaseballActivity(BaseFieldActivity):
                 # 선택 확인창 — 상위(그리드)는 숨긴 상태로 확인 UI만 표시
                 ix = int(self._char_pending_ix)
                 cid = str(self._char_opts[ix]) if self._char_opts else ""
-                frames = self._idle_frames_for_direction(cid, "right")
                 full_h = min(int(h * 0.30), _CHAR_PICK_IDLE_CONFIRM_H)
                 cy = int(h * 0.40)
-                self._blit_idle_frame(surf, frames, (w // 2, cy), full_h)
-                nm = font.render(self._char_label(cid), True, (255, 248, 220))
+                if cid == CHAR_PICK_RANDOM:
+                    qf = font.render("?", True, (255, 248, 210))
+                    big_q = _get_logo_font(72)
+                    qbig = big_q.render("?", True, (255, 248, 210))
+                    surf.blit(qbig, (w // 2 - qbig.get_width() // 2, cy - qbig.get_height() // 2))
+                    nm = font.render("랜덤 NPC", True, (255, 248, 220))
+                else:
+                    frames = self._idle_frames_for_direction(cid, "right")
+                    self._blit_idle_frame(surf, frames, (w // 2, cy), full_h)
+                    nm = font.render(self._char_label(cid), True, (255, 248, 220))
                 surf.blit(nm, (w // 2 - nm.get_width() // 2, int(h * 0.54)))
                 ask = font.render("선택 하시겠습니까?", True, (230, 240, 255))
                 surf.blit(ask, (w // 2 - ask.get_width() // 2, int(h * 0.62)))
@@ -4082,7 +4752,15 @@ class BaseballActivity(BaseFieldActivity):
         """월드 줌 후 논리 화면 — 메뉴·게이지·결과."""
         surf = ctx.surf
         self._ui_screen_wh = (max(1, int(surf.get_width())), max(1, int(surf.get_height())))
-        if self.state in (ST_MENU, ST_DIFFICULTY, ST_PICK_P2, ST_PICK_CHAR, ST_REPLAY_ASK):
+        if self.state in (
+            ST_MENU,
+            ST_MENU_SOLO,
+            ST_MENU_DUO,
+            ST_DIFFICULTY,
+            ST_PICK_P2,
+            ST_PICK_CHAR,
+            ST_REPLAY_ASK,
+        ):
             self._draw_menu(ctx)
             return
         if self.state == ST_RECORDS:

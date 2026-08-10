@@ -15,11 +15,12 @@
     "타일류"
   ],
   "map_left_collapsed": [
+    "건축물류",
     "나무류",
     "자연/식물",
     "타일류"
   ],
   "map_right_collapsed": [],
-  "map_hide_large": true,
+  "map_hide_large": false,
   "map_view_hidden_keys": []
 }

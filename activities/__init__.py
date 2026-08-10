@@ -1,5 +1,5 @@
 """
-activities — 필드 위 미니게임(그네·낚시·야구·향후 카트 등) 통합 패키지.
+activities — 필드 위 미니게임(그네·낚시·야구·레이스·황소개구리 등) 통합 패키지.
 
 [개념]
   - activities/: 맵·캐릭터를 유지한 채 필드에서 플레이 (본체 미니게임은 여기만)
@@ -20,6 +20,14 @@ activities — 필드 위 미니게임(그네·낚시·야구·향후 카트 등
   { "type": "DEV_CMD", "cmd": "start_racing", "map": "bg_town" }
   OVERLAY_UI click_action: stop_racing
 
+[황소개구리]
+  { "type": "DEV_CMD", "cmd": "start_bullfrog", "map": "bg_pond01",
+    "return_map": "bg_jjangpu", "return_pos": [816, 2304] }
+  OVERLAY_UI click_action: stop_bullfrog
+
+[캐릭터 선택 — 세이브 없이 첫 시작, 보통은 데모 종료 후 main 이 자동 시작]
+  { "type": "DEV_CMD", "cmd": "start_activity_char_select" }
+
 [main.py 역할]
   - FieldActivityHost 인스턴스 1개
   - tick / 입력 / draw 브릿지만 (로직은 이 패키지)
@@ -34,6 +42,8 @@ from __future__ import annotations
 
 from .base import BaseFieldActivity, FieldDrawContext
 from .baseball import BaseballActivity
+from .bullfrog import BullfrogActivity
+from .char_select import CharSelectActivity
 from .fishing import FishingActivity
 from .racing import RacingActivity
 from .host import FieldActivityHost
@@ -42,6 +52,8 @@ from ._registry import create_activity, list_registered, register_activity
 register_activity("fishing", FishingActivity)
 register_activity("baseball", BaseballActivity)
 register_activity("racing", RacingActivity)
+register_activity("bullfrog", BullfrogActivity)
+register_activity("char_select", CharSelectActivity)
 
 
 def list_activities():
@@ -71,6 +83,8 @@ __all__ = [
     "FishingActivity",
     "BaseballActivity",
     "RacingActivity",
+    "BullfrogActivity",
+    "CharSelectActivity",
     "create_activity",
     "list_activities",
     "request_field_activity",

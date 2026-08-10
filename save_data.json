@@ -3,26 +3,22 @@
     "laugh_point": 0,
     "subprogress": {},
     "player_pos": [
-        850,
-        2310
+        816,
+        2304
     ],
     "current_map": "bg_jjangpu",
+    "player_char": "summer_k",
     "jump_shadow_mode": "ground",
     "flags": {},
     "affinity": {},
     "progress_wateringcan": 1001,
-    "progress_frog_minigame_win": 0,
+    "progress_frog_minigame_win": 1,
     "progress_frog_seed": 0,
     "progress_frog_minigame_tried": 0,
-    "progress_fishing_win": 1,
-    "progress_flower1_1": 1001,
-    "baseball_entry_map": "bg_jjangpu",
-    "baseball_entry_pos": [
-        885.8686291501015,
-        2311.1313708498983
-    ],
-    "baseball_difficulty": "easy",
-    "racing_mode7_quality": "high",
-    "racing_minimap_enabled": true,
-    "racing_camera_mode": "oblique"
+    "progress_bullfrog_win": 1,
+    "progress_fishing_win": 0,
+    "player_char_selected": true,
+    "parent_char": "carrot_a",
+    "progress_flower1_1": 1003,
+    "placed": []
 }

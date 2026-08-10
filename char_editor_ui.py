@@ -13,8 +13,9 @@ ROW_H = 38
 BOOL_OPTS = [("Yes", "true"), ("No", "false")]
 BEHAVIOR_OPTS = [
     ("idle", "idle"),
+    ("randomwalk", "randomwalk"),
+    ("randomplay", "randomplay"),
     ("patrol", "patrol"),
-    ("wander", "wander"),
     ("follow", "follow"),
     ("flee", "flee"),
     ("frozen", "frozen"),
@@ -33,6 +34,23 @@ ANIM_MODE_OPTS = [("—", ""), ("hold", "hold"), ("once", "once")]
 DIR_OPTS = [("—", ""), ("left", "left"), ("right", "right")]
 YSORT_OPTS = [("—", ""), ("ground", "ground"), ("visual", "visual")]
 SHEAR_ON_OPTS = [("—", ""), ("On", "true"), ("Off", "false")]
+# 맵 루트 field — 비우면 CONFIG 전역 기본 (FIELD_PERSPECTIVE_DEFAULT_ON / TILT_SHEAR_ENABLED)
+MAP_FIELD_ON_OPTS = [("CONFIG 기본", ""), ("On", "true"), ("Off", "false")]
+# 맵 ambient SCREEN_FX — Off 가 기본(키 없음). On 이면 screen_fx[kind] 저장.
+MAP_FX_ON_OPTS = [("Off", "false"), ("On", "true")]
+MAP_CLOUD_DIR_OPTS = [
+    ("RANDOM", "RANDOM"),
+    ("SE", "SE"),
+    ("SW", "SW"),
+    ("NE", "NE"),
+    ("NW", "NW"),
+]
+MAP_TONE_PRESET_OPTS = [
+    ("warm", "warm"),
+    ("cool", "cool"),
+    ("neutral", "neutral"),
+    ("custom", "custom"),
+]
 DEFAULT_PRESENCE_TARGETS = 3
 
 
@@ -208,6 +226,229 @@ def _field_screen_to_patch(fields: dict) -> dict:
             "shear_max_px": fields.get("field_shear_max_px"),
         }
     )
+
+
+def _map_sfx_str(val, default="") -> str:
+    if val is None:
+        return default
+    return str(val).strip()
+
+
+def _map_sfx_rgb_str(val, default="") -> str:
+    if val is None:
+        return default
+    if isinstance(val, (list, tuple)) and len(val) >= 3:
+        try:
+            return f"{int(val[0])},{int(val[1])},{int(val[2])}"
+        except (TypeError, ValueError):
+            return default
+    s = str(val).strip()
+    return s if s else default
+
+
+def _map_sfx_block_on(block) -> bool:
+    """screen_fx[kind] 블록이 켜져 있는지. 키 자체가 없으면 False, on 생략이면 True."""
+    if not isinstance(block, dict):
+        return False
+    if "on" not in block:
+        return True
+    v = block.get("on")
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+    return bool(v)
+
+
+def map_field_defaults_to_fields(field: dict) -> dict:
+    """world_data[map].field → 에디터 필드. tilt/shear 키 없음 = CONFIG 기본."""
+    f = field if isinstance(field, dict) else {}
+    fields = {
+        "map_tilt_on": _opt_bool_field(f.get("tilt_on"), ""),
+        "map_shear_on": _opt_bool_field(f.get("shear_on"), ""),
+    }
+    sfx = f.get("screen_fx") if isinstance(f.get("screen_fx"), dict) else {}
+
+    cloud = sfx.get("cloud") if isinstance(sfx.get("cloud"), dict) else None
+    fields["map_cloud_on"] = "true" if _map_sfx_block_on(cloud) else "false"
+    c = cloud or {}
+    fields["map_cloud_dir"] = _map_sfx_str(c.get("dir"), "RANDOM") or "RANDOM"
+    fields["map_cloud_speed"] = _map_sfx_str(c.get("speed"), "")
+    fields["map_cloud_freq"] = _map_sfx_str(c.get("freq", c.get("frequency")), "")
+    fields["map_cloud_grid_cell"] = _map_sfx_str(c.get("grid_cell"), "")
+    fields["map_cloud_grid_jitter"] = _map_sfx_str(c.get("grid_jitter"), "")
+    fields["map_cloud_grid_max"] = _map_sfx_str(c.get("grid_max"), "")
+
+    rain = sfx.get("rain") if isinstance(sfx.get("rain"), dict) else None
+    fields["map_rain_on"] = "true" if _map_sfx_block_on(rain) else "false"
+    r = rain or {}
+    fields["map_rain_density"] = _map_sfx_str(r.get("density"), "")
+    fields["map_rain_speed"] = _map_sfx_str(r.get("speed"), "")
+    fields["map_rain_angle"] = _map_sfx_str(r.get("angle"), "")
+    fields["map_rain_len"] = _map_sfx_str(r.get("drop_len"), "")
+    fields["map_rain_alpha"] = _map_sfx_str(r.get("alpha", r.get("rain_alpha")), "")
+    fields["map_rain_color"] = _map_sfx_rgb_str(r.get("color"), "")
+
+    vig = sfx.get("vignette") if isinstance(sfx.get("vignette"), dict) else None
+    fields["map_vignette_on"] = "true" if _map_sfx_block_on(vig) else "false"
+    v = vig or {}
+    fields["map_vignette_strength"] = _map_sfx_str(v.get("strength"), "")
+    fields["map_vignette_size"] = _map_sfx_str(v.get("size", v.get("inner")), "")
+    fields["map_vignette_softness"] = _map_sfx_str(v.get("softness"), "")
+    fields["map_vignette_color"] = _map_sfx_rgb_str(v.get("color"), "")
+
+    tone = sfx.get("tone") if isinstance(sfx.get("tone"), dict) else None
+    fields["map_tone_on"] = "true" if _map_sfx_block_on(tone) else "false"
+    t = tone or {}
+    preset = _map_sfx_str(t.get("preset", t.get("tone")), "warm") or "warm"
+    fields["map_tone_preset"] = preset if preset in ("warm", "cool", "neutral", "custom") else "warm"
+    fields["map_tone_strength"] = _map_sfx_str(t.get("strength"), "")
+    fields["map_tone_color"] = _map_sfx_rgb_str(t.get("color"), "")
+    return fields
+
+
+def _map_fx_put_num(dst: dict, key: str, raw, *, as_int=False) -> None:
+    s = str(raw or "").strip()
+    if not s:
+        return
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return
+    dst[key] = int(round(v)) if as_int else v
+
+
+def _map_fx_put_color(dst: dict, raw) -> None:
+    s = str(raw or "").strip()
+    if not s:
+        return
+    dst["color"] = s
+
+
+def map_field_defaults_from_fields(fields: dict) -> dict:
+    """에디터 필드 → world_data[map].field.
+
+    비어 있으면 {} (호출측에서 field 키 삭제).
+    screen_fx: On 인 kind 만 저장 (엔진 build_* 와 동일 키).
+    """
+    out = {}
+    t = _parse_opt_bool(fields.get("map_tilt_on"))
+    if t is not None:
+        out["tilt_on"] = bool(t)
+    s = _parse_opt_bool(fields.get("map_shear_on"))
+    if s is not None:
+        out["shear_on"] = bool(s)
+
+    screen_fx = {}
+
+    if _parse_opt_bool(fields.get("map_cloud_on")) is True:
+        cloud = {}
+        d = str(fields.get("map_cloud_dir") or "").strip().upper() or "RANDOM"
+        cloud["dir"] = d
+        _map_fx_put_num(cloud, "speed", fields.get("map_cloud_speed"))
+        _map_fx_put_num(cloud, "freq", fields.get("map_cloud_freq"))
+        _map_fx_put_num(cloud, "grid_cell", fields.get("map_cloud_grid_cell"))
+        _map_fx_put_num(cloud, "grid_jitter", fields.get("map_cloud_grid_jitter"))
+        _map_fx_put_num(cloud, "grid_max", fields.get("map_cloud_grid_max"), as_int=True)
+        screen_fx["cloud"] = cloud
+
+    if _parse_opt_bool(fields.get("map_rain_on")) is True:
+        rain = {}
+        _map_fx_put_num(rain, "density", fields.get("map_rain_density"))
+        _map_fx_put_num(rain, "speed", fields.get("map_rain_speed"))
+        _map_fx_put_num(rain, "angle", fields.get("map_rain_angle"))
+        _map_fx_put_num(rain, "drop_len", fields.get("map_rain_len"), as_int=True)
+        _map_fx_put_num(rain, "alpha", fields.get("map_rain_alpha"), as_int=True)
+        _map_fx_put_color(rain, fields.get("map_rain_color"))
+        screen_fx["rain"] = rain
+
+    if _parse_opt_bool(fields.get("map_vignette_on")) is True:
+        vig = {}
+        _map_fx_put_num(vig, "strength", fields.get("map_vignette_strength"))
+        _map_fx_put_num(vig, "size", fields.get("map_vignette_size"))
+        _map_fx_put_num(vig, "softness", fields.get("map_vignette_softness"))
+        _map_fx_put_color(vig, fields.get("map_vignette_color"))
+        screen_fx["vignette"] = vig
+
+    if _parse_opt_bool(fields.get("map_tone_on")) is True:
+        tone = {}
+        preset = str(fields.get("map_tone_preset") or "warm").strip().lower() or "warm"
+        if preset not in ("warm", "cool", "neutral", "custom"):
+            preset = "warm"
+        tone["preset"] = preset
+        _map_fx_put_num(tone, "strength", fields.get("map_tone_strength"))
+        if preset == "custom":
+            _map_fx_put_color(tone, fields.get("map_tone_color"))
+        screen_fx["tone"] = tone
+
+    if screen_fx:
+        out["screen_fx"] = screen_fx
+    return out
+
+
+def map_field_defaults_modal_section_rows() -> dict:
+    """맵 진입 시 틸트/쉬어 + ambient SCREEN_FX 모달 행."""
+    try:
+        from data import CONFIG
+
+        cfg_tilt = bool(CONFIG.get("FIELD_PERSPECTIVE_DEFAULT_ON", False))
+        cfg_shear = bool(CONFIG.get("TILT_SHEAR_ENABLED", False))
+    except Exception:
+        cfg_tilt, cfg_shear = False, False
+    return {
+        "basic": [
+            (
+                "※ 맵 진입 시 1회 적용. presence 존은 틸트/쉬어만 체류 중 덮어쓰기",
+                "_hint_map_field_intro",
+                "hint",
+            ),
+            (
+                f"CONFIG 기본 — tilt={'ON' if cfg_tilt else 'OFF'}, shear={'ON' if cfg_shear else 'OFF'}",
+                "_hint_map_field_cfg",
+                "hint",
+            ),
+            ("tilt_on (세로 압축)", "map_tilt_on", "dropdown", MAP_FIELD_ON_OPTS),
+            ("shear_on (가로 밀림)", "map_shear_on", "dropdown", MAP_FIELD_ON_OPTS),
+            (
+                "틸트·쉬어·FX 모두 비우면 world_data 의 field 키를 제거합니다",
+                "_hint_map_field_clear",
+                "hint",
+            ),
+        ],
+        "cloud": [
+            ("※ 구름 그림자 — 이벤트 SCREEN_FX kind=cloud 과 동일", "_hint_map_cloud", "hint"),
+            ("cloud on", "map_cloud_on", "dropdown", MAP_FX_ON_OPTS),
+            ("dir", "map_cloud_dir", "dropdown", MAP_CLOUD_DIR_OPTS),
+            ("speed (px/sec, 비우면 엔진 기본)", "map_cloud_speed", "text"),
+            ("freq (spawns/sec)", "map_cloud_freq", "text"),
+            ("grid_cell", "map_cloud_grid_cell", "text"),
+            ("grid_jitter (0~0.49)", "map_cloud_grid_jitter", "text"),
+            ("grid_max", "map_cloud_grid_max", "text"),
+        ],
+        "rain": [
+            ("※ 비 — SCREEN_FX kind=rain", "_hint_map_rain", "hint"),
+            ("rain on", "map_rain_on", "dropdown", MAP_FX_ON_OPTS),
+            ("density 0~1", "map_rain_density", "text"),
+            ("speed px/sec", "map_rain_speed", "text"),
+            ("angle deg (0=수직↓)", "map_rain_angle", "text"),
+            ("drop_len px", "map_rain_len", "text"),
+            ("alpha", "map_rain_alpha", "text"),
+            ("color R,G,B", "map_rain_color", "text"),
+        ],
+        "vignette": [
+            ("※ 비네팅 — SCREEN_FX kind=vignette", "_hint_map_vig", "hint"),
+            ("vignette on", "map_vignette_on", "dropdown", MAP_FX_ON_OPTS),
+            ("strength 0~1", "map_vignette_strength", "text"),
+            ("size 0~1 (중앙 밝은 영역)", "map_vignette_size", "text"),
+            ("softness 0~1", "map_vignette_softness", "text"),
+            ("color R,G,B", "map_vignette_color", "text"),
+        ],
+        "tone": [
+            ("※ 톤/색온도 — SCREEN_FX kind=tone", "_hint_map_tone", "hint"),
+            ("tone on", "map_tone_on", "dropdown", MAP_FX_ON_OPTS),
+            ("preset", "map_tone_preset", "dropdown", MAP_TONE_PRESET_OPTS),
+            ("strength 0~1", "map_tone_strength", "text"),
+            ("color R,G,B (custom)", "map_tone_color", "text"),
+        ],
+    }
 
 
 def presence_zone_to_fields(zone: dict, *, target_count: int = DEFAULT_PRESENCE_TARGETS) -> dict:
@@ -914,7 +1155,14 @@ def char_def_modal_section_rows(
     basic_setup.extend(
         [
             ("── 이동 AI (behavior) ──", "_hint_beh", "hint"),
-            ("behavior mode — idle=가만히, patrol=왕복 등", "behavior_mode", "dropdown", BEHAVIOR_OPTS),
+            (
+                "behavior — idle=가만히 / randomwalk=걷기 / randomplay=뛰어놀기",
+                "behavior_mode",
+                "dropdown",
+                BEHAVIOR_OPTS,
+            ),
+            ("roam radius (randomwalk/randomplay, px)", "wander_radius", "text"),
+            ("roam interval ms (행동 전환 간격)", "wander_interval_ms", "text"),
             ("jump_max_gap — 점프로 넘을 수 있는 틈(픽셀)", "jump_max_gap", "text"),
             ("mask_nav — true면 마스크 위를 걸어다님", "mask_nav", "dropdown", BOOL_OPTS),
             ("── 시각 효과 (반짝임·틴트·zoom) — 맵 로드·progress 자동 적용 ──", "_hint_entity_fx_def", "hint"),
@@ -967,11 +1215,11 @@ def char_inst_modal_section_rows(
     basic_setup.extend(
         [
             ("── behavior (맵) ──", "_hint_inst_beh", "hint"),
-            ("Behavior mode", "behavior_mode", "dropdown", BEHAVIOR_OPTS),
+            ("Behavior — idle / randomwalk / randomplay …", "behavior_mode", "dropdown", BEHAVIOR_OPTS),
             ("Waypoints (x,y;…)", "waypoints", "text"),
             ("Patrol wait ms", "wait_ms", "text"),
-            ("Wander radius", "wander_radius", "text"),
-            ("Wander interval ms", "wander_interval_ms", "text"),
+            ("Roam radius (randomwalk/randomplay)", "wander_radius", "text"),
+            ("Roam interval ms", "wander_interval_ms", "text"),
             ("Follow trigger px", "follow_trigger", "text"),
             ("Follow stop px", "follow_stop", "text"),
             ("Flee trigger px", "flee_trigger", "text"),
@@ -1045,6 +1293,8 @@ def obj_inst_modal_section_rows(
 
 
 def char_def_to_fields(cdef: dict, char_name: str) -> dict:
+    from char_behavior import display_behavior_mode
+
     inter = cdef.get("interact") or {}
     beh = cdef.get("behavior") or {}
     talk = cdef.get("talk") or {}
@@ -1060,7 +1310,9 @@ def char_def_to_fields(cdef: dict, char_name: str) -> dict:
         "interact_offset_y": ioy,
         "interact_enabled": _interact_enabled_field(inter),
         "face_player": "true" if inter.get("face_player_on_talk", True) else "false",
-        "behavior_mode": str(beh.get("mode") or "idle"),
+        "behavior_mode": display_behavior_mode(beh.get("mode") or "idle"),
+        "wander_radius": str(beh.get("radius", 64)),
+        "wander_interval_ms": str(beh.get("interval_ms", 3000)),
         "jump_max_gap": str(cdef.get("jump_max_gap", 30)),
         "mask_nav": "true" if cdef.get("mask_nav") else "false",
         "fallback_text": str((fb_say or {}).get("text") or ""),
@@ -1108,7 +1360,20 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
         "yes",
     )
     mode = str(fields.get("behavior_mode") or "idle").strip() or "idle"
-    out["behavior"] = {"mode": mode}
+    from char_behavior import display_behavior_mode
+
+    mode = display_behavior_mode(mode)
+    beh_out: dict = {"mode": mode}
+    if mode in ("randomwalk", "randomplay", "wander"):
+        try:
+            beh_out["radius"] = float(fields.get("wander_radius") or 64)
+        except ValueError:
+            pass
+        try:
+            beh_out["interval_ms"] = int(float(fields.get("wander_interval_ms") or 3000))
+        except ValueError:
+            pass
+    out["behavior"] = beh_out
     ss = _state_patch_from_fields(fields, "spawn_")
     if ss:
         out["spawn_state"] = ss
@@ -1188,6 +1453,8 @@ def format_waypoints(wps: list) -> str:
 
 
 def char_inst_fields_from_npc(npc) -> dict:
+    from char_behavior import display_behavior_mode
+
     spec = getattr(npc, "behavior_spec", None) or {}
     raw = getattr(npc, "interact_instance", None) or {}
     inter = raw if isinstance(raw, dict) else {}
@@ -1200,7 +1467,7 @@ def char_inst_fields_from_npc(npc) -> dict:
         "interact_range": str(inter.get("range", "")),
         "interact_offset_x": iox,
         "interact_offset_y": ioy,
-        "behavior_mode": str(spec.get("mode") or "idle"),
+        "behavior_mode": display_behavior_mode(spec.get("mode") or "idle"),
         "waypoints": format_waypoints(spec.get("waypoints") or []),
         "wait_ms": str(spec.get("wait_ms", 800)),
         "wander_radius": str(spec.get("radius", 64)),
@@ -1240,7 +1507,11 @@ def apply_char_inst_fields(npc, fields: dict) -> None:
         inst_inter["bindings"] = binds
     npc.interact_instance = inst_inter
 
-    spec: dict = {"mode": str(fields.get("behavior_mode") or "idle").strip() or "idle"}
+    from char_behavior import display_behavior_mode
+
+    spec: dict = {
+        "mode": display_behavior_mode(str(fields.get("behavior_mode") or "idle").strip() or "idle")
+    }
     wps = parse_waypoints(fields.get("waypoints"))
     if wps:
         spec["waypoints"] = wps
@@ -2049,6 +2320,42 @@ class ObjInstModal(_ConfigModal):
             cb()
 
 
+class MapFieldDefaultsModal(_ConfigModal):
+    """MAP world_data[map].field — 맵 진입 시 틸트/쉬어 + ambient SCREEN_FX."""
+
+    tag = "map_field"
+    title = "MAP FIELD / SCREEN FX"
+
+    def get_sections(self):
+        return [
+            ("basic", "틸트 / 쉬어"),
+            ("cloud", "구름"),
+            ("rain", "비"),
+            ("vignette", "비네팅"),
+            ("tone", "톤"),
+        ]
+
+    def get_section_rows(self):
+        return map_field_defaults_modal_section_rows()
+
+    def open_for_map(self, map_id: str, world_data: dict | None):
+        """현재 맵의 field 블록을 모달에 로드."""
+        mid = str(map_id or "").strip()
+        row = (world_data or {}).get(mid) if mid else None
+        field = row.get("field") if isinstance(row, dict) else None
+        self.fields = map_field_defaults_to_fields(field if isinstance(field, dict) else {})
+        self.show = True
+        self.scroll = 0
+        self._reset_section()
+        self.active_field = None
+        self.dd_open = False
+
+    def on_save(self, ctx):
+        cb = ctx.get("on_map_field_defaults_saved")
+        if callable(cb):
+            cb(map_field_defaults_from_fields(self.fields))
+
+
 class PresenceZoneModal(_ConfigModal):
     """MAP presence_zones — 화면/플레이어/지정 오브젝트 상태 오버레이."""
 
@@ -2139,6 +2446,7 @@ char_inst_modal = CharInstModal()
 obj_def_modal = ObjDefModal()
 obj_inst_modal = ObjInstModal()
 presence_zone_modal = PresenceZoneModal()
+map_field_defaults_modal = MapFieldDefaultsModal()
 
 
 def any_char_modal_open() -> bool:
@@ -2148,6 +2456,7 @@ def any_char_modal_open() -> bool:
         or obj_def_modal.show
         or obj_inst_modal.show
         or presence_zone_modal.show
+        or map_field_defaults_modal.show
     )
 
 
@@ -2157,3 +2466,4 @@ def close_all_char_modals():
     obj_def_modal.close()
     obj_inst_modal.close()
     presence_zone_modal.close()
+    map_field_defaults_modal.close()

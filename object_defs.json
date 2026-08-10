@@ -716,6 +716,12 @@
     "collision": false,
     "category": "건축물류"
   },
+  "pond01_flower": {
+    "path": "images/object/background/pond01_flower.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "건축물류"
+  },
   "escape01": {
     "path": "images/event/escape01",
     "height": 80,
@@ -776,6 +782,30 @@
   },
   "baseballbat1": {
     "path": "images/object/baseballbat1.png",
+    "is_holdable": false,
+    "collision": false,
+    "category": "들 수 있는 물건"
+  },
+  "waterdrop01": {
+    "path": "images/fx/waterdrop01",
+    "is_holdable": false,
+    "collision": false,
+    "category": "들 수 있는 물건"
+  },
+  "waterdrop02": {
+    "path": "images/fx/waterdrop02",
+    "is_holdable": false,
+    "collision": false,
+    "category": "들 수 있는 물건"
+  },
+  "splash01": {
+    "path": "images/fx/splash01",
+    "is_holdable": false,
+    "collision": false,
+    "category": "들 수 있는 물건"
+  },
+  "light01": {
+    "path": "images/fx/light01",
     "is_holdable": false,
     "collision": false,
     "category": "들 수 있는 물건"

@@ -402,11 +402,89 @@ def _tilt_factor_min():
     return max(0.02, min(0.99, v))
 
 
-def apply_map_field_defaults(map_id, ui, ev_mgr=None):
-    """맵 진입 시 ui.tilt_target·쉬어 플래그를 MAP_FIELD_DEFAULTS 에 맞게 설정."""
+def apply_map_screen_fx_defaults(ev_mgr, screen_fx_cfg) -> None:
+    """맵 ambient SCREEN_FX (cloud/rain/vignette/tone) 적용. flash·shake 는 끔.
+
+    screen_fx_cfg: { "cloud": {...}, "rain": {...}, ... } — kind 키가 있으면 ON.
+    블록에 on:false 가 있으면 해당 kind 는 OFF.
+    엔진 build_*_from_step 재사용 (이벤트 SCREEN_FX 와 동일 파라미터).
+    """
+    if ev_mgr is None:
+        return
+    from engine import (
+        build_cloud_shadow_control_from_step,
+        build_screen_rain_from_step,
+        build_screen_vignette_from_step,
+        build_screen_tone_from_step,
+    )
+
+    # 맵 전환 시 이전 맵·이벤트 ambient 잔상 제거 (번쩍/흔들도 초기화)
+    try:
+        if hasattr(ev_mgr, "clear_all_screen_fx"):
+            ev_mgr.clear_all_screen_fx()
+        else:
+            ev_mgr.cloud_shadow_control = {"enabled": False}
+            ev_mgr.screen_fx_flash = {"enabled": False}
+            ev_mgr.screen_fx_shake = {"enabled": False}
+            ev_mgr.screen_fx_rain = {"enabled": False}
+            ev_mgr.screen_fx_vignette = {"enabled": False}
+            ev_mgr.screen_fx_tone = {"enabled": False}
+    except Exception:
+        return
+
+    if not isinstance(screen_fx_cfg, dict) or not screen_fx_cfg:
+        return
+
+    def _block_on(block) -> bool:
+        if not isinstance(block, dict):
+            return False
+        if "on" in block:
+            v = block.get("on")
+            if isinstance(v, str):
+                return v.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+            return bool(v)
+        return True
+
+    cloud = screen_fx_cfg.get("cloud")
+    if _block_on(cloud):
+        try:
+            ev_mgr.cloud_shadow_control = build_cloud_shadow_control_from_step(dict(cloud))
+        except Exception:
+            pass
+
+    rain = screen_fx_cfg.get("rain")
+    if _block_on(rain):
+        try:
+            ev_mgr.screen_fx_rain = build_screen_rain_from_step(dict(rain))
+        except Exception:
+            pass
+
+    vig = screen_fx_cfg.get("vignette")
+    if _block_on(vig):
+        try:
+            ev_mgr.screen_fx_vignette = build_screen_vignette_from_step(dict(vig))
+        except Exception:
+            pass
+
+    tone = screen_fx_cfg.get("tone")
+    if _block_on(tone):
+        try:
+            ev_mgr.screen_fx_tone = build_screen_tone_from_step(dict(tone))
+        except Exception:
+            pass
+
+
+def apply_map_field_defaults(map_id, ui, ev_mgr=None, world_data=None):
+    """맵 진입 시 틸트·쉬어·화면 FX 를 world_data[map].field 에 맞게 설정.
+
+    world_data: flow.world_data.
+    - tilt_on / shear_on: 생략 시 CONFIG 전역 기본값.
+    - screen_fx: cloud|rain|vignette|tone — 맵 ambient (이벤트 SCREEN_FX 와 동일 빌더).
+    스키마: data.resolve_map_field_defaults / data.py 주석.
+    """
     from data import resolve_map_field_defaults
 
-    cfg = resolve_map_field_defaults(map_id)
+    cfg = resolve_map_field_defaults(map_id, world_data=world_data)
     tilt_on = bool(cfg.get("tilt_on", False))
     shear_on = bool(cfg.get("shear_on", False))
 
@@ -441,6 +519,9 @@ def apply_map_field_defaults(map_id, ui, ev_mgr=None):
                 ev_mgr.tilt_control = None
         except Exception:
             pass
+
+    # 화면 FX ambient (구름·비·비네팅·톤) — 맵마다 리셋 후 적용
+    apply_map_screen_fx_defaults(ev_mgr, cfg.get("screen_fx"))
     return float(ui.tilt_target)
 
 
@@ -1245,6 +1326,381 @@ def hide_game_exit_confirm(ev_mgr) -> None:
             pass
 
 
+# =============================================================================
+# 이벤트 피커 (필드 E 키) — LOCAL/GLOBAL/SYNC/FRAGMENTS 목록 → 클릭/Enter 즉시 실행
+# =============================================================================
+
+_EVENT_PICKER = {
+    "open": False,
+    "scroll": 0,
+    "selected": 0,
+    "rows": [],  # [{id, section, title, label}]
+    "row_hit": [],  # [(rect, index)] — draw 시 갱신
+    "panel_rect": None,
+    "close_rect": None,
+    "list_rect": None,
+}
+
+
+def event_picker_is_open() -> bool:
+    return bool(_EVENT_PICKER.get("open"))
+
+
+def event_picker_close() -> None:
+    _EVENT_PICKER["open"] = False
+    _EVENT_PICKER["row_hit"] = []
+    _EVENT_PICKER["panel_rect"] = None
+    _EVENT_PICKER["close_rect"] = None
+    _EVENT_PICKER["list_rect"] = None
+
+
+def _event_picker_enabled() -> bool:
+    try:
+        return bool(CONFIG.get("EVENT_PICKER_HOTKEY_ENABLED", True))
+    except Exception:
+        return True
+
+
+def event_picker_hotkey_code():
+    """CONFIG EVENT_PICKER_HOTKEY → pygame key int (기본 K_e)."""
+    pk = _pygame_key_from_spec(CONFIG.get("EVENT_PICKER_HOTKEY", "e"))
+    return int(pk) if pk is not None else int(pygame.K_e)
+
+
+def build_event_picker_rows(event_data) -> list:
+    """events.json 섹션별 이벤트 목록 (표시용)."""
+    rows = []
+    if not isinstance(event_data, dict):
+        return rows
+    for section in ("LOCAL", "GLOBAL", "SYNC", "FRAGMENTS"):
+        sec = event_data.get(section) or {}
+        if not isinstance(sec, dict):
+            continue
+        for eid in sorted(sec.keys(), key=lambda s: str(s)):
+            entry = sec.get(eid) or {}
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title") or "").strip()
+            label = f"[{section[0]}] {eid}"
+            if title:
+                label = f"{label} - {title}"
+            rows.append(
+                {
+                    "id": str(eid),
+                    "section": section,
+                    "title": title,
+                    "label": label,
+                }
+            )
+    return rows
+
+
+def event_picker_open(event_data) -> None:
+    """목록을 새로 읽어 모달 오픈."""
+    if not _event_picker_enabled():
+        return
+    rows = build_event_picker_rows(event_data)
+    _EVENT_PICKER["rows"] = rows
+    _EVENT_PICKER["scroll"] = 0
+    _EVENT_PICKER["selected"] = 0 if rows else -1
+    _EVENT_PICKER["open"] = True
+
+
+def event_picker_toggle(event_data) -> bool:
+    """토글. 열린 상태면 True."""
+    if event_picker_is_open():
+        event_picker_close()
+        return False
+    event_picker_open(event_data)
+    return True
+
+
+def _event_picker_layout(surf_w, surf_h):
+    try:
+        row_h = int(CONFIG.get("EVENT_PICKER_ROW_H", 18) or 18)
+    except Exception:
+        row_h = 18
+    row_h = max(14, min(28, row_h))
+    try:
+        vis = int(CONFIG.get("EVENT_PICKER_VISIBLE_ROWS", 12) or 12)
+    except Exception:
+        vis = 12
+    vis = max(4, min(20, vis))
+    pad = 8
+    title_h = 20
+    panel_w = min(int(surf_w * 0.92), max(220, int(surf_w) - 16))
+    list_h = vis * row_h
+    panel_h = title_h + pad + list_h + pad + 16
+    panel_h = min(panel_h, int(surf_h) - 12)
+    list_h = max(row_h, panel_h - title_h - pad - 16)
+    vis = max(1, list_h // row_h)
+    px = max(4, (int(surf_w) - panel_w) // 2)
+    py = max(4, (int(surf_h) - panel_h) // 2)
+    panel = pygame.Rect(px, py, panel_w, panel_h)
+    close_r = pygame.Rect(panel.right - 22, panel.top + 4, 18, 14)
+    list_r = pygame.Rect(panel.left + pad, panel.top + title_h + 4, panel_w - pad * 2, list_h)
+    return panel, close_r, list_r, row_h, vis
+
+
+def _event_picker_clamp_scroll():
+    rows = _EVENT_PICKER.get("rows") or []
+    n = len(rows)
+    vis = 1
+    lr = _EVENT_PICKER.get("list_rect")
+    rh = int(CONFIG.get("EVENT_PICKER_ROW_H", 18) or 18)
+    if lr is not None:
+        try:
+            vis = max(1, int(lr.height) // max(1, rh))
+        except Exception:
+            vis = 12
+    else:
+        try:
+            vis = int(CONFIG.get("EVENT_PICKER_VISIBLE_ROWS", 12) or 12)
+        except Exception:
+            vis = 12
+    max_scroll = max(0, n - vis)
+    sc = int(_EVENT_PICKER.get("scroll") or 0)
+    sc = max(0, min(max_scroll, sc))
+    _EVENT_PICKER["scroll"] = sc
+    sel = int(_EVENT_PICKER.get("selected") or 0)
+    if n <= 0:
+        _EVENT_PICKER["selected"] = -1
+    else:
+        sel = max(0, min(n - 1, sel))
+        _EVENT_PICKER["selected"] = sel
+        # 선택이 보이도록 스크롤
+        if sel < sc:
+            _EVENT_PICKER["scroll"] = sel
+        elif sel >= sc + vis:
+            _EVENT_PICKER["scroll"] = sel - vis + 1
+    return max_scroll, vis
+
+
+def _event_picker_run_selected(
+    ev_mgr,
+    events_catalog,
+    field_tilt_snapshot=None,
+    call_catalog=None,
+) -> bool:
+    rows = _EVENT_PICKER.get("rows") or []
+    sel = int(_EVENT_PICKER.get("selected") or -1)
+    if sel < 0 or sel >= len(rows):
+        return False
+    eid = str(rows[sel].get("id") or "").strip()
+    if not eid:
+        return False
+    from flow import start_system_event
+
+    # 진행 중 이벤트 있으면 끊고 실행 (디버그 피커)
+    if getattr(ev_mgr, "active_event", None):
+        try:
+            ev_mgr.end_event()
+        except Exception:
+            pass
+    # FRAGMENTS 는 merge_event_catalog 에 없을 수 있음 → call catalog 폴백
+    catalog = dict(events_catalog or {})
+    if isinstance(call_catalog, dict):
+        for k, v in call_catalog.items():
+            if k not in catalog:
+                catalog[k] = v
+    ok = start_system_event(
+        ev_mgr,
+        catalog,
+        eid,
+        field_tilt_snapshot=field_tilt_snapshot,
+    )
+    if ok:
+        event_picker_close()
+        print(f"[EventPicker] start {eid}")
+    else:
+        print(f"[EventPicker] failed to start {eid}")
+    return ok
+
+
+def event_picker_handle(
+    event,
+    *,
+    ev_mgr,
+    events_catalog,
+    event_data=None,
+    logical_xy=None,
+    field_tilt_snapshot=None,
+    call_catalog=None,
+) -> str | None:
+    """
+    피커 입력 처리.
+    Returns:
+      "consumed" — 입력 소비
+      "started"  — 이벤트 시작함
+      None       — 피커와 무관
+    """
+    if not _event_picker_enabled():
+        return None
+
+    # 토글 키 (닫혀 있어도 처리 — 호출부가 open 체크 없이도 E 전달 가능)
+    if event.type == pygame.KEYDOWN and int(event.key) == event_picker_hotkey_code():
+        if event_picker_is_open():
+            event_picker_close()
+        else:
+            event_picker_open(event_data if event_data is not None else {})
+        return "consumed"
+
+    if not event_picker_is_open():
+        return None
+
+    if event.type == pygame.KEYDOWN:
+        if event.key == pygame.K_ESCAPE:
+            event_picker_close()
+            return "consumed"
+        if event.key in (pygame.K_UP, pygame.K_w):
+            sel = int(_EVENT_PICKER.get("selected") or 0) - 1
+            _EVENT_PICKER["selected"] = sel
+            _event_picker_clamp_scroll()
+            return "consumed"
+        if event.key in (pygame.K_DOWN, pygame.K_s):
+            sel = int(_EVENT_PICKER.get("selected") or 0) + 1
+            _EVENT_PICKER["selected"] = sel
+            _event_picker_clamp_scroll()
+            return "consumed"
+        if event.key in (pygame.K_PAGEUP,):
+            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) - 5
+            _event_picker_clamp_scroll()
+            return "consumed"
+        if event.key in (pygame.K_PAGEDOWN,):
+            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) + 5
+            _event_picker_clamp_scroll()
+            return "consumed"
+        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_a, pygame.K_SPACE):
+            if _event_picker_run_selected(
+                ev_mgr, events_catalog, field_tilt_snapshot, call_catalog=call_catalog
+            ):
+                return "started"
+            return "consumed"
+
+    if event.type == pygame.MOUSEWHEEL:
+        dy = int(getattr(event, "y", 0) or 0)
+        if dy:
+            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) - dy
+            _event_picker_clamp_scroll()
+        return "consumed"
+
+    if event.type == pygame.MOUSEBUTTONDOWN:
+        mx, my = None, None
+        if logical_xy is not None and len(logical_xy) >= 2:
+            mx, my = int(logical_xy[0]), int(logical_xy[1])
+        else:
+            try:
+                mx, my = int(event.pos[0]), int(event.pos[1])
+            except Exception:
+                return "consumed"
+        btn = int(getattr(event, "button", 1) or 1)
+        if btn in (4, 5):  # 일부 환경 휠
+            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) + (-1 if btn == 4 else 1)
+            _event_picker_clamp_scroll()
+            return "consumed"
+        if btn != 1:
+            return "consumed"
+        cr = _EVENT_PICKER.get("close_rect")
+        if cr is not None and cr.collidepoint(mx, my):
+            event_picker_close()
+            return "consumed"
+        for rect, idx in list(_EVENT_PICKER.get("row_hit") or []):
+            if rect.collidepoint(mx, my):
+                _EVENT_PICKER["selected"] = int(idx)
+                if _event_picker_run_selected(
+                    ev_mgr, events_catalog, field_tilt_snapshot, call_catalog=call_catalog
+                ):
+                    return "started"
+                return "consumed"
+        pr = _EVENT_PICKER.get("panel_rect")
+        if pr is not None and not pr.collidepoint(mx, my):
+            event_picker_close()
+            return "consumed"
+        return "consumed"
+
+    # 피커가 열려 있으면 그 외 입력도 필드로는 내려보내지 않음
+    return "consumed"
+
+
+def draw_event_picker(surf, *, font_title=None, font_row=None) -> None:
+    """논리 해상도 surf 위에 이벤트 피커 모달 그리기."""
+    if not event_picker_is_open() or surf is None:
+        return
+    sw, sh = surf.get_width(), surf.get_height()
+    panel, close_r, list_r, row_h, vis = _event_picker_layout(sw, sh)
+    _EVENT_PICKER["panel_rect"] = panel
+    _EVENT_PICKER["close_rect"] = close_r
+    _EVENT_PICKER["list_rect"] = list_r
+    max_scroll, vis = _event_picker_clamp_scroll()
+    rows = _EVENT_PICKER.get("rows") or []
+    sc = int(_EVENT_PICKER.get("scroll") or 0)
+    sel = int(_EVENT_PICKER.get("selected") or -1)
+
+    # 딤
+    try:
+        dim = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 140))
+        surf.blit(dim, (0, 0))
+    except Exception:
+        pygame.draw.rect(surf, (0, 0, 0), surf.get_rect())
+
+    pygame.draw.rect(surf, (36, 34, 40), panel, border_radius=6)
+    pygame.draw.rect(surf, (120, 110, 100), panel, 1, border_radius=6)
+
+    if font_title is None:
+        try:
+            font_title = pygame.font.SysFont("malgungothic", 12)
+        except Exception:
+            font_title = pygame.font.Font(None, 14)
+    if font_row is None:
+        font_row = font_title
+
+    title = font_title.render("Events (E/Esc 닫기)", True, (240, 230, 210))
+    surf.blit(title, (panel.left + 8, panel.top + 4))
+    pygame.draw.rect(surf, (90, 50, 50), close_r, border_radius=3)
+    xlbl = font_row.render("x", True, (255, 220, 220))
+    surf.blit(xlbl, (close_r.centerx - xlbl.get_width() // 2, close_r.centery - xlbl.get_height() // 2))
+
+    # 리스트 클립
+    prev_clip = surf.get_clip()
+    surf.set_clip(list_r)
+    hits = []
+    y0 = list_r.top
+    for i in range(sc, min(len(rows), sc + vis + 1)):
+        row = rows[i]
+        rr = pygame.Rect(list_r.left, y0 + (i - sc) * row_h, list_r.width, row_h)
+        if i == sel:
+            pygame.draw.rect(surf, (70, 90, 70), rr)
+        elif i % 2 == 0:
+            pygame.draw.rect(surf, (44, 42, 48), rr)
+        else:
+            pygame.draw.rect(surf, (40, 38, 44), rr)
+        txt = str(row.get("label") or row.get("id") or "")
+        # 너무 길면 자르기
+        max_w = rr.width - 6
+        img = font_row.render(txt, True, (230, 225, 215))
+        if img.get_width() > max_w:
+            # 대략 잘라 다시
+            while txt and font_row.size(txt + "…")[0] > max_w:
+                txt = txt[:-1]
+            img = font_row.render(txt + "…", True, (230, 225, 215))
+        surf.blit(img, (rr.left + 3, rr.top + max(0, (row_h - img.get_height()) // 2)))
+        hits.append((rr, i))
+    surf.set_clip(prev_clip)
+    _EVENT_PICKER["row_hit"] = hits
+
+    # 스크롤바
+    if max_scroll > 0 and list_r.height > 8:
+        track = pygame.Rect(list_r.right - 4, list_r.top, 3, list_r.height)
+        pygame.draw.rect(surf, (60, 58, 64), track)
+        thumb_h = max(10, int(list_r.height * vis / max(1, len(rows))))
+        thumb_y = list_r.top + int((list_r.height - thumb_h) * (sc / max(1, max_scroll)))
+        pygame.draw.rect(surf, (160, 150, 130), pygame.Rect(track.left, thumb_y, track.width, thumb_h))
+
+    hint = font_row.render(f"{len(rows)} events  ↑↓/휠  Enter실행", True, (160, 155, 145))
+    surf.blit(hint, (panel.left + 8, panel.bottom - 14))
+
+
 def handle_overlay_ui_click_action(
     ov_act,
     *,
@@ -1321,6 +1777,26 @@ def handle_overlay_ui_click_action(
             pass
         try:
             ev_mgr.remove_ui_overlay("racing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+        return "consumed"
+
+    if act == "stop_bullfrog":
+        try:
+            if field_activities is not None:
+                field_activities.cancel()
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("bullfrog_exit")
         except Exception:
             pass
         try:
@@ -1540,6 +2016,7 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
                     flow.save_game(
                         target_map,
                         [float(target_pos[0]), float(target_pos[1])],
+                        ignore_event_guard=True,
                     )
                 except Exception:
                     pass
@@ -1589,6 +2066,86 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
                     flow.save_game(
                         target_map,
                         [float(target_pos[0]), float(target_pos[1])],
+                        ignore_event_guard=True,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": False,
+            }
+        except Exception:
+            pass
+    elif n == "start_bullfrog":
+        from activities import request_field_activity
+
+        params = {"save_data": dict(flow.save_data) if flow else {}}
+        if isinstance(step, dict):
+            if step.get("map") or step.get("map_id"):
+                params["map"] = step.get("map") or step.get("map_id")
+            if step.get("return_map"):
+                params["return_map"] = step.get("return_map")
+            if step.get("return_pos"):
+                params["return_pos"] = step.get("return_pos")
+        request_field_activity(ev_mgr, "bullfrog", **params)
+    elif n == "stop_bullfrog":
+        try:
+            ev_mgr.field_activity_stop_request = True
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("bullfrog_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+    elif n == "return_from_bullfrog":
+        target_map = ""
+        target_pos = None
+        try:
+            sd = flow.save_data if flow else {}
+            target_map = str(sd.pop("bullfrog_exit_map", "") or "").strip()
+            target_pos = sd.pop("bullfrog_exit_pos", None)
+        except Exception:
+            target_map = ""
+            target_pos = None
+        if not target_map:
+            try:
+                bf = (flow.world_data or {}).get("bg_pond01", {}).get("bullfrog", {})
+                target_map = str(bf.get("exit_map") or "bg_jjangpu").strip()
+                ep = bf.get("exit_pos")
+                if isinstance(ep, (list, tuple)) and len(ep) >= 2:
+                    target_pos = [float(ep[0]), float(ep[1])]
+            except Exception:
+                target_map = "bg_jjangpu"
+                target_pos = [816.0, 2304.0]
+        if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
+            target_pos = [816.0, 2304.0]
+        try:
+            ev_mgr.pending_map_change = {
+                "map_id": target_map,
+                "pos": [float(target_pos[0]), float(target_pos[1])],
+            }
+            if flow is not None:
+                flow.save_data["current_map"] = target_map
+                flow.save_data["player_pos"] = [
+                    float(target_pos[0]),
+                    float(target_pos[1]),
+                ]
+                try:
+                    flow.save_game(
+                        target_map,
+                        [float(target_pos[0]), float(target_pos[1])],
+                        ignore_event_guard=True,
                     )
                 except Exception:
                     pass
@@ -1602,7 +2159,7 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
         except Exception:
             pass
     elif n.startswith("start_activity_"):
-        # 범용: start_activity_fishing, start_activity_swing (추후)
+        # 범용: start_activity_fishing, start_activity_bullfrog 등
         from activities import request_field_activity
 
         act_id = n[len("start_activity_") :].strip()
@@ -1611,7 +2168,7 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
             for k in ("pond", "pond_id", "win_flag", "map", "map_id", "mode", "return_map", "return_pos"):
                 if k in step and step.get(k) is not None:
                     params[k] = step.get(k)
-        if act_id == "baseball" or act_id == "racing":
+        if act_id in ("baseball", "racing", "bullfrog"):
             params["save_data"] = dict(flow.save_data) if flow else {}
         if act_id:
             request_field_activity(ev_mgr, act_id, **params)

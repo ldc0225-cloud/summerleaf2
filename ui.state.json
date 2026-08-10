@@ -17,9 +17,9 @@
       "outline_enabled": true,
       "outline_px_320": 1.0,
       "outline_color": [
-        255,
-        255,
-        255
+        0,
+        0,
+        0
       ],
       "force_color": true,
       "antialias": false,
@@ -38,9 +38,9 @@
       "outline_enabled": true,
       "outline_px_320": 1.0,
       "outline_color": [
-        255,
-        255,
-        255
+        0,
+        0,
+        0
       ],
       "force_color": true,
       "antialias": false,
@@ -59,9 +59,9 @@
       "outline_enabled": true,
       "outline_px_320": 1.0,
       "outline_color": [
-        255,
-        255,
-        255
+        0,
+        0,
+        0
       ],
       "force_color": true,
       "antialias": false,
@@ -73,9 +73,9 @@
       "font_key": "default",
       "size_320": 12.0,
       "color": [
-        255,
-        255,
-        255
+        0,
+        0,
+        0
       ],
       "outline_enabled": true,
       "outline_px_320": 1.0,
@@ -94,9 +94,9 @@
       "font_key": "default",
       "size_320": 12.0,
       "color": [
-        255,
-        255,
-        255
+        0,
+        0,
+        0
       ],
       "outline_enabled": true,
       "outline_px_320": 1.0,
@@ -122,9 +122,9 @@
       "outline_enabled": true,
       "outline_px_320": 1.0,
       "outline_color": [
-        255,
-        255,
-        255
+        0,
+        0,
+        0
       ],
       "force_color": true,
       "antialias": false,
@@ -136,9 +136,9 @@
       "font_key": "default",
       "size_320": 12.0,
       "color": [
-        255,
-        255,
-        255
+        0,
+        0,
+        0
       ],
       "outline_enabled": true,
       "outline_px_320": 1.0,
@@ -155,7 +155,7 @@
       "label": "타이틀 / 로고",
       "desc": "TITLE·홈런 연출 등 logo 폰트",
       "font_key": "logo",
-      "size_320": 36.0,
+      "size_320": 32.0,
       "color": [
         255,
         255,

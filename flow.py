@@ -1,12 +1,19 @@
 import json, os, pygame, math
 import re
 import copy
-from data import CONFIG, CHAR_ASSETS, OBJ_ASSETS, BASEBALL_DEFAULTS, RACING_DEFAULTS
+from data import (
+    CONFIG,
+    CHAR_ASSETS,
+    OBJ_ASSETS,
+    BASEBALL_DEFAULTS,
+    RACING_DEFAULTS,
+    BULLFROG_DEFAULTS,
+)
 
 
 def resolve_activity_arena_exit(world_data, map_id, config=None):
     """
-    야구/레이싱 등 미니게임 전용 맵이면 (exit_map, exit_pos) 반환. 아니면 None.
+    야구/레이싱/황소개구리 등 미니게임 전용 맵이면 (exit_map, exit_pos) 반환. 아니면 None.
 
     [언제 쓰나]
       - 게임 종료·세이브: 미니게임 맵 좌표를 영속화하지 않음
@@ -15,8 +22,9 @@ def resolve_activity_arena_exit(world_data, map_id, config=None):
     [exit 출처 우선순위]
       1) world_data[map].baseball.exit_*
       2) world_data[map].racing.exit_*
-      3) world_data[map] 루트 exit_*
-      4) data.py BASEBALL_DEFAULTS / RACING_DEFAULTS
+      3) world_data[map].bullfrog.exit_*
+      4) world_data[map] 루트 exit_*
+      5) data.py BASEBALL_DEFAULTS / RACING_DEFAULTS / BULLFROG_DEFAULTS
     """
     mid = str(map_id or "").strip()
     if not mid or not isinstance(world_data, dict):
@@ -32,6 +40,9 @@ def resolve_activity_arena_exit(world_data, map_id, config=None):
     rc = m.get("racing")
     if isinstance(rc, dict):
         candidates.append((rc, RACING_DEFAULTS if isinstance(RACING_DEFAULTS, dict) else {}))
+    bf = m.get("bullfrog")
+    if isinstance(bf, dict):
+        candidates.append((bf, BULLFROG_DEFAULTS if isinstance(BULLFROG_DEFAULTS, dict) else {}))
     if m.get("exit_map") is not None or m.get("exit_pos") is not None:
         candidates.append((m, {}))
 
@@ -1821,18 +1832,22 @@ def start_catalog_event(
     field_tilt_snapshot=None,
     *,
     is_sync=False,
+    map_id=None,
 ) -> bool:
     """events_catalog 에서 ID 로 연출 시작(존/글로벌/상호작용 공통)."""
     ev = events_catalog.get(event_id)
     if not ev or ev_mgr.active_event:
         return False
     ev_mgr.reset_entity_event_zooms(player, npcs, objs)
+    pos = getattr(player, "pos", None) if player is not None else None
     ev_mgr.start_event(
         ev.get("steps") or [],
         event_id,
         ev.get("result"),
         ev,
         is_sync=is_sync,
+        map_id=map_id,
+        player_pos=pos,
     )
     if field_tilt_snapshot is not None:
         ev_mgr.field_tilt_snapshot = field_tilt_snapshot
@@ -1882,6 +1897,7 @@ def try_start_interact_event(
             npcs,
             objs,
             field_tilt_snapshot,
+            map_id=map_id,
         )
         if ok:
             print(f"[Interact] event '{eid}' via {getattr(entity, 'name', '?')}")
@@ -1942,21 +1958,573 @@ def start_system_event(
     return True
 
 
+# ---------------------------------------------------------------------------
+# PLACE persist — 이벤트 PLACE(persist:true)로 등장한 엔티티를 세이브에 유지
+#   save_data["placed"] = [
+#     {
+#       "name": "girl1_k",          # CHAR_ASSETS / OBJ_ASSETS 키 (해석된 id)
+#       "map_id": "bg_jjangpu",      # 현재 있는 맵 (travel 시 맵 전환마다 갱신)
+#       "pos": [x, y],
+#       "dir": "left"|"right",      # optional
+#       "behavior": "follow"|{...}, # optional — ambient AI (BEHAVIOR/PLACE와 동일)
+#       "travel": true,             # optional — true면 맵 전환 시 플레이어 근처로 동행
+#                                   #   (미지정 시 behavior=follow 이면 자동 travel)
+#       "sprite_tilt"/"height"/"ysort"/"layer": optional 비주얼
+#     },
+#     ...
+#   ]
+#   · persist 없는 PLACE: 기존처럼 런타임 전용(맵 리로드 시 소멸)
+#   · PLACE action:remove: 씬에서 제거 + placed 목록에서도 삭제
+# ---------------------------------------------------------------------------
+
+
+def ensure_placed_list(save_data) -> list:
+    """save_data['placed'] 리스트를 보장해 반환."""
+    if not isinstance(save_data, dict):
+        return []
+    lst = save_data.get("placed")
+    if not isinstance(lst, list):
+        lst = []
+        save_data["placed"] = lst
+    return lst
+
+
+def _placed_behavior_mode(beh) -> str:
+    """placed.behavior → 내부 모드 문자열."""
+    try:
+        from char_behavior import normalize_behavior_mode
+    except Exception:
+        normalize_behavior_mode = None
+    if isinstance(beh, dict):
+        raw = beh.get("mode") or ""
+    else:
+        raw = beh or ""
+    if normalize_behavior_mode:
+        try:
+            return normalize_behavior_mode(raw)
+        except Exception:
+            pass
+    return str(raw or "").strip().lower()
+
+
+def placed_entry_travels(entry) -> bool:
+    """
+    맵 전환 시 플레이어를 따라갈지.
+    travel:true 명시, 또는 behavior 가 follow 이면 True.
+    """
+    if not isinstance(entry, dict):
+        return False
+    tr = entry.get("travel")
+    if tr is True or (isinstance(tr, str) and tr.strip().lower() in ("1", "true", "t", "yes", "y", "on")):
+        return True
+    if tr is False or (isinstance(tr, str) and tr.strip().lower() in ("0", "false", "f", "no", "n", "off")):
+        return False
+    return _placed_behavior_mode(entry.get("behavior")) == "follow"
+
+
+def _normalize_placed_behavior(behavior, *, radius=None, interval_ms=None):
+    """세이브용 behavior 정규화 — str 또는 {mode,...}."""
+    if behavior is None:
+        return None
+    if isinstance(behavior, dict):
+        mode = str(behavior.get("mode") or "").strip()
+        if not mode:
+            return None
+        out = {"mode": mode}
+        rad = behavior.get("radius", radius)
+        iv = behavior.get("interval_ms", interval_ms)
+        if rad is not None:
+            try:
+                out["radius"] = float(rad)
+            except (TypeError, ValueError):
+                pass
+        if iv is not None:
+            try:
+                out["interval_ms"] = int(iv)
+            except (TypeError, ValueError):
+                pass
+        for k in ("trigger_range", "stop_dist"):
+            if behavior.get(k) is not None:
+                try:
+                    out[k] = float(behavior.get(k))
+                except (TypeError, ValueError):
+                    pass
+        return out
+    mode = str(behavior or "").strip()
+    if not mode:
+        return None
+    out = {"mode": mode}
+    if radius is not None:
+        try:
+            out["radius"] = float(radius)
+        except (TypeError, ValueError):
+            pass
+    if interval_ms is not None:
+        try:
+            out["interval_ms"] = int(interval_ms)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def find_placed_entry(save_data, name: str):
+    """이름으로 placed 항목 찾기 (없으면 None)."""
+    nm = str(name or "").strip()
+    if not nm:
+        return None
+    for e in ensure_placed_list(save_data):
+        if isinstance(e, dict) and str(e.get("name") or "").strip() == nm:
+            return e
+    return None
+
+
+def upsert_placed_entity(
+    save_data,
+    *,
+    name: str,
+    map_id: str,
+    pos=None,
+    dir=None,
+    behavior=None,
+    travel=None,
+    sprite_tilt=None,
+    height=None,
+    ysort=None,
+    layer=None,
+    radius=None,
+    interval_ms=None,
+) -> dict:
+    """
+    PLACE persist / FOLLOW persist 공통 — save_data['placed'] 에 upsert.
+    반환: 갱신된 entry dict.
+    """
+    nm = str(name or "").strip()
+    if not nm or nm.lower() == "player":
+        return {}
+    lst = ensure_placed_list(save_data)
+    entry = find_placed_entry(save_data, nm)
+    if entry is None:
+        entry = {"name": nm}
+        lst.append(entry)
+    mid = str(map_id or "").strip()
+    if mid:
+        entry["map_id"] = mid
+    if pos is not None and isinstance(pos, (list, tuple)) and len(pos) >= 2:
+        try:
+            entry["pos"] = [float(pos[0]), float(pos[1])]
+        except (TypeError, ValueError):
+            pass
+    if dir is not None:
+        d = str(dir or "").strip().lower()
+        if d in ("left", "l"):
+            entry["dir"] = "left"
+        elif d in ("right", "r"):
+            entry["dir"] = "right"
+    beh = _normalize_placed_behavior(behavior, radius=radius, interval_ms=interval_ms)
+    if beh is not None:
+        entry["behavior"] = beh
+    if travel is not None:
+        entry["travel"] = bool(travel)
+    elif beh is not None and _placed_behavior_mode(beh) == "follow":
+        # follow 이면 기본으로 맵 동행 (명시 travel:false 가 없을 때만)
+        if "travel" not in entry:
+            entry["travel"] = True
+    if sprite_tilt is not None:
+        try:
+            entry["sprite_tilt"] = float(sprite_tilt)
+        except (TypeError, ValueError):
+            pass
+    if height is not None:
+        try:
+            entry["height"] = float(height)
+        except (TypeError, ValueError):
+            pass
+    if ysort is not None and str(ysort).strip():
+        entry["ysort"] = str(ysort).strip()
+    if layer is not None:
+        try:
+            entry["layer"] = int(float(layer))
+        except (TypeError, ValueError):
+            pass
+    return entry
+
+
+def remove_placed_entity(save_data, name: str) -> bool:
+    """placed 목록에서 제거. 지웠으면 True."""
+    nm = str(name or "").strip()
+    if not nm or not isinstance(save_data, dict):
+        return False
+    lst = ensure_placed_list(save_data)
+    before = len(lst)
+    save_data["placed"] = [
+        e for e in lst if not (isinstance(e, dict) and str(e.get("name") or "").strip() == nm)
+    ]
+    return len(save_data["placed"]) < before
+
+
+def update_placed_behavior(save_data, name: str, behavior, *, radius=None, interval_ms=None, travel=None) -> bool:
+    """이미 placed 인 엔티티의 behavior/travel 만 갱신. 없으면 False."""
+    entry = find_placed_entry(save_data, name)
+    if entry is None:
+        return False
+    beh = _normalize_placed_behavior(behavior, radius=radius, interval_ms=interval_ms)
+    if beh is not None:
+        entry["behavior"] = beh
+        if travel is None and _placed_behavior_mode(beh) == "follow" and "travel" not in entry:
+            entry["travel"] = True
+    if travel is not None:
+        entry["travel"] = bool(travel)
+    return True
+
+
+def snapshot_placed_from_live(save_data, map_id, objs, npcs) -> None:
+    """
+    현재 맵에 떠 있는 placed 엔티티의 pos/dir/behavior 를 세이브에 반영.
+    세이브 직전·맵 떠나기 직전에 호출.
+    """
+    mid = str(map_id or "").strip()
+    if not mid or not isinstance(save_data, dict):
+        return
+    live = {}
+    for ent in list(objs or []) + list(npcs or []):
+        nm = str(getattr(ent, "name", "") or "").strip()
+        if nm:
+            live[nm] = ent
+    for entry in ensure_placed_list(save_data):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("map_id") or "").strip() != mid:
+            continue
+        nm = str(entry.get("name") or "").strip()
+        ent = live.get(nm)
+        if ent is None:
+            continue
+        try:
+            entry["pos"] = [float(ent.pos[0]), float(ent.pos[1])]
+        except Exception:
+            pass
+        d = str(getattr(ent, "direction", "") or "").strip().lower()
+        if d in ("left", "right"):
+            entry["dir"] = d
+        spec = getattr(ent, "behavior_spec", None)
+        if isinstance(spec, dict) and spec.get("mode"):
+            entry["behavior"] = _normalize_placed_behavior(spec) or entry.get("behavior")
+
+
+def prepare_traveling_placed(save_data, map_id, player_pos, config=None, mask=None) -> None:
+    """
+    travel/follow placed 항목을 새 맵·플레이어 근처 좌표로 옮긴다.
+    load_map 스폰 직전에 호출 (save_data 자체를 갱신).
+
+    mask 가 있으면 이동 가능(walk) 픽셀만 고른다.
+    선호 오프셋이 막히면 플레이어 주변 후보 → 최근접 walk 스냅 → 플레이어 발밑 순.
+    """
+    mid = str(map_id or "").strip()
+    if not mid or not isinstance(save_data, dict):
+        return
+    cfg = config if isinstance(config, dict) else CONFIG
+    try:
+        base_off = float(cfg.get("PLACED_FOLLOW_SPAWN_OFFSET_PX", 28) or 28)
+    except (TypeError, ValueError):
+        base_off = 28.0
+    try:
+        spacing = float(cfg.get("PLACED_FOLLOW_SPAWN_SPACING_PX", 20) or 20)
+    except (TypeError, ValueError):
+        spacing = 20.0
+    try:
+        min_sep = float(cfg.get("PLACED_FOLLOW_SPAWN_MIN_SEP_PX", 14) or 14)
+    except (TypeError, ValueError):
+        min_sep = 14.0
+    try:
+        snap_r = int(cfg.get("PLACED_FOLLOW_SPAWN_SNAP_R_PX", cfg.get("TARGET_SNAP_MAX_R_PX", 64)) or 64)
+    except (TypeError, ValueError):
+        snap_r = 64
+    try:
+        snap_step = int(cfg.get("TARGET_SNAP_STEP_PX", 2) or 2)
+    except (TypeError, ValueError):
+        snap_step = 2
+    try:
+        px = float(player_pos[0])
+        py = float(player_pos[1])
+    except Exception:
+        return
+
+    snap_fn = None
+    terrain_fn = None
+    if mask is not None:
+        try:
+            from engine import _snap_to_nearest_walk, mask_terrain_class
+
+            snap_fn = _snap_to_nearest_walk
+            terrain_fn = mask_terrain_class
+        except Exception:
+            snap_fn = None
+            terrain_fn = None
+
+    used = []  # 이미 잡은 스폰점 (겹침 방지)
+
+    def _far_enough(x, y) -> bool:
+        for ux, uy in used:
+            if math.hypot(float(x) - float(ux), float(y) - float(uy)) < min_sep:
+                return False
+        return True
+
+    def _is_walk(x, y) -> bool:
+        if terrain_fn is None:
+            return True
+        try:
+            return terrain_fn(mask, float(x), float(y)) == "walk"
+        except Exception:
+            return True
+
+    def _pick_near(x, y):
+        """후보점 → walk 스냅. 실패 시 None."""
+        cx, cy = float(x), float(y)
+        if _is_walk(cx, cy) and _far_enough(cx, cy):
+            return [cx, cy]
+        if snap_fn is not None:
+            sn = snap_fn(mask, cx, cy, max_r=snap_r, step=snap_step)
+            if sn is not None:
+                sx, sy = float(sn[0]), float(sn[1])
+                if _far_enough(sx, sy):
+                    return [sx, sy]
+        return None
+
+    def _candidates_for(i: int):
+        """선호: 왼쪽 뒤 → 오른쪽/위/아래 → 플레이어 주변 링."""
+        ox = base_off + i * spacing
+        oy = (i % 2) * 6.0
+        out = [
+            (px - ox, py + oy),
+            (px + ox, py + oy),
+            (px - oy, py + ox),
+            (px + oy, py - ox),
+            (px - ox * 0.7, py - ox * 0.7),
+            (px + ox * 0.7, py - ox * 0.7),
+            (px - ox * 0.7, py + ox * 0.7),
+            (px + ox * 0.7, py + ox * 0.7),
+        ]
+        # 더 넓은 링 (막힌 문 앞 등)
+        for rmul in (1.5, 2.0, 2.5, 3.0):
+            r = ox * rmul
+            out.extend(
+                [
+                    (px - r, py),
+                    (px + r, py),
+                    (px, py - r),
+                    (px, py + r),
+                    (px - r * 0.7, py - r * 0.7),
+                    (px + r * 0.7, py - r * 0.7),
+                    (px - r * 0.7, py + r * 0.7),
+                    (px + r * 0.7, py + r * 0.7),
+                ]
+            )
+        out.append((px, py))
+        return out
+
+    travelers = [e for e in ensure_placed_list(save_data) if isinstance(e, dict) and placed_entry_travels(e)]
+    for i, entry in enumerate(travelers):
+        entry["map_id"] = mid
+        picked = None
+        for cx, cy in _candidates_for(i):
+            picked = _pick_near(cx, cy)
+            if picked is not None:
+                break
+        if picked is None:
+            # 최후: 플레이어 발밑 (보통 walk) — 겹쳐도 움직임은 가능
+            picked = [px, py]
+            if snap_fn is not None:
+                sn = snap_fn(mask, px, py, max_r=snap_r, step=snap_step)
+                if sn is not None:
+                    picked = [float(sn[0]), float(sn[1])]
+        entry["pos"] = picked
+        used.append((picked[0], picked[1]))
+
+
+def _spawn_one_placed_entity(entry: dict, objs: list, npcs: list, save_data=None, config=None):
+    """
+    placed entry 1개를 씬에 생성하거나 기존 동명 엔티티에 적용.
+    PLACE / load_map 과 동일한 FieldItem·MaskWalkingCharacter·attach_npc_from_entry 경로.
+    """
+    nm = str(entry.get("name") or "").strip()
+    if not nm:
+        return None
+    # ally1 등 별칭 → 실제 id (세이브에 별칭이 남아 있을 수 있음)
+    try:
+        from data import resolve_story_target_id
+
+        nm_res = resolve_story_target_id(nm, save_data, config) or nm
+    except Exception:
+        nm_res = nm
+    pos = entry.get("pos") or [0, 0]
+    try:
+        pos_xy = [float(pos[0]), float(pos[1])]
+    except Exception:
+        pos_xy = [0.0, 0.0]
+
+    existing = next(
+        (x for x in list(npcs or []) + list(objs or []) if getattr(x, "name", "") == nm_res),
+        None,
+    )
+    from engine import FieldItem, BaseCharacter, MaskWalkingCharacter
+
+    st = entry.get("sprite_tilt")
+    h = entry.get("height")
+    ys = entry.get("ysort")
+    ly = entry.get("layer")
+
+    if existing is not None:
+        ent = existing
+        try:
+            ent.pos = [pos_xy[0], pos_xy[1]]
+            if hasattr(ent, "origin_pos"):
+                ent.origin_pos = [pos_xy[0], pos_xy[1]]
+        except Exception:
+            pass
+    elif nm_res in OBJ_ASSETS:
+        ent = FieldItem(
+            nm_res,
+            pos_xy[0],
+            pos_xy[1],
+            sprite_tilt=float(st) if st is not None else 1.0,
+            height=h,
+            ysort_mode=ys,
+            layer=ly,
+        )
+        objs.append(ent)
+    else:
+        ch_info = {}
+        if st is not None:
+            try:
+                ch_info["sprite_tilt"] = float(st)
+            except (TypeError, ValueError):
+                pass
+        if h is not None:
+            ch_info["height"] = h
+        if ys is not None:
+            ch_info["ysort"] = ys
+        if ly is not None:
+            try:
+                ch_info["layer"] = int(float(ly))
+            except (TypeError, ValueError):
+                pass
+        from char_behavior import attach_npc_from_entry, spawn_as_mask_walker
+
+        n_entry = {"name": nm_res, "pos": list(pos_xy)[:2]}
+        beh = entry.get("behavior")
+        if isinstance(beh, dict):
+            n_entry["behavior"] = dict(beh)
+        elif isinstance(beh, str) and beh.strip():
+            n_entry["behavior"] = {"mode": beh.strip()}
+        if spawn_as_mask_walker(nm_res, n_entry):
+            ent = MaskWalkingCharacter(nm_res, pos_xy, ch_info)
+        else:
+            ent = BaseCharacter(nm_res, pos_xy, ch_info)
+        try:
+            attach_npc_from_entry(ent, n_entry)
+        except Exception:
+            pass
+        npcs.append(ent)
+
+    # 비주얼·방향·behavior 재적용 (기존 world 엔티티에도)
+    if st is not None and hasattr(ent, "sprite_tilt"):
+        try:
+            ent.sprite_tilt = float(st)
+        except (TypeError, ValueError):
+            pass
+    if h is not None and hasattr(ent, "height"):
+        try:
+            ent.height = float(h)
+        except (TypeError, ValueError):
+            pass
+    if ys is not None and hasattr(ent, "ysort_mode"):
+        ent.ysort_mode = ys
+    if ly is not None and hasattr(ent, "layer"):
+        try:
+            ent.layer = int(float(ly))
+        except (TypeError, ValueError):
+            pass
+    d = str(entry.get("dir") or "").strip().lower()
+    if d in ("left", "right") and hasattr(ent, "direction"):
+        ent.direction = d
+        try:
+            from engine import _event_refresh_facing_image
+
+            _event_refresh_facing_image(ent)
+        except Exception:
+            pass
+    beh = entry.get("behavior")
+    if beh and not (nm_res in OBJ_ASSETS):
+        try:
+            from char_behavior import set_npc_behavior, set_roam_home
+
+            if isinstance(beh, dict):
+                mode = beh.get("mode")
+                kwargs = {}
+                if beh.get("radius") is not None:
+                    kwargs["radius"] = beh.get("radius")
+                if beh.get("interval_ms") is not None:
+                    kwargs["interval_ms"] = beh.get("interval_ms")
+                if mode:
+                    set_npc_behavior(ent, mode, **kwargs)
+            else:
+                set_npc_behavior(ent, beh)
+            set_roam_home(ent, pos_xy[0], pos_xy[1])
+        except Exception:
+            pass
+    try:
+        ent._placed_persist = True
+    except Exception:
+        pass
+    return ent
+
+
+def apply_placed_to_map(objs, npcs, save_data, map_id, *, player_pos=None, config=None, mask=None):
+    """
+    load_map 말미: travel 동행 좌표 갱신 후, 현재 맵의 placed 엔티티를 스폰/적용.
+    반환 (objs, npcs).
+    mask 가 있으면 동행 스폰을 walk 영역으로 스냅.
+    """
+    sd = save_data if isinstance(save_data, dict) else {}
+    mid = str(map_id or "").strip()
+    cfg = config if isinstance(config, dict) else CONFIG
+    if player_pos is not None:
+        prepare_traveling_placed(sd, mid, player_pos, config=cfg, mask=mask)
+    for entry in list(ensure_placed_list(sd)):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("map_id") or "").strip() != mid:
+            continue
+        try:
+            _spawn_one_placed_entity(entry, objs, npcs, save_data=sd, config=cfg)
+        except Exception as e:
+            print(f"[placed] spawn failed {entry.get('name')}: {e}")
+    return objs, npcs
+
+
 def merge_save_defaults(save_data: dict, config) -> dict:
     """누락된 세이브 키를 채움. gamestart 등 온보딩 단계는 세이브에 두지 않음(구 파일에 있으면 제거)."""
     if not save_data:
         save_data = {}
     _spawn = config.get("NEW_GAME_SPAWN_POS") or [100, 100]
+    _default_pc = str(config.get("DEFAULT_PLAYER_CHAR", "summer_k") or "summer_k")
+    # parent_char 는 player_char 확정 후 PLAYER_PARENTS 로 유도 (아래 동기화)
+    # player_char_selected 는 defaults 에 넣지 않음 — 구 세이브 마이그레이션과 구분하기 위함
+    _had_char_selected_key = "player_char_selected" in save_data
     defaults = {
         "mainprogress": "010100",
         "laugh_point": 0,
         "subprogress": {},
         "player_pos": list(_spawn),
         "current_map": config["START_MAP"],
+        # 조작 주인공 (첫 시작 캐릭터 선택 결과). 없으면 DEFAULT_PLAYER_CHAR
+        "player_char": _default_pc,
         # "hide": 도랑 점프 등 중 그림자 없음 / "ground": 땅 위치에 작고 옅게 유지
         "jump_shadow_mode": "ground",
         "flags": {},
         "affinity": {},
+        # PLACE persist:true 로 등장한 오브젝트/NPC (remove 전까지 맵·세이브 유지)
+        "placed": [],
     }
     for k, v in defaults.items():
         if k not in save_data:
@@ -1967,6 +2535,24 @@ def merge_save_defaults(save_data: dict, config) -> dict:
             if k not in save_data:
                 save_data[k] = v
     save_data.pop("gamestart", None)
+    # player_char_selected:
+    #   - 선택 UI 완료 시에만 True
+    #   - 구 세이브에 키 없음: mainprogress 가 010100 이면 미선택, 그 외(본편 진행)면 완료로 간주
+    if not _had_char_selected_key:
+        mp = str(save_data.get("mainprogress") or "010100").strip()
+        save_data["player_char_selected"] = bool(mp) and mp not in ("010100", "0", "")
+    else:
+        save_data["player_char_selected"] = bool(save_data.get("player_char_selected"))
+    # 부모 id 동기화 — PLAYER_PARENTS[player_char] (역할 교체 시 항상 맞춤)
+    try:
+        from data import apply_player_char_choice, get_player_char_id
+
+        pc = get_player_char_id(save_data, config)
+        # selected 플래그는 건드리지 않음 (부모만 맞춤)
+        apply_player_char_choice(save_data, pc, config, selected=False)
+    except Exception:
+        if not str(save_data.get("parent_char") or "").strip():
+            save_data["parent_char"] = "carrot_a"
     return save_data
 
 
@@ -1980,11 +2566,24 @@ def merge_save_defaults(save_data: dict, config) -> dict:
 #   load_save_data / save_game 과 같은 영속화 계층. 별도 .py 파일은 만들지 않음.
 #
 # [파일 구조]  CONFIG["MINIGAME_RECORDS_FILE"] → 기본 minigame_records.json
-#   { "baseball": { "best_score": int, "history": [ {...}, ... ] } }
+#   {
+#     "baseball": { "best_score": int, "history": [ {...}, ... ] },
+#     "racing": {
+#       "maps": {
+#         "<map_id>": {
+#           "by_laps": {
+#             "<laps>": { "time_sec", "time_str", "char", "laps", "map_id" }
+#           }
+#         }
+#       },
+#       "history": [ { map_id, char, laps, time_sec, time_str, mode }, ... ]
+#     }
+#   }
 # ---------------------------------------------------------------------------
 
 _MINIGAME_RECORDS_DEFAULT: dict = {
     "baseball": {"best_score": 0, "history": []},
+    "racing": {"maps": {}, "history": []},
 }
 
 
@@ -2023,7 +2622,51 @@ def _normalize_minigame_records(data: dict) -> dict:
         hist = bb.get("history")
         if isinstance(hist, list):
             out["baseball"]["history"] = [r for r in hist if isinstance(r, dict)]
+    rc = data.get("racing")
+    if isinstance(rc, dict):
+        maps_in = rc.get("maps")
+        maps_out: dict = {}
+        if isinstance(maps_in, dict):
+            for mid, mrow in maps_in.items():
+                mid_s = str(mid or "").strip()
+                if not mid_s or not isinstance(mrow, dict):
+                    continue
+                by_laps_in = mrow.get("by_laps")
+                by_laps_out: dict = {}
+                if isinstance(by_laps_in, dict):
+                    for lk, brow in by_laps_in.items():
+                        if not isinstance(brow, dict):
+                            continue
+                        try:
+                            laps_i = int(brow.get("laps", lk) or lk)
+                        except (TypeError, ValueError):
+                            continue
+                        try:
+                            tsec = float(brow.get("time_sec", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            tsec = 0.0
+                        by_laps_out[str(laps_i)] = {
+                            "map_id": mid_s,
+                            "laps": laps_i,
+                            "time_sec": tsec,
+                            "time_str": str(
+                                brow.get("time_str") or format_racing_time_sec(tsec)
+                            ),
+                            "char": str(brow.get("char") or ""),
+                        }
+                maps_out[mid_s] = {"by_laps": by_laps_out}
+        out["racing"]["maps"] = maps_out
+        hist_r = rc.get("history")
+        if isinstance(hist_r, list):
+            out["racing"]["history"] = [r for r in hist_r if isinstance(r, dict)]
     return out
+
+
+def format_racing_time_sec(t: float) -> str:
+    """초 → '분:초.소수2' (레이스 HUD와 동일 형식)."""
+    t = max(0.0, float(t))
+    m, s = divmod(t, 60.0)
+    return f"{int(m)}:{s:05.2f}"
 
 
 def migrate_baseball_records_from_save(save_data: dict, config=None) -> bool:
@@ -2107,6 +2750,87 @@ def append_baseball_record(entry: dict, config=None) -> list:
         reverse=True,
     )
     return ranked[:10]
+
+
+def racing_best_for_map(map_id: str, laps: int, config=None):
+    """맵·랩수 조합의 최고 기록(최단 시간) dict 또는 None."""
+    mid = str(map_id or "").strip()
+    if not mid:
+        return None
+    try:
+        laps_i = int(laps)
+    except (TypeError, ValueError):
+        return None
+    maps = load_minigame_records(config).get("racing", {}).get("maps") or {}
+    mrow = maps.get(mid) if isinstance(maps, dict) else None
+    if not isinstance(mrow, dict):
+        return None
+    by_laps = mrow.get("by_laps") or {}
+    if not isinstance(by_laps, dict):
+        return None
+    best = by_laps.get(str(laps_i))
+    return dict(best) if isinstance(best, dict) else None
+
+
+def append_racing_record(entry: dict, config=None) -> dict:
+    """
+    레이스 기록용(1인) 완주 기록 추가·즉시 저장.
+    entry: map_id, char, laps, time_sec [, time_str, mode]
+    반환: { "is_best": bool, "best": dict|None, "entry": dict }
+    같은 맵·같은 랩수에서 time_sec 가 더 짧으면 신기록.
+    """
+    mid = str((entry or {}).get("map_id") or "").strip()
+    try:
+        laps_i = int((entry or {}).get("laps", 0) or 0)
+    except (TypeError, ValueError):
+        laps_i = 0
+    try:
+        tsec = float((entry or {}).get("time_sec", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        tsec = 0.0
+    tsec = max(0.0, tsec)
+    row = {
+        "mode": str((entry or {}).get("mode") or "record"),
+        "map_id": mid,
+        "char": str((entry or {}).get("char") or ""),
+        "laps": laps_i,
+        "time_sec": round(tsec, 3),
+        "time_str": str((entry or {}).get("time_str") or format_racing_time_sec(tsec)),
+    }
+    data = load_minigame_records(config)
+    racing = data.setdefault("racing", {"maps": {}, "history": []})
+    if not isinstance(racing.get("maps"), dict):
+        racing["maps"] = {}
+    hist: list = list(racing.get("history") or [])
+    hist.append(dict(row))
+    racing["history"] = hist[-40:]
+
+    is_best = False
+    best_out = None
+    if mid and laps_i > 0:
+        mrow = racing["maps"].setdefault(mid, {"by_laps": {}})
+        if not isinstance(mrow.get("by_laps"), dict):
+            mrow["by_laps"] = {}
+        prev = mrow["by_laps"].get(str(laps_i))
+        prev_t = None
+        if isinstance(prev, dict):
+            try:
+                prev_t = float(prev.get("time_sec"))
+            except (TypeError, ValueError):
+                prev_t = None
+        if prev_t is None or tsec < prev_t:
+            is_best = True
+            mrow["by_laps"][str(laps_i)] = {
+                "map_id": mid,
+                "laps": laps_i,
+                "time_sec": row["time_sec"],
+                "time_str": row["time_str"],
+                "char": row["char"],
+            }
+        best_out = dict(mrow["by_laps"].get(str(laps_i)) or row)
+
+    save_minigame_records(data, config)
+    return {"is_best": bool(is_best), "best": best_out, "entry": row}
 
 
 def _compact_steps_to_single_lines(json_text: str) -> str:
@@ -2249,8 +2973,13 @@ class GameFlow:
                 )
         except Exception:
             pass
-        # 매 실행: 0=인트로, 1=데모, 2=본편 (세이브 없음, pick_global 시 session_vars로만 전달)
+        # 매 실행: 0=인트로, 1=데모, 15=캐릭터선택(세이브 없을 때), 2=본편
+        # (세이브 없음 — pick_global 시 session_vars={"gamestart": boot_phase} 로만 전달)
         self.boot_phase = 0
+        # 세이브 없이 데모 종료 후 캐릭터 선택→본편 스폰 대기
+        self.pending_new_game_after_char_select = False
+        # 이벤트 시작 직전 세이브 스냅샷 (중도 종료 시 이벤트 맵으로 덮어쓰지 않음)
+        self._pre_event_save_snapshot = None
         # contact_player: 존 안에 머무는 동안 매 프레임 재발동 방지 (진입 엣지에서만)
         self._zone_player_inside = {}
         if "mainprogress" not in self.save_data:
@@ -2379,6 +3108,16 @@ class GameFlow:
                 "ysort": str(getattr(o, "ysort_mode", "ground") or "ground"),
                 "layer": int(getattr(o, "layer", 0) or 0),
             }
+            try:
+                wa = float(getattr(o, "wall_angle", 0.0) or 0.0)
+                if math.isfinite(wa):
+                    wa = wa % 360.0
+                    if wa < 0.0:
+                        wa += 360.0
+                    if min(wa, 360.0 - wa) > 0.05:
+                        row["wall_angle"] = round(float(wa), 2)
+            except Exception:
+                pass
             inst = getattr(o, "interact_instance", None)
             if isinstance(inst, dict) and inst:
                 row["interact"] = inst
@@ -2445,7 +3184,76 @@ class GameFlow:
             except: return None
         return None
 
-    def save_game(self, map_id, player_pos):
+    def sync_runtime_location(self, map_id, player_pos):
+        """
+        필드 자유이동 중 메모리 세이브의 맵·좌표만 맞춘다 (디스크 미기록).
+        이벤트 중에는 호출하지 않는다 — 이벤트 맵이 current_map 에 섞이지 않게.
+        """
+        if self._pre_event_save_snapshot is not None:
+            return
+        mid = str(map_id or "").strip()
+        if mid:
+            self.save_data["current_map"] = mid
+        try:
+            self.save_data["player_pos"] = [int(player_pos[0]), int(player_pos[1])]
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    def capture_pre_event_checkpoint(self, map_id=None, player_pos=None):
+        """
+        이벤트 시작 직전 상태를 디스크에 고정.
+        이벤트 중 종료·크래시 시 이벤트용 맵이 세이브에 남지 않게 한다.
+        본편(boot_phase>=2)에서만 동작.
+        """
+        try:
+            if int(getattr(self, "boot_phase", 0) or 0) < 2:
+                return
+        except (TypeError, ValueError):
+            return
+        if not isinstance(self.save_data, dict):
+            self.save_data = {}
+        mid = str(map_id or self.save_data.get("current_map") or "").strip()
+        if mid:
+            self.save_data["current_map"] = mid
+        if player_pos is not None:
+            try:
+                self.save_data["player_pos"] = [int(player_pos[0]), int(player_pos[1])]
+            except (TypeError, ValueError, IndexError):
+                pass
+        snap = copy.deepcopy(self.save_data)
+        self._pre_event_save_snapshot = snap
+        try:
+            with open(self.save_path, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False, indent=4)
+            print(
+                "[save] pre-event checkpoint → "
+                f"{snap.get('current_map')} @ {snap.get('player_pos')}"
+            )
+        except Exception as e:
+            print(f"[save] pre-event checkpoint fail: {e}")
+
+    def clear_pre_event_checkpoint(self):
+        """최상위 이벤트 정상 종료 시 가드 해제 (이후 종료 세이브는 현재 위치 기록)."""
+        self._pre_event_save_snapshot = None
+
+    def is_event_save_guarded(self) -> bool:
+        return self._pre_event_save_snapshot is not None
+
+    def _write_save_data_to_disk(self):
+        try:
+            with open(self.save_path, "w", encoding="utf-8") as f:
+                json.dump(self.save_data, f, ensure_ascii=False, indent=4)
+            print("플레이 데이터가 안전하게 저장되었습니다.")
+            return True
+        except Exception as e:
+            print(f"세이브 실패: {e}")
+            return False
+
+    def save_game(self, map_id, player_pos, *, ignore_event_guard=False, objs=None, npcs=None):
+        # 이벤트 진행 중: 이벤트 맵·연출 좌표로 덮어쓰지 않음 (시작 시 체크포인트 유지)
+        if self._pre_event_save_snapshot is not None and not ignore_event_guard:
+            print("[save] skipped — event in progress (pre-event checkpoint kept)")
+            return
         # 미니게임 전용 맵(야구장·서킷 등)은 현재 좌표를 저장하지 않고 exit_map/exit_pos 로 저장.
         try:
             map_id, player_pos = apply_activity_arena_save_location(
@@ -2453,16 +3261,15 @@ class GameFlow:
             )
         except Exception:
             pass
+        # PLACE persist 엔티티 현재 위치·behavior 스냅샷 (objs/npcs 전달 시)
+        if objs is not None or npcs is not None:
+            try:
+                snapshot_placed_from_live(self.save_data, map_id, objs, npcs)
+            except Exception as e:
+                print(f"[save] placed snapshot failed: {e}")
         self.save_data["current_map"] = map_id
         self.save_data["player_pos"] = [int(player_pos[0]), int(player_pos[1])]
-        
-        try:
-            with open(self.save_path, "w", encoding="utf-8") as f:
-                # 세이브 파일도 읽기 편하게 indent 줌
-                json.dump(self.save_data, f, ensure_ascii=False, indent=4)
-            print("플레이 데이터가 안전하게 저장되었습니다.")
-        except Exception as e:
-            print(f"세이브 실패: {e}")
+        self._write_save_data_to_disk()
 
     def load_map(self, save_data=None):
         # 1. 어떤 맵을 부를지 결정 (세이브 데이터 우선, 없으면 CONFIG 기본값)
@@ -2507,7 +3314,15 @@ class GameFlow:
             
         from engine import Player, FieldItem, BaseCharacter, MaskWalkingCharacter
 
-        pc = str(self.config.get("DEFAULT_PLAYER_CHAR", "c1") or "c1")
+        # 세이브 player_char → CONFIG DEFAULT_PLAYER_CHAR (첫 시작 선택·이어하기 공통)
+        try:
+            from data import get_player_char_id
+
+            pc = get_player_char_id(self.save_data, self.config)
+            if isinstance(save_data, dict) and str(save_data.get("player_char") or "").strip():
+                pc = get_player_char_id(save_data, self.config)
+        except Exception:
+            pc = str(self.config.get("DEFAULT_PLAYER_CHAR", "c1") or "c1")
         player = Player(pc, [player_initial_pos[0], player_initial_pos[1]], {})
         player.jump_pad_zones = m.get("jump_pads", [])
         
@@ -2522,6 +3337,7 @@ class GameFlow:
                 height=o.get("height"),
                 ysort_mode=o.get("ysort", "ground"),
                 layer=o.get("layer", None),
+                wall_angle=o.get("wall_angle", 0.0),
             )
             # Optional: auto scroll (e.g. fog/cloud background layers)
             # world_data.json:
@@ -2554,7 +3370,16 @@ class GameFlow:
             objs.append(it)
         npcs = []
         for n in m.get("npcs", []):
-            nm = n["name"]
+            # ally1~5 / *_parent → 실제 CHAR_ASSETS 키 (주인공 선택에 따라 바뀜)
+            nm_raw = str(n.get("name") or "").strip()
+            try:
+                from data import resolve_story_target_id
+
+                nm = resolve_story_target_id(nm_raw, self.save_data, self.config) or nm_raw
+            except Exception:
+                nm = nm_raw
+            if not nm:
+                continue
             ch_info = {
                 "sprite_tilt": n.get("sprite_tilt", 1.0),
                 "ysort": n.get("ysort", "ground"),
@@ -2562,13 +3387,16 @@ class GameFlow:
             }
             if "height" in n:
                 ch_info["height"] = n["height"]
-            from char_behavior import attach_npc_from_entry
+            from char_behavior import attach_npc_from_entry, spawn_as_mask_walker
 
-            if CHAR_ASSETS.get(nm, {}).get("mask_nav"):
+            # attach·interact 은 원본 entry 유지하되, 생성·이름만 해석된 id 사용
+            n_spawn = dict(n)
+            n_spawn["name"] = nm
+            if spawn_as_mask_walker(nm, n_spawn):
                 ch = MaskWalkingCharacter(nm, n["pos"], ch_info)
             else:
                 ch = BaseCharacter(nm, n["pos"], ch_info)
-            attach_npc_from_entry(ch, n)
+            attach_npc_from_entry(ch, n_spawn)
             npcs.append(ch)
 
         from char_behavior import apply_map_progress_states
@@ -2577,6 +3405,23 @@ class GameFlow:
         if save_data:
             sd.update(save_data)
         objs, npcs = apply_map_progress_states(objs, npcs, sd)
+
+        # PLACE persist — travel/follow 동행 좌표 갱신 후 현재 맵 placed 스폰
+        # (world_data 정적 배치 + progress 적용 뒤, 동일 이름이면 pos/behavior 만 덮어씀)
+        try:
+            ppos = list(player.pos) if player is not None else (sd.get("player_pos") or [0, 0])
+            objs, npcs = apply_placed_to_map(
+                objs,
+                npcs,
+                self.save_data if isinstance(self.save_data, dict) else sd,
+                map_id,
+                player_pos=ppos,
+                config=self.config,
+                mask=mask,
+            )
+            # travel 로 바뀐 map_id/pos 를 self.save_data 에 유지 (위에서 self.save_data 를 넘김)
+        except Exception as e:
+            print(f"[load_map] placed restore failed: {e}")
 
         return map_id, bg, mask, player, objs, npcs
 

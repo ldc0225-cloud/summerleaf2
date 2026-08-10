@@ -1,9 +1,9 @@
-"""에디터 RACING 모드 — 레이스 경로(폴리라인) 맵 픽 + world_data.racing 설정.
+"""에디터 RACING 모드 — 레이스 경로(제어점→곡선) 맵 픽 + world_data.racing 설정.
 
 editor.py 가 이벤트/그리기 훅으로 호출. 야구(editor_baseball)와 같은 패턴.
 
 [편집 가능 항목]
-  - 경로 path / 루프 closed
+  - 경로 path(제어점) / 루프 closed / curve_tension(코너 둥글기)
   - 아이템 items: kind(normal|secret|roulette|summon), type(speed|slow|swap), lane, s
   - 청정구간 clean_zones, 날씨 weather, 슬립스트림·시크릿 룰렛 등 (설정 모달)
 """
@@ -64,13 +64,14 @@ RACING_EDITOR_SCALAR_KEYS = [
     ("lane_width", "차선 폭(px)", "float", 30.0),
     ("start_s", "스타트 s", "float", 0.0),
     ("start_spacing", "스타트 간격", "float", 22.0),
+    ("curve_tension", "곡선 장력(0둥글~1직선)", "float", 0.0),
+    ("curve_samples_per_seg", "곡선 샘플/구간", "int", 20),
     ("max_speed", "최고속", "float", 130.0),
     ("min_corner_speed", "코너 최저속", "float", 42.0),
     ("accel", "가속", "float", 52.0),
     ("brake", "감속", "float", 95.0),
     ("corner_brake", "코너 감속계수", "float", 1.4),
-    ("turn_rate_rad", "헤딩 추종", "float", 2.2),
-    ("path_pull", "경로 인력", "float", 2.2),
+    ("corner_lookahead_px", "코너 예견거리", "float", 90.0),
     ("cam_side_sign", "옆시야 부호(+1/-1)", "float", -1.0),
     ("cam_turn_rate_rad", "카메라 추종", "float", 3.4),
     ("countdown_sec", "카운트다운(초)", "float", 3.0),
@@ -339,11 +340,20 @@ def _default_item_at(s: float, *, lane: str = "B", type_id: str = "speed") -> di
 
 
 def _race_path_from_state(state):
-    """에디터 path → RacePath (아이템 s 투영·오버레이용)."""
-    from activities.racing import RacePath
+    """에디터 path → RacePath (곡선 샘플·아이템 s 투영·오버레이용)."""
+    from activities.racing import build_race_path
 
     path = state.get("path") or []
-    return RacePath(path, closed=bool(state.get("closed", True)))
+    fields = state.get("settings_fields") or {}
+    cfg = {
+        "curve_tension": fields.get(
+            "curve_tension", RACING_DEFAULTS.get("curve_tension", 0.0)
+        ),
+        "curve_samples_per_seg": fields.get(
+            "curve_samples_per_seg", RACING_DEFAULTS.get("curve_samples_per_seg", 20)
+        ),
+    }
+    return build_race_path(path, closed=bool(state.get("closed", True)), cfg=cfg)
 
 
 def _item_world_xy(state, item: dict) -> Optional[Tuple[float, float]]:
@@ -1370,6 +1380,22 @@ def _draw_generated_road_preview(map_surf, state, world_to_xy) -> None:
             tuple((round(float(p[0]), 2), round(float(p[1]), 2)) for p in path_pts),
             bool(state.get("closed", True)),
             round(lane_w, 3),
+            round(
+                _parse_float(
+                    fields.get("curve_tension", RACING_DEFAULTS.get("curve_tension", 0.0)),
+                    0.0,
+                ),
+                3,
+            ),
+            int(
+                _parse_float(
+                    fields.get(
+                        "curve_samples_per_seg",
+                        RACING_DEFAULTS.get("curve_samples_per_seg", 20),
+                    ),
+                    20.0,
+                )
+            ),
             round(border_px, 3),
             tuple(lane_cols),
             border_col,
@@ -1433,7 +1459,7 @@ def draw_map_overlay(
     world_to_xy,
     font=None,
 ):
-    """map_surf 위에 경로 폴리라인·점 번호·아이템 표시."""
+    """map_surf 위에 경로 곡선·제어점·아이템 표시."""
     path = state.get("path") or []
     if not path:
         if state.get("tool") == "PATH":
@@ -1459,10 +1485,28 @@ def draw_map_overlay(
             continue
     if len(pts_s) >= 2:
         closed = bool(state.get("closed", True))
+        # 제어점 연결(가이드) — 옅은 선
         try:
-            pygame.draw.lines(map_surf, (80, 200, 255), closed, pts_s, 2)
+            pygame.draw.lines(map_surf, (60, 90, 120), closed, pts_s, 1)
         except Exception:
             pass
+        # 실제 주행 곡선 — RacePath 호장 샘플
+        try:
+            rp = _race_path_from_state(state)
+            if rp.length > 1.0:
+                steps = max(32, int(rp.length / 6.0))
+                curve_pts = []
+                for i in range(steps + (0 if closed else 1)):
+                    x, y, _, _ = rp.sample(rp.length * (i / float(steps)))
+                    csx, csy = world_to_xy(float(x), float(y))
+                    curve_pts.append((int(csx), int(csy)))
+                if len(curve_pts) >= 2:
+                    pygame.draw.lines(map_surf, (80, 200, 255), closed, curve_pts, 2)
+        except Exception:
+            try:
+                pygame.draw.lines(map_surf, (80, 200, 255), closed, pts_s, 2)
+            except Exception:
+                pass
         for i in range(len(pts_s) - (0 if closed else 1)):
             a = pts_s[i]
             b = pts_s[(i + 1) % len(pts_s)]

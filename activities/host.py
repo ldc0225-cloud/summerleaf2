@@ -171,6 +171,30 @@ class FieldActivityHost:
         except Exception:
             return True
 
+    def draw_world_under(self, ctx: FieldDrawContext) -> None:
+        """배경 직후·캐릭터 ysort 직전 (연꽃잎·wave 등)."""
+        if self._session is None:
+            return
+        try:
+            fn = getattr(self._session, "draw_world_under", None)
+            if callable(fn):
+                fn(ctx)
+        except Exception as e:
+            print(f"[activity] draw_world_under error: {e}")
+
+    def collect_ysort_sprites(self):
+        """활동이 제공하는 ysort 스프라이트 (황소개구리·물방울 등)."""
+        if self._session is None:
+            return []
+        try:
+            fn = getattr(self._session, "collect_ysort_sprites", None)
+            if callable(fn):
+                out = fn()
+                return list(out) if out else []
+        except Exception as e:
+            print(f"[activity] collect_ysort_sprites error: {e}")
+        return []
+
     def draw_world(self, ctx: FieldDrawContext) -> None:
         if self._session is None:
             return

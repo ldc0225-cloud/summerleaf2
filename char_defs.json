@@ -10,7 +10,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomwalk"
     }
   },
   "broccoli_a": {
@@ -24,7 +24,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomwalk"
     }
   },
   "summer": {
@@ -41,7 +41,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomwalk"
     }
   },
   "dog": {
@@ -60,7 +60,82 @@
       "face_player_on_talk": true
     },
     "behavior": {
+      "mode": "randomwalk"
+    }
+  },
+  "redtilefish_a": {
+    "type": "adult",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "name": "옥돔",
+    "display_name": "옥돔",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "randomwalk"
+    }
+  },
+  "jjanga_a": {
+    "type": "adult",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "name": "짱아",
+    "display_name": "짱아",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "randomwalk"
+    }
+  },
+  "firefly_a": {
+    "type": "adult",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "name": "반디",
+    "display_name": "반디",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
       "mode": "idle"
+    }
+  },
+  "travel_a": {
+    "type": "adult",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "name": "여행",
+    "display_name": "여행",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "randomwalk"
+    }
+  },
+  "sugar_a": {
+    "type": "adult",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "name": "슈가",
+    "display_name": "슈가",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "randomwalk"
     }
   },
   "ppiyak_a": {
@@ -75,7 +150,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+        "mode": "randomwalk"
     }
   },
   "c3": {
@@ -98,7 +173,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomwalk"
     }
   },
   "c7": {
@@ -114,15 +189,15 @@
     "type": "kid",
     "jump_max_gap": 30,
     "mask_nav": true,
-    "name": "여름",
-    "display_name": "summer",
+    "name": "여름이",
+    "display_name": "여름이",
     "interact": {
       "enabled": true,
       "range": 52.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomplay"
     },
     "talk": {
       "lines": [
@@ -181,6 +256,7 @@
   "boy1_k": {
     "type": "kid",
     "jump_max_gap": 30,
+    "mask_nav": true,
     "name": "boy1",
     "display_name": "boy1",
     "interact": {
@@ -189,77 +265,82 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomplay"
     }
   },
-  "boy2_k": {
+  "rockie_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "boy2",
-    "display_name": "boy2",
+    "mask_nav": true,
+    "name": "록희",
+    "display_name": "록희",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomplay"
     }
   },
-  "boy3_k": {
+  "hyeon_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "boy3",
-    "display_name": "boy3",
+    "mask_nav": true,
+    "name": "현이",
+    "display_name": "현이",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomplay"
     }
   },
-  "girl1_k": {
+  "yuha_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "girl1",
-    "display_name": "girl1",
+    "mask_nav": true,
+    "name": "유하",
+    "display_name": "유하",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomplay"
     }
   },
-  "girl2_k": {
+  "dani_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "girl2",
-    "display_name": "girl2",
+    "mask_nav": true,
+    "name": "단이",
+    "display_name": "단이",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomplay"
     }
   },
-  "girl3_k": {
+  "igyeong_k": {
     "type": "kid",
     "jump_max_gap": 30,
-    "name": "girl3",
-    "display_name": "girl3",
+    "mask_nav": true,
+    "name": "이경이",
+    "display_name": "이경이",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "idle"
+      "mode": "randomplay"
     }
   },
   "fairy1": {
@@ -267,6 +348,21 @@
     "jump_max_gap": 30,
     "display_name": "fairy1",
     "name": "들꽃요정",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+        "mode": "idle"
+    }
+  },
+  "frog01": {
+    "type": "animal",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "display_name": "frog01",
+    "name": "개구리",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -345,5 +441,14 @@
       ]
     },
     "name": "flower_fairy1"
+  },
+  "lotusleaf1": {
+    "jump_max_gap": 30
+  },
+  "lotusleaf2": {
+    "jump_max_gap": 30
+  },
+  "lotusleaf3": {
+    "jump_max_gap": 30
   }
 }

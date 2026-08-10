@@ -46,6 +46,9 @@ from field_runtime import (
     timed_effect_init,
     timed_effect_value,
     _pygame_key_from_spec,
+    event_picker_is_open,
+    event_picker_handle,
+    draw_event_picker,
 )
 from render_align import snap_render_zoom
 from activities import FieldActivityHost, FieldDrawContext
@@ -224,6 +227,40 @@ def _is_android_runtime():
     return bool(os.environ.get("ANDROID_ARGUMENT") or os.environ.get("ANDROID_PRIVATE"))
 
 
+def _parse_fixed_physical_window():
+    """
+    CONFIG FIXED_PHYSICAL_WINDOW → (w, h) 또는 None.
+    허용: "320x240" | "640x480" | (320, 240) | [320, 240]
+    """
+    raw = CONFIG.get("FIXED_PHYSICAL_WINDOW", None)
+    if raw is None or raw is False or raw == "":
+        return None
+    if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+        try:
+            w, h = int(raw[0]), int(raw[1])
+        except Exception:
+            return None
+        if w > 0 and h > 0:
+            return (w, h)
+        return None
+    s = str(raw).strip().lower().replace(" ", "")
+    if not s or s in ("none", "null", "auto", "default"):
+        return None
+    if "x" in s:
+        parts = s.split("x", 1)
+        try:
+            w, h = int(parts[0]), int(parts[1])
+        except Exception:
+            return None
+        if w > 0 and h > 0:
+            return (w, h)
+    if s in ("320", "native_320"):
+        return (320, 240)
+    if s in ("640", "native_640"):
+        return (640, 480)
+    return None
+
+
 def _sync_display_fit_config(lw, lh, pw, ph):
     """Android 등: 논리 해상도를 물리 화면에 비율 유지로 맞춘 present/입력 파라미터."""
     try:
@@ -292,23 +329,27 @@ def _embed_phys_to_logical_xy(px, py, *, scale_factor=1):
         ly = ry * lh // sh
         return max(0, min(lw - 1, lx)), max(0, min(lh - 1, ly))
 
+    # 실제 창 크기 기준 매핑 우선(FIXED_PHYSICAL_WINDOW 등 논리≠물리일 때).
+    # scale_factor 정수 나눗셈은 창이 논리×sf 인 기존 UPSCALE 경로의 빠른 경로.
+    try:
+        pw = int(CONFIG.get("_PHYSICAL_WIDTH", 0) or 0)
+        ph = int(CONFIG.get("_PHYSICAL_HEIGHT", 0) or 0)
+    except Exception:
+        pw, ph = 0, 0
+    if pw > 0 and ph > 0:
+        if pw == lw and ph == lh:
+            return max(0, min(lw - 1, ix)), max(0, min(lh - 1, iy))
+        lx = ix * lw // pw
+        ly = iy * lh // ph
+        return max(0, min(lw - 1, lx)), max(0, min(lh - 1, ly))
+
     try:
         sf = int(scale_factor)
     except Exception:
         sf = 1
     if sf > 1:
         return max(0, min(lw - 1, ix // sf)), max(0, min(lh - 1, iy // sf))
-
-    try:
-        pw = int(CONFIG.get("_PHYSICAL_WIDTH", 0) or 0)
-        ph = int(CONFIG.get("_PHYSICAL_HEIGHT", 0) or 0)
-    except Exception:
-        pw, ph = 0, 0
-    if pw <= 0 or ph <= 0 or (pw == lw and ph == lh):
-        return ix, iy
-    lx = ix * lw // pw
-    ly = iy * lh // ph
-    return max(0, min(lw - 1, lx)), max(0, min(lh - 1, ly))
+    return ix, iy
 
 
 def _present_draw_surf_to_screen(screen, draw_surf, *, scale_factor, present_tmp):
@@ -334,18 +375,22 @@ def _present_draw_surf_to_screen(screen, draw_surf, *, scale_factor, present_tmp
             present_tmp[0] = tmp
         screen.blit(tmp, (ox, oy))
         return
-    if scale_factor != 1:
-        try:
-            pw = int(screen.get_width())
-            ph = int(screen.get_height())
-            pygame.transform.scale(draw_surf, (pw, ph), screen)
-        except Exception:
-            screen.blit(
-                pygame.transform.scale(draw_surf, (screen.get_width(), screen.get_height())),
-                (0, 0),
-            )
-    else:
+    try:
+        pw = int(screen.get_width())
+        ph = int(screen.get_height())
+        dw = int(draw_surf.get_width())
+        dh = int(draw_surf.get_height())
+    except Exception:
         screen.blit(draw_surf, (0, 0))
+        return
+    # scale_factor와 무관하게 논리≠창이면 맞춤(FIXED_PHYSICAL_WINDOW 다운스케일 포함)
+    if dw == pw and dh == ph:
+        screen.blit(draw_surf, (0, 0))
+        return
+    try:
+        pygame.transform.scale(draw_surf, (pw, ph), screen)
+    except Exception:
+        screen.blit(pygame.transform.scale(draw_surf, (pw, ph)), (0, 0))
 
 
 def _blit_bg_view_scaled(dst, bg, cam_origin_x, cam_origin_y, zoom):
@@ -771,11 +816,15 @@ def _player_feet_screen_xy_like_draw(px, py, cam_draw_x, cam_draw_y, z, y_transf
     )
 
 
-def _save_game_with_activity_anchor(flow, field_activities, map_id, player_pos):
+def _save_game_with_activity_anchor(flow, field_activities, map_id, player_pos, *, objs=None, npcs=None):
     """
     필드 미니게임 중 세이브/종료 위치.
     1) activity 세션의 save_location_override (entry/return 좌표 우선)
     2) 없으면 flow.save_game — 미니게임 전용 맵이면 exit_map/exit_pos 로 자동 치환
+
+    이벤트 가드는 호출부(종료 시)에서 이미 걸러진다. 활동 클리어 등 의도적 저장은
+    ignore_event_guard 로 디스크에 반영한다.
+    objs/npcs 를 넘기면 PLACE persist 엔티티 위치·behavior 도 함께 스냅샷.
     """
     ov = None
     try:
@@ -787,11 +836,19 @@ def _save_game_with_activity_anchor(flow, field_activities, map_id, player_pos):
         ret_map = str(ret_map or "").strip()
         if ret_map:
             if ret_pos is not None and len(ret_pos) >= 2:
-                flow.save_game(ret_map, [float(ret_pos[0]), float(ret_pos[1])])
+                flow.save_game(
+                    ret_map,
+                    [float(ret_pos[0]), float(ret_pos[1])],
+                    ignore_event_guard=True,
+                    objs=objs,
+                    npcs=npcs,
+                )
             else:
-                flow.save_game(ret_map, player_pos)
+                flow.save_game(
+                    ret_map, player_pos, ignore_event_guard=True, objs=objs, npcs=npcs
+                )
             return
-    flow.save_game(map_id, player_pos)
+    flow.save_game(map_id, player_pos, ignore_event_guard=True, objs=objs, npcs=npcs)
 
 
 def _activity_return_load(flow, act_res):
@@ -814,6 +871,61 @@ def _activity_return_load(flow, act_res):
     return loaded
 
 
+def _spawn_new_game_after_char_select(flow, field_activities, ev_mgr, *, cam=None):
+    """
+    캐릭터 선택 완료 후 본편 스폰.
+    NEW_GAME_SPAWN_* 로 load_map → 세이브 → boot_phase=2 → 페이드인.
+    Returns load_map tuple or None.
+    """
+    from data import CONFIG
+
+    flow.pending_new_game_after_char_select = False
+    flow.save_data["current_map"] = CONFIG["NEW_GAME_SPAWN_MAP"]
+    flow.save_data["player_pos"] = list(CONFIG["NEW_GAME_SPAWN_POS"])
+    loaded = flow.load_map(
+        save_data={
+            "current_map": flow.save_data["current_map"],
+            "player_pos": flow.save_data["player_pos"],
+            "player_char": flow.save_data.get("player_char"),
+        }
+    )
+    if loaded is None:
+        flow.boot_phase = 2
+        return None
+    map_id, bg, mask, player, objs, npcs = loaded
+    flow.save_data["player_pos"] = [int(player.pos[0]), int(player.pos[1])]
+    try:
+        _save_game_with_activity_anchor(flow, field_activities, map_id, player.pos)
+    except Exception:
+        pass
+    flow.boot_phase = 2
+    if cam is not None:
+        try:
+            cam.snap_to(player.pos)
+            cam.set_follow_player(smooth=False)
+        except Exception:
+            pass
+    if getattr(ev_mgr, "is_fading", False) and int(getattr(ev_mgr, "fade_target", 0) or 0) == 255:
+        try:
+            ev_mgr.schedule_fade_in_after_current_fadeout(0.5)
+        except Exception:
+            pass
+    else:
+        try:
+            fa = int(getattr(ev_mgr, "fade_alpha", 0) or 0)
+            if fa < 16:
+                ev_mgr.fade_alpha = 255
+            ev_mgr.start_global_fade_to(0, 0.5)
+        except Exception:
+            pass
+    print(
+        f"[온보딩 완료] 캐릭터={flow.save_data.get('player_char')} "
+        f"부모={flow.save_data.get('parent_char')} "
+        f"스폰 맵={map_id}, pos={flow.save_data['player_pos']}"
+    )
+    return loaded
+
+
 def _should_start_baseball_exit_event(act_res):
     return (
         isinstance(act_res, dict)
@@ -827,6 +939,15 @@ def _should_start_racing_exit_event(act_res):
     return (
         isinstance(act_res, dict)
         and str(act_res.get("activity") or "").strip() == "racing"
+        and bool(act_res.get("quit"))
+        and bool(act_res.get("return_map"))
+    )
+
+
+def _should_start_bullfrog_exit_event(act_res):
+    return (
+        isinstance(act_res, dict)
+        and str(act_res.get("activity") or "").strip() == "bullfrog"
         and bool(act_res.get("quit"))
         and bool(act_res.get("return_map"))
     )
@@ -855,6 +976,19 @@ def _queue_racing_exit_transition(flow, act_res):
     pos = [float(target_pos[0]), float(target_pos[1])]
     flow.save_data["racing_exit_map"] = target_map
     flow.save_data["racing_exit_pos"] = list(pos)
+    return True
+
+
+def _queue_bullfrog_exit_transition(flow, act_res):
+    target_map = str(act_res.get("return_map") or "").strip()
+    target_pos = act_res.get("return_pos")
+    if not target_map:
+        return False
+    if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
+        return False
+    pos = [float(target_pos[0]), float(target_pos[1])]
+    flow.save_data["bullfrog_exit_map"] = target_map
+    flow.save_data["bullfrog_exit_pos"] = list(pos)
     return True
 
 
@@ -922,6 +1056,38 @@ def _try_start_racing_exit_event(
     return True
 
 
+def _try_start_bullfrog_exit_event(
+    flow,
+    ev_mgr,
+    events_catalog,
+    act_res,
+    *,
+    field_tilt_snapshot=None,
+):
+    if not _should_start_bullfrog_exit_event(act_res):
+        return False
+    if not _queue_bullfrog_exit_transition(flow, act_res):
+        return False
+    from flow import start_system_event
+
+    event_id = str(act_res.get("exit_event_id") or "ev_bullfrog_exit").strip()
+    if not start_system_event(
+        ev_mgr,
+        events_catalog,
+        event_id,
+        field_tilt_snapshot=field_tilt_snapshot,
+    ):
+        flow.save_data.pop("bullfrog_exit_map", None)
+        flow.save_data.pop("bullfrog_exit_pos", None)
+        return False
+    try:
+        ev_mgr.remove_ui_overlay("bullfrog_exit")
+    except Exception:
+        pass
+    print(f"[bullfrog] exit event started: {event_id}")
+    return True
+
+
 def _process_activity_finished(
     flow,
     ev_mgr,
@@ -932,6 +1098,7 @@ def _process_activity_finished(
     *,
     events_catalog=None,
     field_tilt_snapshot=None,
+    cam=None,
 ):
     """활동 종료 result — save_patch·return_map. return_map 성공 시 load_map tuple."""
     if not act_res:
@@ -946,10 +1113,17 @@ def _process_activity_finished(
         try:
             for k, v in act_res["save_patch"].items():
                 flow.save_data[k] = v
-            if not act_res.get("return_map"):
+            if not act_res.get("return_map") and str(act_res.get("activity") or "") != "char_select":
                 _save_game_with_activity_anchor(flow, field_activities, map_id, player.pos)
         except Exception:
             pass
+    # 첫 시작 캐릭터 선택 → 본편 스폰
+    if (
+        str(act_res.get("activity") or "").strip() == "char_select"
+        and bool(getattr(flow, "pending_new_game_after_char_select", False))
+        and not act_res.get("quit")
+    ):
+        return _spawn_new_game_after_char_select(flow, field_activities, ev_mgr, cam=cam)
     if _try_start_baseball_exit_event(
         flow,
         ev_mgr,
@@ -959,6 +1133,14 @@ def _process_activity_finished(
     ):
         return None
     if _try_start_racing_exit_event(
+        flow,
+        ev_mgr,
+        events_catalog,
+        act_res,
+        field_tilt_snapshot=field_tilt_snapshot,
+    ):
+        return None
+    if _try_start_bullfrog_exit_event(
         flow,
         ev_mgr,
         events_catalog,
@@ -982,7 +1164,7 @@ def _process_activity_finished(
         }
     except Exception:
         pass
-    print(f"[baseball] returned to {map_id} at {player.pos}")
+    print(f"[activity] returned to {map_id} at {player.pos}")
     return loaded
 
 
@@ -1080,8 +1262,27 @@ def main():
             physical_w, physical_h = screen.get_size()
             _sync_display_fit_config(lw, lh, physical_w, physical_h)
         else:
-            physical_w, physical_h = int(lw * scale_factor), int(lh * scale_factor)
-            screen = pygame.display.set_mode((physical_w, physical_h), flags)
+            fixed_wh = _parse_fixed_physical_window()
+            if fixed_wh is not None:
+                physical_w, physical_h = int(fixed_wh[0]), int(fixed_wh[1])
+            else:
+                physical_w, physical_h = int(lw * scale_factor), int(lh * scale_factor)
+            # 동일 크기면 set_mode 생략(FIXED_PHYSICAL_WINDOW + AUTO 전환 시 깜빡임 완화)
+            need_set = True
+            try:
+                if screen is not None and not fullscreen_on:
+                    cur = screen.get_size()
+                    if int(cur[0]) == int(physical_w) and int(cur[1]) == int(physical_h):
+                        need_set = False
+            except Exception:
+                need_set = True
+            if need_set:
+                screen = pygame.display.set_mode((physical_w, physical_h), flags)
+            else:
+                try:
+                    physical_w, physical_h = screen.get_size()
+                except Exception:
+                    pass
             _sync_display_fit_config(lw, lh, physical_w, physical_h)
         # 새 줌 시스템: "오버레이 제외 최종 출력물"을 통째로 scale 하므로,
         # 출력 모드와 무관하게 항상 논리 해상도 Surface에 렌더링하고 마지막에만 screen으로 blit한다.
@@ -1135,15 +1336,29 @@ def main():
     # 시스템 이벤트: from flow import start_system_event → start_system_event(ev_mgr, events_catalog, "event_id")
     is_fullscreen = False
 
-    # --- 온보딩 / 스폰 분기용: 실행 시점에 디스크에 세이브 파일이 있었는지 ---
-    # GameFlow.__init__ 에서 미니게임 맵 세이브는 이미 exit 로 교정됨 → flow.save_data 를 스냅샷으로 씀.
+    # --- 온보딩 / 스폰 분기용 ---
+    # had_save: 디스크에 세이브가 있었는지 (이어하기 좌표)
+    # needs_char_select: 주인공을 아직 고르지 않았는지 (데모 중 세이브가 생겨도 선택 UI 필요)
+    from data import needs_player_char_select
+
     had_save_at_launch = os.path.isfile(flow.save_path)
+    needs_char_select_at_launch = needs_player_char_select(flow.save_data, CONFIG)
     save_spawn_snapshot = None
-    if had_save_at_launch and isinstance(flow.save_data, dict) and flow.save_data.get("current_map"):
+    if (
+        had_save_at_launch
+        and not needs_char_select_at_launch
+        and isinstance(flow.save_data, dict)
+        and flow.save_data.get("current_map")
+    ):
         save_spawn_snapshot = {
             "current_map": flow.save_data.get("current_map"),
             "player_pos": flow.save_data.get("player_pos"),
         }
+    print(
+        f"[온보딩] launch had_save={had_save_at_launch} "
+        f"needs_char_select={needs_char_select_at_launch} "
+        f"mainprogress={flow.save_data.get('mainprogress')}"
+    )
 
     # 매 실행 인트로→데모까지는 START_MAP만; 본편 맵/좌표는 데모 종료 후 스폰 블록에서 적용
     initial_map_data = {"current_map": CONFIG["START_MAP"]}
@@ -1167,7 +1382,10 @@ def main():
 
     def _apply_map_field_visuals(target_map_id, *, instant=True):
         nonlocal tilt_current, shear_smoothed
-        apply_map_field_defaults(target_map_id, ui, ev_mgr=ev_mgr)
+        # world_data[map].field — 맵별 틸트/쉬어 기본값 (없으면 CONFIG)
+        apply_map_field_defaults(
+            target_map_id, ui, ev_mgr=ev_mgr, world_data=flow.world_data
+        )
         if instant:
             tilt_current = float(ui.tilt_target)
             try:
@@ -1207,6 +1425,8 @@ def main():
                 ev.get("result"),
                 ev,
                 is_sync=True,
+                map_id=map_id,
+                player_pos=getattr(player, "pos", None),
             )
             ev_mgr.field_tilt_snapshot = (
                 ui.tilt_bg_demo,
@@ -2162,6 +2382,7 @@ def main():
                 "boot_ctx "
                 f"W={CONFIG.get('WIDTH')} H={CONFIG.get('HEIGHT')} "
                 f"OUTPUT_MODE={CONFIG.get('OUTPUT_MODE')} UPSCALE_FACTOR={CONFIG.get('UPSCALE_FACTOR')} "
+                f"FIXED_PHYSICAL_WINDOW={CONFIG.get('FIXED_PHYSICAL_WINDOW')} "
                 f"WORLD_ZOOM_ENABLED={CONFIG.get('WORLD_ZOOM_ENABLED')} "
                 f"WORLD_ZOOM_DRAW≈{CONFIG.get('WORLD_ZOOM_DEFAULT')} "
                 f"BG_VIEWPORT_BLIT_ENABLED={CONFIG.get('BG_VIEWPORT_BLIT_ENABLED')}"
@@ -2553,6 +2774,12 @@ def main():
         # 야구 등 필드 활동 — tilt_target 오버라이드 (타격 전 압축)
         if field_activities.is_active and not ev_mgr.active_event:
             _sess = getattr(field_activities, "_session", None)
+            _bte = getattr(_sess, "field_tilt_enabled", None)
+            if _bte is not None:
+                try:
+                    ui.tilt_bg_demo = bool(_bte)
+                except Exception:
+                    pass
             _btt = getattr(_sess, "field_tilt_target", None)
             if _btt is not None:
                 try:
@@ -2713,6 +2940,7 @@ def main():
             player,
             events_catalog=events_catalog,
             field_tilt_snapshot=_activity_tilt_snap,
+            cam=cam,
         )
         if loaded is not None:
             map_id, bg, mask, player, objs, npcs = loaded
@@ -2746,6 +2974,7 @@ def main():
                 player,
                 events_catalog=events_catalog,
                 field_tilt_snapshot=_activity_tilt_snap,
+                cam=cam,
             )
             if loaded is not None:
                 map_id, bg, mask, player, objs, npcs = loaded
@@ -2779,7 +3008,7 @@ def main():
                 }
             except Exception:
                 pass
-        ev_mgr.update(player, cam, objs, npcs, mask_img=mask, dt_sec=dt_visual_sec)
+        ev_mgr.update(player, cam, objs, npcs, mask_img=mask, dt_sec=dt_visual_sec, map_id=map_id)
         _sync_screen_hi_res_output()
         if getattr(ev_mgr, "_progress_refresh_pending", False):
             from char_behavior import apply_map_progress_states
@@ -3071,6 +3300,13 @@ def main():
             target_map = ev_mgr.pending_map_change["map_id"]
             target_pos = ev_mgr.pending_map_change["pos"]
             ev_mgr.pending_map_change = None
+            # PLACE persist 위치 스냅샷 (떠나기 전) — travel 동행은 load_map 에서 재배치
+            try:
+                from flow import snapshot_placed_from_live
+
+                snapshot_placed_from_live(flow.save_data, map_id, objs, npcs)
+            except Exception:
+                pass
             _tgt = str(target_map or "").strip()
             _cur = str(map_id or flow.save_data.get("current_map") or "").strip()
             if _tgt == "bg_baseball1" and _cur and _cur != "bg_baseball1":
@@ -3086,6 +3322,13 @@ def main():
             # 실제 맵 전환 처리
             # target_pos가 None이면 flow.load_map 내부에서 세이브 파일 정보를 활용함
             map_id, bg, mask, player, objs, npcs = flow.load_map(save_data={"current_map": target_map, "player_pos": target_pos})
+            # 런타임 current_map 동기화 (PLACE persist / placed travel 이 참조)
+            # 디스크 세이브는 이벤트 가드·종료 세이브 경로가 담당
+            try:
+                flow.save_data["current_map"] = map_id
+                flow.save_data["player_pos"] = [float(player.pos[0]), float(player.pos[1])]
+            except Exception:
+                pass
             try:
                 flow.reset_zone_contact_state(map_id)
             except Exception:
@@ -3189,6 +3432,46 @@ def main():
                 pygame.JOYDEVICEREMOVED,
             ):
                 app_force_quit_feed_event(event)
+
+            # 이벤트 피커(E) — 다른 필드 입력보다 먼저 처리
+            if event.type in (
+                pygame.KEYDOWN,
+                pygame.MOUSEBUTTONDOWN,
+                pygame.MOUSEWHEEL,
+            ) or event_picker_is_open():
+                _ep_xy = None
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    try:
+                        _ep_xy = _embed_phys_to_logical_xy(
+                            event.pos[0], event.pos[1], scale_factor=scale_factor
+                        )
+                    except Exception:
+                        _ep_xy = None
+                elif event.type == pygame.KEYDOWN and event_picker_is_open():
+                    # Enter/A 는 선택 실행 — 커서 좌표 불필요
+                    _ep_xy = (int(ui_cursor[0]), int(ui_cursor[1]))
+                try:
+                    _ep_snap = (
+                        ui.tilt_bg_demo,
+                        float(ui.tilt_target),
+                        float(tilt_current),
+                        bool(ui.shear_debug_on),
+                    )
+                except Exception:
+                    _ep_snap = None
+                _ep_res = event_picker_handle(
+                    event,
+                    ev_mgr=ev_mgr,
+                    events_catalog=events_catalog,
+                    event_data=raw_events,
+                    logical_xy=_ep_xy,
+                    field_tilt_snapshot=_ep_snap,
+                    call_catalog=fragment_catalog,
+                )
+                if _ep_res in ("consumed", "started"):
+                    continue
+                if event_picker_is_open() and event.type != pygame.QUIT:
+                    continue
             if event.type == pygame.QUIT:
                 running = False
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -3773,6 +4056,7 @@ def main():
             player,
             events_catalog=events_catalog,
             field_tilt_snapshot=_activity_tilt_snap,
+            cam=cam,
         )
         if loaded_post is not None:
             map_id, bg, mask, player, objs, npcs = loaded_post
@@ -3801,7 +4085,16 @@ def main():
         demo_id = CONFIG.get("DEMO_EVENT_ID")
         if ev_mgr.last_ended_event_id == demo_id:
             ev_mgr.last_ended_event_id = None
-            if had_save_at_launch and save_spawn_snapshot and save_spawn_snapshot.get("current_map"):
+            from data import needs_player_char_select
+
+            # 세이브 파일이 있어도 캐릭터를 고른 적 없으면 선택 UI (데모 중 세이브 생김 대비)
+            need_pick = needs_player_char_select(flow.save_data, CONFIG)
+            if (
+                had_save_at_launch
+                and not need_pick
+                and save_spawn_snapshot
+                and save_spawn_snapshot.get("current_map")
+            ):
                 flow.save_data["current_map"] = save_spawn_snapshot["current_map"]
                 pp = save_spawn_snapshot.get("player_pos")
                 spawn_sd = {"current_map": flow.save_data["current_map"]}
@@ -3812,42 +4105,66 @@ def main():
                     sp = flow.world_data.get(mid, {}).get("start_pos", [100, 100])
                     spawn_sd["player_pos"] = list(sp)
                 map_id, bg, mask, player, objs, npcs = flow.load_map(save_data=spawn_sd)
-            else:
-                flow.save_data["current_map"] = CONFIG["NEW_GAME_SPAWN_MAP"]
-                flow.save_data["player_pos"] = list(CONFIG["NEW_GAME_SPAWN_POS"])
-                map_id, bg, mask, player, objs, npcs = flow.load_map(
-                    save_data={
-                        "current_map": flow.save_data["current_map"],
-                        "player_pos": flow.save_data["player_pos"],
-                    }
+                _sync_map_bg_size()
+                try:
+                    presence_rt.reset(map_id)
+                except Exception:
+                    pass
+                try:
+                    _rebuild_bg_zone_cache()
+                except Exception:
+                    pass
+                flow.save_data["player_pos"] = [int(player.pos[0]), int(player.pos[1])]
+                cam.snap_to(player.pos)
+                cam.set_follow_player(smooth=False)
+                _reload_event_bundles()
+                _save_game_with_activity_anchor(flow, field_activities, map_id, player.pos)
+                flow.boot_phase = 2
+                _queue_sync_for_map(map_id)
+                _apply_map_field_visuals(map_id, instant=True)
+                if getattr(ev_mgr, "is_fading", False) and int(getattr(ev_mgr, "fade_target", 0) or 0) == 255:
+                    ev_mgr.schedule_fade_in_after_current_fadeout(0.5)
+                else:
+                    fa = int(getattr(ev_mgr, "fade_alpha", 0) or 0)
+                    if fa < 16:
+                        ev_mgr.fade_alpha = 255
+                    ev_mgr.start_global_fade_to(0, 0.5)
+                print(
+                    f"[온보딩 완료] 이어하기 캐릭터={flow.save_data.get('player_char')} "
+                    f"스폰 맵={map_id}, pos={flow.save_data['player_pos']}"
                 )
-            _sync_map_bg_size()
-            try:
-                presence_rt.reset(map_id)
-            except Exception:
-                pass
-            # bg_zones 캐시도 맵 단위로 재빌드
-            try:
-                _rebuild_bg_zone_cache()
-            except Exception:
-                pass
-            flow.save_data["player_pos"] = [int(player.pos[0]), int(player.pos[1])]
-            cam.snap_to(player.pos)
-            cam.set_follow_player(smooth=False)
-            _reload_event_bundles()
-            _save_game_with_activity_anchor(flow, field_activities, map_id, player.pos)
-            flow.boot_phase = 2
-            _queue_sync_for_map(map_id)
-            _apply_map_field_visuals(map_id, instant=True)
-            # 데모 이벤트의 FADEOUT(검게)이 진행 중이면 타이머를 덮어쓰지 않고, 끝난 뒤에만 페이드인
-            if getattr(ev_mgr, "is_fading", False) and int(getattr(ev_mgr, "fade_target", 0) or 0) == 255:
-                ev_mgr.schedule_fade_in_after_current_fadeout(0.5)
             else:
-                fa = int(getattr(ev_mgr, "fade_alpha", 0) or 0)
-                if fa < 16:
-                    ev_mgr.fade_alpha = 255
-                ev_mgr.start_global_fade_to(0, 0.5)
-            print(f"[온보딩 완료] 스폰 맵={map_id}, pos={flow.save_data['player_pos']}")
+                # 주인공 미선택 → 본편 스폰 전 캐릭터 선택
+                try:
+                    flow.boot_phase = int(CONFIG.get("CHAR_SELECT_BOOT_PHASE", 15) or 15)
+                except Exception:
+                    flow.boot_phase = 15
+                flow.pending_new_game_after_char_select = True
+                if getattr(ev_mgr, "is_fading", False) and int(getattr(ev_mgr, "fade_target", 0) or 0) == 255:
+                    ev_mgr.schedule_fade_in_after_current_fadeout(0.35)
+                else:
+                    fa = int(getattr(ev_mgr, "fade_alpha", 0) or 0)
+                    if fa > 16:
+                        ev_mgr.start_global_fade_to(0, 0.35)
+                started_cs = field_activities.consume_request(
+                    {"id": "char_select", "action": "start"},
+                    player=player,
+                    objs=objs,
+                    npcs=npcs,
+                    mask=mask,
+                    world_data=flow.world_data,
+                    ev_mgr=ev_mgr,
+                    bg=bg,
+                )
+                if not started_cs:
+                    from activities import request_field_activity
+
+                    request_field_activity(ev_mgr, "char_select")
+                print(
+                    f"[온보딩] 캐릭터 선택 시작 "
+                    f"(had_save={had_save_at_launch}, need_pick={need_pick}, "
+                    f"activity_active={field_activities.is_active})"
+                )
 
         # --- 3. 상호작용 및 물리 로직 ---
         for _sim_i in range(max(0, int(sim_steps))):
@@ -3869,7 +4186,7 @@ def main():
                         aid = str(getattr(field_activities, "active_id", "") or "").strip().lower()
                     except Exception:
                         aid = ""
-                    if aid == "racing":
+                    if aid in ("racing", "bullfrog"):
                         player.path = []
                         player.target = list(player.pos)
                     else:
@@ -3880,11 +4197,17 @@ def main():
                     pass
             elif not bool(getattr(ev_mgr, "is_talking", False)):
                 player.move(mask, objs, npcs)
+            elif (
+                getattr(player, "_jump_arc", None) is not None
+                or getattr(player, "_hop_repeat", None)
+            ):
+                # SAY 중에도 점프 포물선(_jump_draw_lift)은 계속 갱신
+                player.move(mask, objs, npcs)
 
             # 필드 활동(야구 타구 추격 등) 중에도 NPC·오브젝트 path는 진행해야 함.
-            if swing_ride_mode not in ("mount", "ride") and not bool(
-                getattr(ev_mgr, "is_talking", False)
-            ):
+            # SAY 중에는 일반 이동은 멈추되, hop/점프 웨이포인트만 진행(대화 중 높이 고정 방지).
+            _talking = bool(getattr(ev_mgr, "is_talking", False))
+            if swing_ride_mode not in ("mount", "ride") and not _talking:
                 for n in npcs:
                     n.move(mask, objs, npcs)
                 for o in objs:
@@ -3892,12 +4215,15 @@ def main():
                         om = getattr(o, "move", None)
                         if callable(om):
                             om(mask, objs, npcs)
-            if not ev_mgr.active_event and not bool(getattr(ev_mgr, "is_talking", False)):
-                try:
-                    from char_behavior import tick_npc_behaviors
-                    tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id)
-                except Exception:
-                    pass
+            elif swing_ride_mode not in ("mount", "ride") and _talking:
+                for n in npcs:
+                    if getattr(n, "_jump_arc", None) is not None or getattr(n, "_hop_repeat", None):
+                        n.move(mask, objs, npcs)
+            try:
+                from char_behavior import tick_npc_behaviors
+                tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id)
+            except Exception:
+                pass
 
         # 체류 존: 이동 후 재적용 — player.move()가 마스크 layer를 매 스텝 덮어씀
         try:
@@ -4239,6 +4565,16 @@ def main():
                 pending_action, target_obj, target_npc = None, None, None
 
         # 글로벌 조건 트리거(인트로 등) → 존(맵 박스) 트리거보다 먼저
+        # 자유이동 중 맵·좌표를 메모리 세이브에 맞춤 (이벤트 시작 체크포인트 기준)
+        if (
+            flow.boot_phase >= 2
+            and not ev_mgr.active_event
+            and player is not None
+        ):
+            try:
+                flow.sync_runtime_location(map_id, player.pos)
+            except Exception:
+                pass
         if not ev_mgr.active_event:
             # 이벤트(DEV_CMD)로 요청된 그네 탑승 시작 처리
             req = getattr(ev_mgr, "swing_ride_request", None)
@@ -4269,7 +4605,11 @@ def main():
                         pass
 
             # 이벤트(DEV_CMD) field_activity_request — 위 입력 처리 전에 소비됨
-            if not field_activities.is_active:
+            # 캐릭터 선택 대기 중에는 GLOBAL auto(첫 만남 mainprogress 등)를 올리지 않음
+            if (
+                not field_activities.is_active
+                and not bool(getattr(flow, "pending_new_game_after_char_select", False))
+            ):
                 if _try_start_pending_sync_event():
                     pending_action = None
                 else:
@@ -4282,7 +4622,14 @@ def main():
                     if gid:
                         ev = events_catalog[gid]
                         ev_mgr.reset_entity_event_zooms(player, npcs, objs)
-                        ev_mgr.start_event(ev.get("steps") or [], gid, ev.get("result"), ev)
+                        ev_mgr.start_event(
+                            ev.get("steps") or [],
+                            gid,
+                            ev.get("result"),
+                            ev,
+                            map_id=map_id,
+                            player_pos=getattr(player, "pos", None),
+                        )
                         ev_mgr.field_tilt_snapshot = (
                             ui.tilt_bg_demo,
                             float(ui.tilt_target),
@@ -4309,7 +4656,14 @@ def main():
                         if tid and tid in events_catalog:
                             ev = events_catalog[tid]
                             ev_mgr.reset_entity_event_zooms(player, npcs, objs)
-                            ev_mgr.start_event(ev.get("steps") or [], tid, ev.get("result"), ev)
+                            ev_mgr.start_event(
+                                ev.get("steps") or [],
+                                tid,
+                                ev.get("result"),
+                                ev,
+                                map_id=map_id,
+                                player_pos=getattr(player, "pos", None),
+                            )
                             ev_mgr.field_tilt_snapshot = (
                                 ui.tilt_bg_demo,
                                 float(ui.tilt_target),
@@ -5323,6 +5677,29 @@ def main():
                 return True
             return False
 
+        # --- 필드 활동: 배경 위·캐릭터 ysort 아래 (연꽃잎·wave 등) ---
+        if field_activities.is_active:
+            try:
+                _aid_u = getattr(getattr(field_activities, "_session", None), "activity_id", None)
+                _fa_under = FieldDrawContext(
+                    surf=render_surf,
+                    cam_draw_x=float(cam_draw_x),
+                    cam_draw_y=float(cam_draw_y),
+                    z=float(z),
+                    y_transform=y_transform,
+                    x_offset_fn=x_offset_fn,
+                    font_fn=activity_font_fn(_aid_u),
+                    mode7_ctx=rotate3d_mode7_ctx if rotate3d_active else None,
+                    sprite_perspective_q=(
+                        None
+                        if rotate3d_active
+                        else (float(f_q) if callable(y_transform) else None)
+                    ),
+                )
+                field_activities.draw_world_under(_fa_under)
+            except Exception:
+                pass
+
         if cull_enabled:
             render_pool = [
                 o
@@ -5338,6 +5715,12 @@ def main():
         # 그네(좌석+끈)도 하나의 오브젝트처럼 ysort
         if swing_ent is not None:
             render_pool.append(swing_ent)
+        # 필드 활동 ysort 스프라이트 (황소개구리·물방울 등 — 연꽃잎은 draw_world_under)
+        if field_activities.is_active:
+            try:
+                render_pool.extend(field_activities.collect_ysort_sprites() or [])
+            except Exception:
+                pass
 
         def _ysort_y(ent):
             try:
@@ -6317,18 +6700,35 @@ def main():
         if perf_enabled and t_ui is not None:
             _padd("ui_overlay_chrome", _pnow() - t_ui)
 
-        # [추가] SCREEN 오버레이 (인트로/슬라이드) — 비·exit 위, 대화 아래
+        # 이벤트 피커 모달 (논리 해상도 — chrome 위, 페이드/대화 아래)
+        try:
+            if event_picker_is_open():
+                draw_event_picker(
+                    render_surf,
+                    font_title=get_ui_font(scale_ui_text_px(12), "ui"),
+                    font_row=get_ui_font(scale_ui_text_px(10), "ui"),
+                )
+        except Exception:
+            pass
+
+        # [추가] SCREEN 오버레이 (인트로/슬라이드) — 비·exit 위, 페이드·대화 아래
         t0 = _pnow() if perf_enabled else None
         ev_mgr.draw_screen_overlay(render_surf)
         if perf_enabled and t0 is not None:
             _padd("overlay", _pnow() - t0)
+
+        # 페이드 — 월드·SCREEN 위, 대화창 아래 (페이드아웃 중에도 SAY 표시)
+        if ev_mgr.fade_alpha > 0:
+            fade_overlay_surf.fill((0, 0, 0))
+            fade_overlay_surf.set_alpha(ev_mgr.fade_alpha)
+            render_surf.blit(fade_overlay_surf, (0, 0))
 
         t_ui = _pnow() if perf_enabled else None
         ev_mgr.draw_ui_overlays(render_surf, head_ctx, layer="dialog")
         if perf_enabled and t_ui is not None:
             _padd("ui_overlay_dialog", _pnow() - t_ui)
 
-        # 월드 후단: 대화·디버그 블릿·존 박스·커서 등(페이드는 screen FX 뒤 — 최상단)
+        # 월드 후단: 대화·디버그 블릿·존 박스·커서 등
         t_wtail0 = _pnow() if perf_detail else None
 
         
@@ -6591,7 +6991,7 @@ def main():
         if perf_detail and t_wtail0 is not None:
             _padd("world_tail", _pnow() - t_wtail0)
 
-        # 화면 흔들림 — 연출 전체(대화·SCREEN 포함)에 적용
+        # 화면 흔들림 — 연출 전체(대화·SCREEN·페이드 포함)에 적용
         shake_dx, shake_dy = screen_fx_shake_offset(getattr(ev_mgr, "screen_fx_shake", None))
         if shake_dx or shake_dy:
             tmp_sh = screen_shake_tmp[0]
@@ -6602,12 +7002,6 @@ def main():
                 tmp_sh.blit(render_surf, (0, 0))
             render_surf.fill((0, 0, 0))
             render_surf.blit(tmp_sh, (shake_dx, shake_dy))
-
-        # 페이드 — screen FX(비·번쩍·흔들림) 포함 모든 연출 위에 덮음 (UI 오버레이 아래)
-        if ev_mgr.fade_alpha > 0:
-            fade_overlay_surf.fill((0, 0, 0))
-            fade_overlay_surf.set_alpha(ev_mgr.fade_alpha)
-            render_surf.blit(fade_overlay_surf, (0, 0))
 
         # 최종 프레임: 논리 해상도(draw_surf) → 물리 화면(screen)
         # NATIVE_640(scale_factor==1)에서도 draw_surf는 별도 Surface이므로 반드시 blit해야 한다.
@@ -6636,7 +7030,15 @@ def main():
                 perf_last_dump = perf_frame_i
                 _pdump()
 
-    _save_game_with_activity_anchor(flow, field_activities, map_id, player.pos)
+    # 종료 세이브:
+    # - 인트로/데모 중: 기존 세이브 유지 (START_MAP 으로 덮지 않음)
+    # - 이벤트 중: 시작 직전 체크포인트 유지 (이벤트용 맵으로 덮지 않음)
+    if int(getattr(flow, "boot_phase", 2) or 0) < 2:
+        print("[save] skipped — boot intro/demo (existing save kept)")
+    elif getattr(flow, "is_event_save_guarded", lambda: False)():
+        print("[save] skipped — event in progress (pre-event checkpoint kept)")
+    else:
+        _save_game_with_activity_anchor(flow, field_activities, map_id, player.pos, objs=objs, npcs=npcs)
     pygame.quit()
 
 if __name__ == "__main__":
