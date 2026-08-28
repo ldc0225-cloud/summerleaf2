@@ -528,17 +528,47 @@ def _apply_char_anim(entity, patch: dict) -> None:
             entity.state = anim.lower()
         return
     mode = str(patch.get("anim_mode") or patch.get("mode") or "hold").strip().lower()
-    release = str(patch.get("anim_release") or patch.get("release") or "idle").strip().lower()
+    anim_l = anim.strip().lower()
+    try:
+        from engine import _action_anim_hold_last, _resolve_action_anim_frame_sec
+
+        hold_last = _action_anim_hold_last(patch, anim_l)
+        frame_sec = _resolve_action_anim_frame_sec(patch, anim_l)
+    except Exception:
+        frame_sec = None
+        hold_last = anim_l == "falldown" and "hold_last" not in patch
+    if "release" in patch:
+        release = str(patch.get("anim_release") or patch.get("release") or "idle").strip().lower()
+    elif hold_last:
+        release = "stop"
+    else:
+        release = str(patch.get("anim_release") or patch.get("release") or "idle").strip().lower()
     if mode == "once":
         try:
             dur_s = float(patch.get("anim_duration") or patch.get("duration") or 1.0)
         except (TypeError, ValueError):
             dur_s = 1.0
+        if frame_sec and ("anim_duration" not in patch and patch.get("duration") is None):
+            try:
+                dur_s = max(0.05, sum(float(x) for x in frame_sec))
+            except (TypeError, ValueError):
+                pass
         duration_ms = int(max(0.05, dur_s) * 1000.0)
-        loop = bool(patch.get("anim_loop", False))
-        pa(anim, duration_ms=duration_ms, loop=loop, release=release)
+        if "anim_loop" in patch or "loop" in patch:
+            loop = bool(patch.get("anim_loop", patch.get("loop", False)))
+        elif hold_last:
+            loop = False
+        else:
+            loop = bool(patch.get("anim_loop", False))
+        pa(anim, duration_ms=duration_ms, loop=loop, release=release, frame_sec=frame_sec)
     else:
-        pa(anim, duration_ms=0, loop=True, release=release)
+        if "anim_loop" in patch or "loop" in patch:
+            loop = bool(patch.get("anim_loop", patch.get("loop", True)))
+        elif hold_last:
+            loop = False
+        else:
+            loop = True
+        pa(anim, duration_ms=0, loop=loop, release=release, frame_sec=frame_sec)
     ua = getattr(entity, "update_anim", None)
     if callable(ua):
         ua()
@@ -646,6 +676,9 @@ def apply_state_patch(entity, patch: dict) -> bool:
     if "visible" in patch:
         _entity_set_visible(entity, _coerce_visible(patch.get("visible")))
 
+    if "hide_feet_shadow" in patch:
+        entity._hide_feet_shadow = _coerce_visible(patch.get("hide_feet_shadow"))
+
     change_to = patch.get("change_to") or patch.get("to")
     if change_to:
         key = str(change_to).strip()
@@ -684,16 +717,19 @@ def apply_state_patch(entity, patch: dict) -> bool:
 
 
 def _resolve_entity_fx_patch(ndef: dict, spawn: dict | None, rule: dict | None):
-    """progress 규칙 entity_fx > (규칙 있으면) 타입 기본 > spawn_state > 타입 기본."""
+    """progress 규칙 entity_fx > spawn_state > 타입 기본.
+
+    반환: (fx_patch, explicit)
+    - explicit True: def/progress에 entity_fx 키가 있어 적용(또는 명시적 해제)한다.
+    - explicit False: 키 없음 → 런타임 FX(이벤트 ENTITY_FX persist 등)를 건드리지 않는다.
+    """
     if isinstance(rule, dict):
         if "entity_fx" in rule:
             return rule.get("entity_fx"), True
         st = rule.get("state")
         if isinstance(st, dict) and "entity_fx" in st:
             return st.get("entity_fx"), True
-        if isinstance(ndef, dict) and "entity_fx" in ndef:
-            return ndef.get("entity_fx"), True
-        return None, True
+        # 규칙에 entity_fx 키가 없으면 타입/스폰 기본만 본다 (없으면 런타임 유지)
     if isinstance(spawn, dict) and "entity_fx" in spawn:
         return spawn.get("entity_fx"), True
     if isinstance(ndef, dict) and "entity_fx" in ndef:
@@ -702,17 +738,24 @@ def _resolve_entity_fx_patch(ndef: dict, spawn: dict | None, rule: dict | None):
 
 
 def apply_entity_fx_from_def(entity, ndef: dict, *, spawn=None, rule=None) -> None:
+    """def/progress의 entity_fx만 적용. 명시가 없으면 이벤트 persist FX를 지우지 않는다."""
     from engine import apply_entity_visual_patch, clear_entity_fx
 
     fx, explicit = _resolve_entity_fx_patch(ndef or {}, spawn, rule)
     if not explicit:
-        # progress 규칙에 FX가 없을 때 tint만 끔 — 이벤트 ZOOM persist 등 entity_def_zoom 은 유지
-        clear_entity_fx(entity)
+        # entity_fx 키 없음 → 런타임(이벤트 persist 등) pulse/tint 유지
+        # (entity_def_zoom 과 같이, 명시되지 않은 시각 상태는 덮어쓰지 않음)
         return
     if fx is None:
+        # progress/def가 entity_fx: null|false 로 명시한 경우만 끔
         clear_entity_fx(entity)
     else:
         apply_entity_visual_patch(entity, fx)
+        # def/progress가 의도적으로 FX를 준 경우 이벤트 persist 표시는 해제
+        try:
+            entity._entity_fx_event_persist = False
+        except Exception:
+            pass
 
 
 def apply_entity_progress_state(entity, save_data: dict, *, session_vars=None) -> bool:
@@ -1192,7 +1235,9 @@ def tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id: str = ""):
 
 
 def npc_entry_from_instance(npc) -> dict:
-    """에디터 저장용 world_data npc dict."""
+    """에디터 저장용 world_data npc dict.
+    이벤트 FOLLOW/PLACE persist 동행 상태는 넣지 않는다 (save_data 전용).
+    """
     d = {
         "name": npc.name,
         "pos": [int(npc.pos[0]), int(npc.pos[1])],
@@ -1204,9 +1249,18 @@ def npc_entry_from_instance(npc) -> dict:
     iid = getattr(npc, "instance_id", None)
     if iid:
         d["instance_id"] = iid
-    spec = getattr(npc, "behavior_spec", None) or {}
+    # 런타임 동행이면 맵에 적어 둔 원본 behavior(_world_entry)만 유지
+    we = getattr(npc, "_world_entry", None) or {}
+    if bool(getattr(npc, "_placed_persist", False)):
+        spec = we.get("behavior") if isinstance(we.get("behavior"), dict) else {}
+    else:
+        spec = getattr(npc, "behavior_spec", None) or {}
     wps = spec.get("waypoints")
     mode = display_behavior_mode(spec.get("mode") or "idle")
+    # 이벤트 FOLLOW(mode만)는 world_data 에 쓰지 않음
+    if mode == "follow" and spec.get("trigger_range") is None and spec.get("stop_dist") is None:
+        mode = "idle"
+        wps = None
     if mode and mode != "idle":
         beh: dict = {"mode": mode}
         if wps:
@@ -1247,7 +1301,6 @@ def npc_entry_from_instance(npc) -> dict:
     inst = getattr(npc, "interact_instance", None)
     if isinstance(inst, dict) and inst:
         d["interact"] = inst
-    we = getattr(npc, "_world_entry", None) or {}
     if isinstance(we.get("spawn_state"), dict) and we["spawn_state"]:
         d["spawn_state"] = dict(we["spawn_state"])
     if isinstance(we.get("progress_apply"), list) and we["progress_apply"]:

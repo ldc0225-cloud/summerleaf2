@@ -150,7 +150,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-        "mode": "randomwalk"
+      "mode": "randomwalk"
     }
   },
   "c3": {
@@ -192,7 +192,7 @@
     "name": "여름이",
     "display_name": "여름이",
     "interact": {
-      "enabled": true,
+      "enabled": false,
       "range": 52.0,
       "face_player_on_talk": true
     },
@@ -354,7 +354,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-        "mode": "idle"
+      "mode": "idle"
     }
   },
   "frog01": {
@@ -372,10 +372,25 @@
       "mode": "idle"
     }
   },
+  "bullfrog": {
+    "type": "animal",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "display_name": "frog01",
+    "name": "개구리",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
+  },
   "flower_fairy1": {
     "type": "kid",
     "jump_max_gap": 30,
-    "display_name": "flower_fairy1",
+    "display_name": "들꽃요정",
     "spawn_state": {
       "visible": false,
       "dir": "left"
@@ -391,6 +406,10 @@
         "anim": "idle",
         "anim_mode": "hold",
         "dir": "left"
+      },
+      {
+        "when": "progress_flower1_1 == 1006",
+        "visible": false
       },
       {
         "when": "progress_flower1_1 >= 1004",
@@ -419,6 +438,11 @@
         {
           "condition": "progress_flower1_1>=1004",
           "event_id": "ev_flower1_4",
+          "priority": 100
+        },
+        {
+          "condition": "progress_flower1_1==1006",
+          "event_id": "ev_flower1_5_2b",
           "priority": 100
         }
       ],

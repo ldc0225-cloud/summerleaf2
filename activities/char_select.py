@@ -10,7 +10,8 @@ activities.char_select — 세이브 없이 첫 시작 시 짱짱어린이집 �
 
 [결과]
   result.save_patch = {player_char, parent_char}
-  main.py 가 본편 스폰·세이브·boot_phase=2 로 이어감
+  main.py 가 페이드아웃 → 검정 유지 본편 스폰 → boot_phase=2.
+  밝히기는 본편 첫 auto 이벤트(FADEIN)가 담당.
 """
 
 from __future__ import annotations
@@ -256,7 +257,7 @@ class CharSelectActivity(BaseFieldActivity):
         self._state = ST_FAREWELL
 
     def _finish(self) -> None:
-        self._restore_player_vis()
+        # 본편 스폰은 검정 페이드 뒤에서 이뤄지므로 여기서 플레이어를 다시 보이지 않는다.
         self._finished = True
         self._active = False
 

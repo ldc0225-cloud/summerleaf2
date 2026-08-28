@@ -90,6 +90,50 @@ def normalize_activity_arena_in_save(save_data, world_data, config=None):
     save_data["player_pos"] = [int(ep[0]), int(ep[1])]
     return True
 
+
+def resolve_continue_spawn(save_data, world_data, config=None):
+    """이어하기 본편 스폰 맵·좌표.
+
+    data.py CONTINUE_SPAWN_MODE:
+      - "save" (기본): 세이브 current_map + player_pos (종료 직전 위치)
+      - "map_start": 세이브 current_map + 해당 맵 world_data.start_pos
+    반환: {"current_map": str, "player_pos": [x, y]} 또는 None(맵 없음).
+    """
+    cfg = config if isinstance(config, dict) else CONFIG
+    if not isinstance(save_data, dict):
+        return None
+    mid = save_data.get("current_map")
+    if not mid:
+        return None
+    mid = str(mid)
+    try:
+        mode = str(cfg.get("CONTINUE_SPAWN_MODE", "save") or "save").strip().lower()
+    except Exception:
+        mode = "save"
+    wd = world_data if isinstance(world_data, dict) else {}
+    m = wd.get(mid) if isinstance(wd.get(mid), dict) else {}
+    start_pos = m.get("start_pos", [100, 100]) if isinstance(m, dict) else [100, 100]
+    try:
+        sp = [float(start_pos[0]), float(start_pos[1])]
+    except (TypeError, ValueError, IndexError):
+        sp = [100.0, 100.0]
+
+    if mode in ("map_start", "start_pos", "map_default", "default"):
+        return {"current_map": mid, "player_pos": [int(sp[0]), int(sp[1])]}
+
+    # save: 종료 좌표 우선, 없으면 맵 start_pos
+    pp = save_data.get("player_pos")
+    if isinstance(pp, (list, tuple)) and len(pp) >= 2:
+        try:
+            return {
+                "current_map": mid,
+                "player_pos": [int(pp[0]), int(pp[1])],
+            }
+        except (TypeError, ValueError):
+            pass
+    return {"current_map": mid, "player_pos": [int(sp[0]), int(sp[1])]}
+
+
 def merge_event_catalog(event_data):
     """
     events.json 실행 카탈로그(LOCAL / GLOBAL / SYNC)를 event_id -> 항목 dict로 합칩니다.
@@ -256,6 +300,242 @@ def evaluate_event_step_condition(step: dict, eval_ctx: dict) -> bool:
     if var and op_part:
         if re.match(r"^(==|!=|>=|<=|>|<)", op_part):
             return evaluate_global_condition(f"{var} {op_part}", eval_ctx)
+    return True
+
+
+def evaluate_zone_block_condition(block, eval_ctx: dict) -> bool:
+    """
+    event_zones[].block 조건이 참이면 True (벽으로 막힘).
+
+    지원 형태:
+      true / 1 / "true"           → 항상 막음
+      { "when": "flag != 1" }     → 전체 식 (condition/expr 도 동일)
+      { "var":"flag", "op":"!=", "val":1 }  → 변수·연산자·값
+    """
+    if block is True or block == 1:
+        return True
+    if isinstance(block, (int, float)) and int(block) == 1:
+        return True
+    if isinstance(block, str):
+        s = block.strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off", ""):
+            return False
+        # 문자열이면 조건식으로 해석
+        return evaluate_global_condition(block, eval_ctx)
+    if not isinstance(block, dict):
+        return False
+    # enabled:false 면 끔
+    en = block.get("enabled", block.get("on", True))
+    if isinstance(en, str):
+        if en.strip().lower() in ("0", "false", "f", "no", "n", "off"):
+            return False
+    elif en is False or en == 0:
+        return False
+
+    full = str(block.get("when") or block.get("condition") or block.get("expr") or "").strip()
+    if full:
+        return evaluate_global_condition(full, eval_ctx)
+
+    var = str(block.get("var") or block.get("key") or "").strip()
+    op = str(block.get("op") or block.get("operator") or "").strip()
+    if "val" in block:
+        val = block.get("val")
+    elif "value" in block:
+        val = block.get("value")
+    else:
+        val = None
+    if not var or not op:
+        return False
+    # op 가 "==" 만 있고 val 별도 → "!= 1" 형태로 합침
+    if re.match(r"^(==|!=|>=|<=|>|<)$", op):
+        if val is None:
+            return False
+        op_part = f"{op} {val}"
+    elif re.match(r"^(==|!=|>=|<=|>|<)", op):
+        # 이미 "!= 1" 형태
+        op_part = op if val is None else (op if re.search(r"\d|\"|'", op) else f"{op} {val}")
+    else:
+        return False
+    return evaluate_event_step_condition({"var": var, "op": op_part}, eval_ctx)
+
+
+def collect_active_zone_blocks(world_data, map_id, save_data, session_vars=None) -> list:
+    """
+    현재 맵에서 block 조건이 참인 event_zones.
+    반환: [{"rect":[x,y,w,h], "say":str, "who":str, "zone_index":int}, ...]
+    """
+    out = []
+    try:
+        m = (world_data or {}).get(str(map_id), {}) or {}
+    except Exception:
+        return out
+    zones = m.get("event_zones") or []
+    if not zones:
+        return out
+    ctx = build_eval_ctx(save_data, session_vars)
+    for zi, z in enumerate(zones):
+        if not isinstance(z, dict):
+            continue
+        block = z.get("block")
+        if block is None:
+            continue
+        try:
+            if not evaluate_zone_block_condition(block, ctx):
+                continue
+        except Exception:
+            continue
+        rect = z.get("rect")
+        if not (isinstance(rect, (list, tuple)) and len(rect) >= 4):
+            continue
+        try:
+            zx, zy, zw, zh = float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3])
+        except (TypeError, ValueError):
+            continue
+        if zw <= 0 or zh <= 0:
+            continue
+        say = ""
+        who = "player"
+        if isinstance(block, dict):
+            say = str(block.get("say") or block.get("text") or block.get("message") or "").strip()
+            who = str(block.get("who") or block.get("speaker") or "player").strip() or "player"
+        if not say:
+            say = str(z.get("block_say") or z.get("block_text") or "").strip()
+        if z.get("block_who"):
+            who = str(z.get("block_who") or "player").strip() or "player"
+        out.append(
+            {
+                "rect": [zx, zy, zw, zh],
+                "say": say,
+                "who": who,
+                "zone_index": int(zi),
+                "name": str(z.get("name") or ""),
+            }
+        )
+    return out
+
+
+def collect_active_zone_block_rects(world_data, map_id, save_data, session_vars=None) -> list:
+    """호환: rect 만 리스트로. 신규 코드는 collect_active_zone_blocks 권장."""
+    return [list(b["rect"]) for b in collect_active_zone_blocks(world_data, map_id, save_data, session_vars)]
+
+
+def point_in_zone_block_rects(x, y, rects) -> bool:
+    """월드 좌표 (x,y) 가 block rect 안이면 True. rects 는 [x,y,w,h] 또는 {rect:[...]}."""
+    return find_zone_block_at(x, y, rects) is not None
+
+
+def find_zone_block_at(x, y, blocks, *, pad: float = 0.0):
+    """
+    blocks 안 어느 항목에 (x,y) 가 들어가면 그 항목 반환.
+    pad>0 이면 rect 를 바깥으로 키워 '접촉' 판정.
+    """
+    try:
+        px, py = float(x), float(y)
+    except (TypeError, ValueError):
+        return None
+    try:
+        p = max(0.0, float(pad))
+    except (TypeError, ValueError):
+        p = 0.0
+    for b in blocks or []:
+        if isinstance(b, dict):
+            r = b.get("rect")
+            item = b
+        else:
+            r = b
+            item = {"rect": b}
+        if not (isinstance(r, (list, tuple)) and len(r) >= 4):
+            continue
+        try:
+            zx, zy, zw, zh = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+        except (TypeError, ValueError):
+            continue
+        if zw <= 0 or zh <= 0:
+            continue
+        if (zx - p) <= px <= (zx + zw + p) and (zy - p) <= py <= (zy + zh + p):
+            return item
+    return None
+
+
+def try_trigger_zone_block_say(flow, ev_mgr, player, map_id, session_vars=None) -> bool:
+    """
+    BLOCK 벽에 막혀 이동이 실패했을 때(player._pending_zone_block_bump) 안내 대사.
+    같은 존에 붙어 있는 동안 1회만, 떨어지면 다시 가능.
+    """
+    if flow is None or ev_mgr is None or player is None:
+        return False
+    if getattr(ev_mgr, "active_event", None) or bool(getattr(ev_mgr, "is_talking", False)):
+        try:
+            player._pending_zone_block_bump = None
+        except Exception:
+            pass
+        return False
+
+    bump = getattr(player, "_pending_zone_block_bump", None)
+    try:
+        player._pending_zone_block_bump = None
+    except Exception:
+        pass
+
+    try:
+        from data import CONFIG
+
+        pad = float(CONFIG.get("ZONE_BLOCK_SAY_PAD_PX", 8) or 8)
+    except Exception:
+        pad = 8.0
+
+    blocks = collect_active_zone_blocks(
+        getattr(flow, "world_data", None),
+        map_id,
+        getattr(flow, "save_data", None),
+        session_vars=session_vars,
+    )
+    # 떨어져 나간 존은 다시 말할 수 있게
+    now_near = set()
+    try:
+        px, py = float(player.pos[0]), float(player.pos[1])
+    except Exception:
+        px = py = 0.0
+    for b in blocks:
+        if find_zone_block_at(px, py, [b], pad=pad) is not None:
+            try:
+                now_near.add(int(b.get("zone_index")))
+            except Exception:
+                pass
+    said = getattr(flow, "_zone_block_say_said", None)
+    if not isinstance(said, set):
+        said = set()
+    said = {zi for zi in said if zi in now_near}
+    flow._zone_block_say_said = said
+
+    if not isinstance(bump, dict):
+        return False
+    say = str(bump.get("say") or "").strip()
+    if not say:
+        return False
+    try:
+        zi = int(bump.get("zone_index"))
+    except Exception:
+        zi = None
+    if zi is not None and zi in said:
+        return False
+
+    who = str(bump.get("who") or "player").strip() or "player"
+    try:
+        sm = getattr(player, "stop_moving", None)
+        if callable(sm):
+            sm()
+    except Exception:
+        pass
+    try:
+        ev_mgr.start_free_say({"who": who, "text": say, "show_name": True})
+    except Exception:
+        return False
+    if zi is not None:
+        said.add(zi)
+        flow._zone_block_say_said = said
     return True
 
 
@@ -1967,9 +2247,17 @@ def start_system_event(
 #       "pos": [x, y],
 #       "dir": "left"|"right",      # optional
 #       "behavior": "follow"|{...}, # optional — ambient AI (BEHAVIOR/PLACE와 동일)
+#       "follow_leader": "player",  # optional — FOLLOW 동행 리더 (세이브 보조)
+#       "follow_dist": 40,          # optional — 슬롯 거리(px)
+#       "follow_speed": 1.0,        # optional — 이동 속도 배율
 #       "travel": true,             # optional — true면 맵 전환 시 플레이어 근처로 동행
 #                                   #   (미지정 시 behavior=follow 이면 자동 travel)
-#       "sprite_tilt"/"height"/"ysort"/"layer": optional 비주얼
+#
+# save_data["event_followers"]: FOLLOW 동행 전용 목록 (복원 소스). world_data 가 아님.
+#   [ {"follower":"ally1","leader":"player","dist":40,"speed":1.0}, ... ]
+#       "sprite_tilt"/"height"/"ysort"/"layer"/"zoom": optional 비주얼
+#         zoom: 스프라이트 배율 (ENTITY_ZOOM_MIN~MAX, 기본 1, 2=두 배)
+#       "entity_fx": optional — 세이브 시점 pulse/tint 등 (ENTITY_FX persist 결과)
 #     },
 #     ...
 #   ]
@@ -2078,6 +2366,11 @@ def find_placed_entry(save_data, name: str):
     return None
 
 
+def _clear_placed_follow_meta(entry: dict) -> None:
+    for k in ("follow_leader", "follow_dist", "follow_speed"):
+        entry.pop(k, None)
+
+
 def upsert_placed_entity(
     save_data,
     *,
@@ -2087,6 +2380,9 @@ def upsert_placed_entity(
     dir=None,
     behavior=None,
     travel=None,
+    follow_leader=None,
+    follow_dist=None,
+    follow_speed=None,
     sprite_tilt=None,
     height=None,
     ysort=None,
@@ -2129,6 +2425,24 @@ def upsert_placed_entity(
         # follow 이면 기본으로 맵 동행 (명시 travel:false 가 없을 때만)
         if "travel" not in entry:
             entry["travel"] = True
+    if follow_leader is not None:
+        fl = str(follow_leader or "").strip()
+        if fl:
+            entry["follow_leader"] = fl
+        else:
+            _clear_placed_follow_meta(entry)
+    if follow_dist is not None:
+        try:
+            entry["follow_dist"] = float(follow_dist)
+        except (TypeError, ValueError):
+            pass
+    if follow_speed is not None:
+        try:
+            entry["follow_speed"] = float(follow_speed)
+        except (TypeError, ValueError):
+            pass
+    if beh is not None and _placed_behavior_mode(beh) not in ("follow",):
+        _clear_placed_follow_meta(entry)
     if sprite_tilt is not None:
         try:
             entry["sprite_tilt"] = float(sprite_tilt)
@@ -2172,14 +2486,404 @@ def update_placed_behavior(save_data, name: str, behavior, *, radius=None, inter
         entry["behavior"] = beh
         if travel is None and _placed_behavior_mode(beh) == "follow" and "travel" not in entry:
             entry["travel"] = True
+        if _placed_behavior_mode(beh) not in ("follow",):
+            _clear_placed_follow_meta(entry)
     if travel is not None:
         entry["travel"] = bool(travel)
     return True
 
 
-def snapshot_placed_from_live(save_data, map_id, objs, npcs) -> None:
+def sync_event_followers_to_placed(save_data, followers) -> None:
+    """ev_mgr._followers → placed follow_leader/dist/speed (세이브 직전, 기존 entry만)."""
+    if not isinstance(save_data, dict) or not followers:
+        return
+    fol_map = {}
+    for f in followers:
+        if not isinstance(f, dict):
+            continue
+        nm = str(f.get("follower") or "").strip()
+        if nm:
+            fol_map[nm] = f
+    for entry in ensure_placed_list(save_data):
+        if not isinstance(entry, dict):
+            continue
+        nm = str(entry.get("name") or "").strip()
+        f = fol_map.get(nm)
+        if not f:
+            continue
+        entry["follow_leader"] = str(f.get("leader") or "player")
+        try:
+            entry["follow_dist"] = float(f.get("dist", 40))
+        except (TypeError, ValueError):
+            entry["follow_dist"] = 40.0
+        try:
+            entry["follow_speed"] = float(f.get("speed", 1.0))
+        except (TypeError, ValueError):
+            entry["follow_speed"] = 1.0
+        # follow 모드·맵 동행 유지
+        if _placed_behavior_mode(entry.get("behavior")) != "follow":
+            entry["behavior"] = "follow"
+        if "travel" not in entry:
+            entry["travel"] = True
+
+
+def dump_event_followers_list(followers) -> list:
+    """세이브용 event_followers 배열 (이름·리더·거리·속도만)."""
+    out = []
+    for f in followers or []:
+        if not isinstance(f, dict):
+            continue
+        nm = str(f.get("follower") or "").strip()
+        if not nm:
+            continue
+        try:
+            dist = float(f.get("dist", 40))
+        except (TypeError, ValueError):
+            dist = 40.0
+        try:
+            speed = float(f.get("speed", 1.0))
+        except (TypeError, ValueError):
+            speed = 1.0
+        out.append(
+            {
+                "follower": nm,
+                "leader": str(f.get("leader") or "player").strip() or "player",
+                "dist": dist,
+                "speed": speed,
+            }
+        )
+    return out
+
+
+def persist_active_followers_to_save(
+    save_data,
+    followers,
+    *,
+    map_id=None,
+    objs=None,
+    npcs=None,
+) -> None:
     """
-    현재 맵에 떠 있는 placed 엔티티의 pos/dir/behavior 를 세이브에 반영.
+    활성 FOLLOW 동행을 세이브에 남긴다.
+    - save_data['event_followers']: 누가 따라다니는지 (복원 소스, 좌표 없음)
+    - save_data['placed']: travel+follow 만 — 좌표는 로드 시 플레이어 옆으로 재배치
+    world_data.json 에는 쓰지 않는다.
+    """
+    if not isinstance(save_data, dict):
+        return
+    cleaned = dump_event_followers_list(followers)
+    prev = dump_event_followers_list(save_data.get("event_followers"))
+    save_data["event_followers"] = cleaned
+    if not cleaned:
+        if prev:
+            clear_event_followers_from_save(
+                save_data, [f.get("follower") for f in prev]
+            )
+        return
+
+    mid = str(map_id or save_data.get("current_map") or "").strip()
+    # 좌표는 저장 의미 없음 — load 시 prepare_traveling_placed 가 플레이어 옆으로 옮김
+    stub = [0.0, 0.0]
+    pp = save_data.get("player_pos")
+    if isinstance(pp, (list, tuple)) and len(pp) >= 2:
+        try:
+            stub = [float(pp[0]), float(pp[1])]
+        except (TypeError, ValueError):
+            pass
+
+    live = {}
+    for ent in list(objs or []) + list(npcs or []):
+        nm = str(getattr(ent, "name", "") or "").strip()
+        if nm:
+            live[nm] = ent
+
+    for f in cleaned:
+        nm = f["follower"]
+        ent = live.get(nm)
+        upsert_placed_entity(
+            save_data,
+            name=nm,
+            map_id=mid,
+            pos=stub,
+            dir=None,
+            behavior="follow",
+            travel=True,
+            follow_leader=f.get("leader"),
+            follow_dist=f.get("dist"),
+            follow_speed=f.get("speed"),
+        )
+        # 고정 좌표 의미를 남기지 않음 (로드 때 플레이어 옆 재배치)
+        entry = find_placed_entry(save_data, nm)
+        if isinstance(entry, dict):
+            entry["pos"] = list(stub)
+            entry["travel"] = True
+            entry.pop("dir", None)
+        if ent is not None:
+            try:
+                from char_behavior import set_npc_behavior
+
+                set_npc_behavior(ent, "follow")
+                ent._placed_persist = True
+            except Exception:
+                pass
+
+
+def clear_event_followers_from_save(save_data, stop_names=None) -> None:
+    """FOLLOW_STOP: event_followers 비우고, 동행용 placed 항목은 제거(월드 고정 배치가 아님)."""
+    if not isinstance(save_data, dict):
+        return
+    if stop_names is None:
+        prev = {
+            str(f.get("follower") or "").strip()
+            for f in dump_event_followers_list(save_data.get("event_followers"))
+            if str(f.get("follower") or "").strip()
+        }
+        # event_followers 비어 있어도 follow/travel placed 잔여분 정리
+        for entry in ensure_placed_list(save_data):
+            if not isinstance(entry, dict):
+                continue
+            nm = str(entry.get("name") or "").strip()
+            if not nm:
+                continue
+            if (
+                nm in prev
+                or _placed_behavior_mode(entry.get("behavior")) == "follow"
+                or entry.get("follow_leader")
+            ):
+                prev.add(nm)
+        save_data["event_followers"] = []
+        stop_set = prev
+    else:
+        stop_set = {str(n).strip() for n in stop_names if str(n).strip()}
+        if not stop_set:
+            return
+        cur = dump_event_followers_list(save_data.get("event_followers"))
+        save_data["event_followers"] = [f for f in cur if f.get("follower") not in stop_set]
+
+    if not stop_set:
+        return
+    lst = ensure_placed_list(save_data)
+    save_data["placed"] = [
+        e
+        for e in lst
+        if not (
+            isinstance(e, dict)
+            and str(e.get("name") or "").strip() in stop_set
+            and (
+                _placed_behavior_mode(e.get("behavior")) == "follow"
+                or e.get("follow_leader")
+                or bool(e.get("travel"))
+            )
+        )
+    ]
+
+
+def build_event_followers_from_placed(save_data, map_id=None):
+    """placed → ev_mgr._followers 형식 (하위호환)."""
+    out = []
+    if not isinstance(save_data, dict):
+        return out
+    mid = str(map_id or "").strip() if map_id is not None else ""
+    for entry in ensure_placed_list(save_data):
+        if not isinstance(entry, dict):
+            continue
+        if mid and str(entry.get("map_id") or "").strip() != mid:
+            continue
+        beh = entry.get("behavior")
+        leader = str(entry.get("follow_leader") or "").strip()
+        if _placed_behavior_mode(beh) != "follow" and not leader:
+            continue
+        nm = str(entry.get("name") or "").strip()
+        if not nm:
+            continue
+        if not leader:
+            leader = "player"
+        try:
+            dist = float(entry.get("follow_dist", 40))
+        except (TypeError, ValueError):
+            dist = 40.0
+        try:
+            speed = float(entry.get("follow_speed", 1.0))
+        except (TypeError, ValueError):
+            speed = 1.0
+        out.append(
+            {
+                "follower": nm,
+                "leader": leader,
+                "dist": dist,
+                "speed": speed,
+                "slot": 0,
+                "slots": 1,
+            }
+        )
+    return out
+
+
+def build_event_followers_from_save(save_data, map_id=None):
+    """복원 우선순위: save_data.event_followers → placed follow 메타."""
+    if not isinstance(save_data, dict):
+        return []
+    raw = save_data.get("event_followers")
+    if isinstance(raw, list) and raw:
+        out = []
+        for f in dump_event_followers_list(raw):
+            out.append(
+                {
+                    "follower": f["follower"],
+                    "leader": f["leader"],
+                    "dist": f["dist"],
+                    "speed": f["speed"],
+                    "slot": 0,
+                    "slots": 1,
+                }
+            )
+        return out
+    return build_event_followers_from_placed(save_data, map_id)
+
+
+def restore_event_followers_from_placed(
+    ev_mgr, save_data, map_id=None, *, objs=None, npcs=None, player=None
+) -> None:
+    """세이브 기준 FOLLOW 동행 목록 복원 + 엔티티에 follow behavior 적용."""
+    if ev_mgr is None:
+        return
+    followers = build_event_followers_from_save(save_data, map_id)
+    if not followers:
+        try:
+            ev_mgr._followers = []
+        except Exception:
+            pass
+        return
+    try:
+        ev_mgr._followers = list(followers)
+        reindex = getattr(ev_mgr, "_reindex_follow_slots_for_leader", None)
+        if callable(reindex):
+            for lead in {str(f.get("leader") or "") for f in followers}:
+                if lead:
+                    reindex(lead)
+    except Exception as e:
+        print(f"[save] restore followers failed: {e}")
+        return
+
+    # placed 스폰만 하고 behavior 가 idle 이면 안 따라옴 → follow 로 맞춤
+    try:
+        from char_behavior import set_npc_behavior
+        from data import resolve_story_target_id
+    except Exception:
+        return
+
+    live = {}
+    if player is not None:
+        live["player"] = player
+    for ent in list(npcs or []) + list(objs or []):
+        nm = str(getattr(ent, "name", "") or "").strip()
+        if nm:
+            live[nm] = ent
+
+    for f in followers:
+        nm = str(f.get("follower") or "").strip()
+        if not nm:
+            continue
+        try:
+            nm_res = resolve_story_target_id(nm, save_data, None) or nm
+        except Exception:
+            nm_res = nm
+        ent = live.get(nm_res) or live.get(nm)
+        if ent is None:
+            continue
+        try:
+            set_npc_behavior(ent, "follow")
+            ent._placed_persist = True
+        except Exception:
+            pass
+
+
+def _serialize_entity_fx_for_save(fx) -> dict | None:
+    """entity.entity_fx → JSON 친화 dict (없거나 비어 있으면 None)."""
+    if not isinstance(fx, dict):
+        return None
+    mode = str(fx.get("mode") or "").strip().lower()
+    if not mode or mode in ("off", "none", "clear", "stop"):
+        return None
+    out = {}
+    for k, v in fx.items():
+        if v is None:
+            continue
+        if k == "color" and isinstance(v, (tuple, list)) and len(v) >= 3:
+            try:
+                out["color"] = [int(v[0]), int(v[1]), int(v[2])]
+            except (TypeError, ValueError):
+                pass
+        elif k in ("mode", "alpha", "cycle_sec", "phase_sec"):
+            out[k] = v
+    return out if out.get("mode") else None
+
+
+def _deserialize_entity_fx_from_save(fx) -> dict | None:
+    """placed entry entity_fx → 런타임 entity_fx dict."""
+    if not isinstance(fx, dict):
+        return None
+    mode = str(fx.get("mode") or "").strip().lower()
+    if not mode or mode in ("off", "none", "clear", "stop"):
+        return None
+    out = dict(fx)
+    c = out.get("color")
+    if isinstance(c, list) and len(c) >= 3:
+        try:
+            out["color"] = (int(c[0]), int(c[1]), int(c[2]))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _snapshot_placed_visual_from_entity(ent, entry: dict) -> None:
+    """세이브 직전: placed entry에 라이브 엔티티 비주얼 상태 반영."""
+    if ent is None or not isinstance(entry, dict):
+        return
+    if hasattr(ent, "sprite_tilt"):
+        try:
+            entry["sprite_tilt"] = float(getattr(ent, "sprite_tilt", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            pass
+    if hasattr(ent, "height"):
+        try:
+            h = getattr(ent, "height", None)
+            if h is not None:
+                entry["height"] = float(h)
+        except (TypeError, ValueError):
+            pass
+    ys = getattr(ent, "ysort_mode", None)
+    if ys is not None and str(ys).strip():
+        entry["ysort"] = str(ys).strip()
+    if hasattr(ent, "layer"):
+        try:
+            ly = getattr(ent, "layer", None)
+            if ly is not None:
+                entry["layer"] = int(float(ly))
+        except (TypeError, ValueError):
+            pass
+    try:
+        from engine import clamp_entity_def_zoom
+
+        dz = float(getattr(ent, "entity_def_zoom", 1.0) or 1.0)
+        ez = float(getattr(ent, "event_entity_zoom", 1.0) or 1.0)
+        combined = clamp_entity_def_zoom(dz * ez)
+        if abs(combined - 1.0) > 1e-6:
+            entry["zoom"] = combined
+        else:
+            entry.pop("zoom", None)
+    except Exception:
+        pass
+    ser_fx = _serialize_entity_fx_for_save(getattr(ent, "entity_fx", None))
+    if ser_fx:
+        entry["entity_fx"] = ser_fx
+    else:
+        entry.pop("entity_fx", None)
+
+
+def snapshot_placed_from_live(save_data, map_id, objs, npcs, *, event_followers=None) -> None:
+    """
+    현재 맵에 떠 있는 placed 엔티티의 pos/dir/behavior·비주얼 상태를 세이브에 반영.
     세이브 직전·맵 떠나기 직전에 호출.
     """
     mid = str(map_id or "").strip()
@@ -2190,12 +2894,22 @@ def snapshot_placed_from_live(save_data, map_id, objs, npcs) -> None:
         nm = str(getattr(ent, "name", "") or "").strip()
         if nm:
             live[nm] = ent
+    fol_keep = set()
+    if event_followers is not None:
+        fol_keep = {
+            str(f.get("follower") or "").strip()
+            for f in dump_event_followers_list(event_followers)
+            if str(f.get("follower") or "").strip()
+        }
     for entry in ensure_placed_list(save_data):
         if not isinstance(entry, dict):
             continue
         if str(entry.get("map_id") or "").strip() != mid:
             continue
         nm = str(entry.get("name") or "").strip()
+        # 동행은 좌표 스냅샷 안 함 — 로드 시 플레이어 옆 재배치
+        if nm in fol_keep:
+            continue
         ent = live.get(nm)
         if ent is None:
             continue
@@ -2209,6 +2923,15 @@ def snapshot_placed_from_live(save_data, map_id, objs, npcs) -> None:
         spec = getattr(ent, "behavior_spec", None)
         if isinstance(spec, dict) and spec.get("mode"):
             entry["behavior"] = _normalize_placed_behavior(spec) or entry.get("behavior")
+        _snapshot_placed_visual_from_entity(ent, entry)
+    if event_followers is not None:
+        persist_active_followers_to_save(
+            save_data,
+            event_followers,
+            map_id=mid,
+            objs=objs,
+            npcs=npcs,
+        )
 
 
 def prepare_traveling_placed(save_data, map_id, player_pos, config=None, mask=None) -> None:
@@ -2390,6 +3113,7 @@ def _spawn_one_placed_entity(entry: dict, objs: list, npcs: list, save_data=None
             height=h,
             ysort_mode=ys,
             layer=ly,
+            zoom=entry.get("zoom", None),
         )
         objs.append(ent)
     else:
@@ -2444,6 +3168,13 @@ def _spawn_one_placed_entity(entry: dict, objs: list, npcs: list, save_data=None
             ent.layer = int(float(ly))
         except (TypeError, ValueError):
             pass
+    if "zoom" in entry and hasattr(ent, "entity_def_zoom"):
+        try:
+            from engine import clamp_entity_def_zoom
+
+            ent.entity_def_zoom = clamp_entity_def_zoom(entry.get("zoom"))
+        except Exception:
+            pass
     d = str(entry.get("dir") or "").strip().lower()
     if d in ("left", "right") and hasattr(ent, "direction"):
         ent.direction = d
@@ -2472,11 +3203,34 @@ def _spawn_one_placed_entity(entry: dict, objs: list, npcs: list, save_data=None
             set_roam_home(ent, pos_xy[0], pos_xy[1])
         except Exception:
             pass
+    fx = _deserialize_entity_fx_from_save(entry.get("entity_fx"))
+    if fx:
+        try:
+            ent.entity_fx = fx
+            ent._entity_fx_event_persist = True
+        except Exception:
+            pass
     try:
         ent._placed_persist = True
     except Exception:
         pass
     return ent
+
+
+def ensure_event_followers_in_placed(save_data, map_id=None) -> None:
+    """event_followers → placed(travel/follow) 동기화. 로드 직전 호출(좌표는 prepare_traveling이 재배치)."""
+    if not isinstance(save_data, dict):
+        return
+    fols = dump_event_followers_list(save_data.get("event_followers"))
+    if not fols:
+        return
+    persist_active_followers_to_save(
+        save_data,
+        fols,
+        map_id=str(map_id or save_data.get("current_map") or "").strip() or None,
+        objs=None,
+        npcs=None,
+    )
 
 
 def apply_placed_to_map(objs, npcs, save_data, map_id, *, player_pos=None, config=None, mask=None):
@@ -2488,6 +3242,11 @@ def apply_placed_to_map(objs, npcs, save_data, map_id, *, player_pos=None, confi
     sd = save_data if isinstance(save_data, dict) else {}
     mid = str(map_id or "").strip()
     cfg = config if isinstance(config, dict) else CONFIG
+    # 세이브 event_followers 만 있고 placed 가 비어 있어도 플레이어 옆에 스폰되게
+    try:
+        ensure_event_followers_in_placed(sd, mid)
+    except Exception as e:
+        print(f"[placed] follower sync failed: {e}")
     if player_pos is not None:
         prepare_traveling_placed(sd, mid, player_pos, config=cfg, mask=mask)
     for entry in list(ensure_placed_list(sd)):
@@ -2525,6 +3284,9 @@ def merge_save_defaults(save_data: dict, config) -> dict:
         "affinity": {},
         # PLACE persist:true 로 등장한 오브젝트/NPC (remove 전까지 맵·세이브 유지)
         "placed": [],
+        # 본편 부팅 auto(ev_gl_field_boot) 래치. 0이면 FADEIN·exit 등 필수 UI 1회 실행.
+        # main() 이 매 실행 시작 시 0으로 리셋한다 (세션당 1회).
+        "field_boot_ready": 0,
     }
     for k, v in defaults.items():
         if k not in save_data:
@@ -3098,6 +3860,9 @@ class GameFlow:
         return None
 
     def save_editor_data(self, map_id, objs, npcs):
+        """에디터 전용 world_data.json 저장.
+        런타임 FOLLOW/PLACE persist 동행은 제외 — 그건 save_data.event_followers/placed.
+        """
         # 데이터 정리
         def _object_entry_from_instance(o):
             row = {
@@ -3108,6 +3873,15 @@ class GameFlow:
                 "ysort": str(getattr(o, "ysort_mode", "ground") or "ground"),
                 "layer": int(getattr(o, "layer", 0) or 0),
             }
+            try:
+                from engine import clamp_entity_def_zoom
+
+                z = float(getattr(o, "entity_def_zoom", 1.0) or 1.0)
+                z = clamp_entity_def_zoom(z)
+                if abs(z - 1.0) > 1e-4:
+                    row["zoom"] = round(z, 4)
+            except Exception:
+                pass
             try:
                 wa = float(getattr(o, "wall_angle", 0.0) or 0.0)
                 if math.isfinite(wa):
@@ -3144,10 +3918,30 @@ class GameFlow:
                     row["baseball_zone"] = dict(def_bz)
             return row
 
-        self.world_data[map_id]["objects"] = [_object_entry_from_instance(o) for o in objs]
+        def _is_runtime_party_entity(ent) -> bool:
+            """세이브 동행/PLACE persist — world_data 정적 배치가 아님."""
+            if bool(getattr(ent, "_placed_persist", False)):
+                return True
+            try:
+                from char_behavior import normalize_behavior_mode
+
+                spec = getattr(ent, "behavior_spec", None) or {}
+                if normalize_behavior_mode(spec.get("mode")) != "follow":
+                    return False
+                # 이벤트 FOLLOW 는 mode 만 두는 경우가 많음(ambient follow 는 trigger_range 등)
+                if spec.get("trigger_range") is None and spec.get("stop_dist") is None:
+                    return True
+            except Exception:
+                pass
+            return False
+
+        safe_objs = [o for o in (objs or []) if not _is_runtime_party_entity(o)]
+        safe_npcs = [n for n in (npcs or []) if not _is_runtime_party_entity(n)]
+
+        self.world_data[map_id]["objects"] = [_object_entry_from_instance(o) for o in safe_objs]
         from char_behavior import npc_entry_from_instance
 
-        self.world_data[map_id]["npcs"] = [npc_entry_from_instance(n) for n in npcs]
+        self.world_data[map_id]["npcs"] = [npc_entry_from_instance(n) for n in safe_npcs]
 
         try:
             raw_json = json.dumps(self.world_data, indent=4, ensure_ascii=False)
@@ -3249,7 +4043,16 @@ class GameFlow:
             print(f"세이브 실패: {e}")
             return False
 
-    def save_game(self, map_id, player_pos, *, ignore_event_guard=False, objs=None, npcs=None):
+    def save_game(
+        self,
+        map_id,
+        player_pos,
+        *,
+        ignore_event_guard=False,
+        objs=None,
+        npcs=None,
+        event_followers=None,
+    ):
         # 이벤트 진행 중: 이벤트 맵·연출 좌표로 덮어쓰지 않음 (시작 시 체크포인트 유지)
         if self._pre_event_save_snapshot is not None and not ignore_event_guard:
             print("[save] skipped — event in progress (pre-event checkpoint kept)")
@@ -3264,14 +4067,33 @@ class GameFlow:
         # PLACE persist 엔티티 현재 위치·behavior 스냅샷 (objs/npcs 전달 시)
         if objs is not None or npcs is not None:
             try:
-                snapshot_placed_from_live(self.save_data, map_id, objs, npcs)
+                snapshot_placed_from_live(
+                    self.save_data,
+                    map_id,
+                    objs,
+                    npcs,
+                    event_followers=event_followers,
+                )
             except Exception as e:
                 print(f"[save] placed snapshot failed: {e}")
+        elif event_followers is not None:
+            try:
+                persist_active_followers_to_save(
+                    self.save_data,
+                    event_followers,
+                    map_id=map_id,
+                    objs=objs,
+                    npcs=npcs,
+                )
+            except Exception as e:
+                print(f"[save] follower sync failed: {e}")
         self.save_data["current_map"] = map_id
         self.save_data["player_pos"] = [int(player_pos[0]), int(player_pos[1])]
         self._write_save_data_to_disk()
 
-    def load_map(self, save_data=None):
+    def load_map(self, save_data=None, *, apply_placed=True):
+        # apply_placed=False: 에디터 전용 — save_data.placed / event_followers 를
+        # 맵 정적 배치(world_data)에 섞지 않음. (섞인 채 S저장하면 world_data 오염)
         # 1. 어떤 맵을 부를지 결정 (세이브 데이터 우선, 없으면 CONFIG 기본값)
         # 주의: 미니게임 맵(exit) 치환은 save_game / GameFlow 기동 시만 — 여기선 MAP 이벤트 진입을 막지 않음.
         map_id = CONFIG["START_MAP"]
@@ -3338,6 +4160,7 @@ class GameFlow:
                 ysort_mode=o.get("ysort", "ground"),
                 layer=o.get("layer", None),
                 wall_angle=o.get("wall_angle", 0.0),
+                zoom=o.get("zoom", None),
             )
             # Optional: auto scroll (e.g. fog/cloud background layers)
             # world_data.json:
@@ -3408,20 +4231,22 @@ class GameFlow:
 
         # PLACE persist — travel/follow 동행 좌표 갱신 후 현재 맵 placed 스폰
         # (world_data 정적 배치 + progress 적용 뒤, 동일 이름이면 pos/behavior 만 덮어씀)
-        try:
-            ppos = list(player.pos) if player is not None else (sd.get("player_pos") or [0, 0])
-            objs, npcs = apply_placed_to_map(
-                objs,
-                npcs,
-                self.save_data if isinstance(self.save_data, dict) else sd,
-                map_id,
-                player_pos=ppos,
-                config=self.config,
-                mask=mask,
-            )
-            # travel 로 바뀐 map_id/pos 를 self.save_data 에 유지 (위에서 self.save_data 를 넘김)
-        except Exception as e:
-            print(f"[load_map] placed restore failed: {e}")
+        # 에디터(apply_placed=False)는 세이브 동행을 맵 배치에 합치지 않음
+        if apply_placed:
+            try:
+                ppos = list(player.pos) if player is not None else (sd.get("player_pos") or [0, 0])
+                objs, npcs = apply_placed_to_map(
+                    objs,
+                    npcs,
+                    self.save_data if isinstance(self.save_data, dict) else sd,
+                    map_id,
+                    player_pos=ppos,
+                    config=self.config,
+                    mask=mask,
+                )
+                # travel 로 바뀐 map_id/pos 를 self.save_data 에 유지 (위에서 self.save_data 를 넘김)
+            except Exception as e:
+                print(f"[load_map] placed restore failed: {e}")
 
         return map_id, bg, mask, player, objs, npcs
 
@@ -3439,11 +4264,30 @@ class GameFlow:
         return data
 
     def save_events(self, event_data):
-        """현재 작업 중인 이벤트 데이터를 가독성 있게 저장합니다."""
+        """현재 작업 중인 이벤트 데이터를 가독성 있게 저장합니다.
+        LOCAL/GLOBAL/SYNC/FRAGMENTS 각 섹션은 이벤트 ID(이름) 오름차순으로 정렬합니다.
+        """
         file_path = "events.json"
         try:
+            # 섹션별 이벤트를 ID 이름순으로 정렬 (에디터 저장 시 파일 가독성·diff 안정)
+            ordered = {}
+            for sec in ("LOCAL", "GLOBAL", "SYNC", "FRAGMENTS"):
+                sec_data = event_data.get(sec) if isinstance(event_data, dict) else None
+                if isinstance(sec_data, dict):
+                    ordered[sec] = {
+                        k: sec_data[k]
+                        for k in sorted(sec_data.keys(), key=lambda s: str(s))
+                    }
+                else:
+                    ordered[sec] = {}
+            # 알 수 없는 최상위 키가 있으면 뒤에 유지
+            if isinstance(event_data, dict):
+                for k, v in event_data.items():
+                    if k not in ordered:
+                        ordered[k] = v
+
             # 1. 기본 JSON 문자열 생성
-            raw_json = json.dumps(event_data, indent=4, ensure_ascii=False)
+            raw_json = json.dumps(ordered, indent=4, ensure_ascii=False)
             
             # 2. 정규식을 이용해 [x, y] 좌표 등을 한 줄로 합치기 (world_data 저장 로직과 동일)
             compact_json = re.sub(r'\[\s+(-?\d+\.?\d*),\s+(-?\d+\.?\d*)\s+\]', r'[\1, \2]', raw_json)
@@ -3574,6 +4418,8 @@ def capture_entity_tune_baseline(entity, patch: dict) -> dict:
             base["visible"] = bool(getattr(entity, "visible", True))
     if "alpha" in patch:
         base["alpha"] = int(getattr(entity, "alpha", 255) or 255)
+    if "hide_feet_shadow" in patch:
+        base["hide_feet_shadow"] = bool(getattr(entity, "_hide_feet_shadow", False))
     if "dir" in patch:
         base["dir"] = str(getattr(entity, "direction", "right") or "right")
     if "anim" in patch:
@@ -3609,6 +4455,12 @@ def apply_entity_tune_patch(entity, patch: dict) -> None:
             entity.visible = v
     if "alpha" in patch and hasattr(entity, "alpha"):
         entity.alpha = max(0, min(255, int(patch["alpha"])))
+    if "hide_feet_shadow" in patch:
+        v = patch["hide_feet_shadow"]
+        if isinstance(v, str):
+            entity._hide_feet_shadow = v.strip().lower() not in ("0", "false", "f", "no", "n", "off", "")
+        else:
+            entity._hide_feet_shadow = bool(v)
     if "dir" in patch and hasattr(entity, "direction"):
         entity.direction = patch["dir"]
     if "anim" in patch:
@@ -3643,6 +4495,7 @@ def restore_entity_tune_baseline(entity, baseline: dict) -> None:
 
 
 def _find_entity_by_name(name, player, objs, npcs):
+    """name 또는 instance_id(예: frog01@64_416) 로 엔티티 검색."""
     n = str(name or "").strip()
     if not n:
         return None
@@ -3652,6 +4505,9 @@ def _find_entity_by_name(name, player, objs, npcs):
     for pool in (npcs or []), (objs or []):
         for x in pool:
             try:
+                iid = str(getattr(x, "instance_id", "") or "").strip()
+                if iid and (iid == n or iid.lower() == nl):
+                    return x
                 xn = str(getattr(x, "name", "") or "")
                 if xn == n or xn.lower() == nl:
                     return x

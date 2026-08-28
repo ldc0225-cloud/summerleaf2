@@ -240,7 +240,9 @@ def _is_magenta_placeholder(surf: pygame.Surface) -> bool:
 def _load_lotus_frames(set_name: str, state: str, tile: int) -> List[pygame.Surface]:
     """
     연꽃잎 land/hit 프레임.
-    폴더: character/<set>/<state>_left/*.png
+    폴더 우선순위:
+      1) character/<set>/<state>_left/  (황소개구리 아레나)
+      2) object/<set>/<state>_left/     (필드·징검다리 export)
     파일명 규칙이 lotusleaf01_* 처럼 폴더명(lotusleaf1)과 달라도
     디렉터리 PNG 전부 로드 (에셋 export 이름 호환).
     """
@@ -249,16 +251,17 @@ def _load_lotus_frames(set_name: str, state: str, tile: int) -> List[pygame.Surf
     frames = _load_char_frames(name, st)
     if frames and not (len(frames) == 1 and _is_magenta_placeholder(frames[0])):
         return frames
-    # stem 불일치 폴백 — 폴더 안 PNG 전부
+    # stem 불일치·object/ 폴백 — 폴더 안 PNG 전부
     try:
         import os
         from engine import _load_anim_dir_cached
 
-        path = os.path.join("assets", "images", "character", name, f"{st}_left")
-        loaded = _load_anim_dir_cached(path)
-        if loaded:
-            print(f"[bullfrog] lotus frames via dir: {name}/{st}_left ({len(loaded)})")
-            return list(loaded)
+        for root in ("character", "object"):
+            path = os.path.join("assets", "images", root, name, f"{st}_left")
+            loaded = _load_anim_dir_cached(path)
+            if loaded:
+                print(f"[bullfrog] lotus frames via dir: {root}/{name}/{st}_left ({len(loaded)})")
+                return list(loaded)
     except Exception as e:
         print(f"[bullfrog] lotus dir load fail {name}/{st}: {e}")
     # 프로시저럴 플레이스홀더
@@ -1462,8 +1465,7 @@ class BullfrogActivity(BaseFieldActivity):
                         self._play_leaf_hit(t)
                     if (
                         not self._turn_hit
-                        and self._player_tile in tiles
-                        and not self._player_jumping
+                        and self._player_occupancy_tile() in tiles
                     ):
                         self._apply_player_hit(keep_attack_state=True)
                 if w["t"] >= drop_dur:
@@ -1902,7 +1904,8 @@ class BullfrogActivity(BaseFieldActivity):
         self._drop_was_hit = True
         self._announce = "맞았다!"
         self._msg = f"목숨 {self._lives}"
-        self._play_leaf_hit(self._player_tile)
+        occ = self._snap_player_to_occupancy_for_hit()
+        self._play_leaf_hit(occ)
         fall_dur = float(
             self.field.get("falldown_sec", self.field.get("hit_stun_sec", 2.0))
         )
@@ -1946,6 +1949,7 @@ class BullfrogActivity(BaseFieldActivity):
 
     def _finish_lose(self) -> None:
         self._won = False
+        self._save_patch[self._win_flag] = 2  # 0=미도전, 1=승리, 2=패배(1회 이상)
         self.state = ST_LOSE
         self._phase_t = 0.0
         self._phase_dur = float(self.field.get("result_hold_sec", 2.2))
@@ -2003,6 +2007,52 @@ class BullfrogActivity(BaseFieldActivity):
             ST_BOSS_JUMP,  # 반격 창과 겹칠 수 있음 — 일반 공격 점프 중엔 이동 허용(회피)
             ST_SPLASH,
         ) and not self._player_jumping and self._player_land_cd <= 0.0
+
+    def _jump_hit_origin_frac(self) -> float:
+        """점프 중 출발 칸 피격 유지 비율. 1.0=착지 전까지, 0.5=전반부만."""
+        try:
+            v = float(self.field.get("jump_hit_origin_frac", _cfg("jump_hit_origin_frac", 1.0)))
+        except (TypeError, ValueError):
+            v = 1.0
+        return max(0.0, min(1.0, v))
+
+    def _player_occupancy_tile(self) -> TileXY:
+        """물방울 피격 칸. 점프 중에는 출발 칸을 jump_hit_origin_frac 동안 유지 (무적 없음)."""
+        if not self._player_jumping:
+            return self._player_tile
+        frac = self._jump_hit_origin_frac()
+        if frac <= 0.0:
+            return self._player_tile
+        try:
+            jump_sec = float(self.field.get("player_jump_sec", 0.4) or 0.4)
+        except (TypeError, ValueError):
+            jump_sec = 0.4
+        if jump_sec <= 0.0:
+            return self._player_from
+        t = min(1.0, float(self._player_jump_t or 0.0) / jump_sec)
+        if t < frac:
+            return self._player_from
+        return self._player_tile
+
+    def _snap_player_to_occupancy_for_hit(self) -> TileXY:
+        """피격 시 점프를 끊고 판정 칸으로 스냅 (출발 칸에 맞으면 그 칸으로 되돌림)."""
+        occ = self._player_occupancy_tile()
+        if self._player_jumping:
+            self._player_tile = occ
+            self._player_jumping = False
+            self._player_arc = None
+            self._end_player_jump_anim()
+            p = self._player_ref
+            if p is not None:
+                foot = self._tile_center(occ)
+                try:
+                    p.pos[0], p.pos[1] = float(foot[0]), float(foot[1])
+                    p.target = [float(foot[0]), float(foot[1])]
+                    p.height = self._player_base_height
+                    p.path = []
+                except Exception:
+                    pass
+        return occ
 
     def _player_jump_duration_ms(self, sec: float | None = None) -> int:
         if sec is None:

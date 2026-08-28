@@ -119,8 +119,8 @@ def _scoreboard_style_rows(prefix: str, *, allow_fallback: bool = False) -> list
         ("  투명도 0~255", f"{prefix}alpha", "text"),
         ("  좌상단 글자 표시", f"{prefix}show_corner_label", "dropdown", BOOL_OPTS),
         ("  좌상단 글자(비우면 없음)", f"{prefix}corner_label", "text"),
-        ("  테두리색 R,G,B", f"{prefix}border_color", "text"),
-        ("  내부색 R,G,B", f"{prefix}fill_color", "text"),
+        ("  테두리색 R,G,B", f"{prefix}border_color", "color"),
+        ("  내부색 R,G,B", f"{prefix}fill_color", "color"),
     ]
     if allow_fallback:
         rows.append(("  ※ 비운 칸은 object_defs 타입 기본값 사용", f"{prefix}hint_fb", "hint"))
@@ -431,7 +431,7 @@ def map_field_defaults_modal_section_rows() -> dict:
             ("angle deg (0=수직↓)", "map_rain_angle", "text"),
             ("drop_len px", "map_rain_len", "text"),
             ("alpha", "map_rain_alpha", "text"),
-            ("color R,G,B", "map_rain_color", "text"),
+            ("color R,G,B", "map_rain_color", "color"),
         ],
         "vignette": [
             ("※ 비네팅 — SCREEN_FX kind=vignette", "_hint_map_vig", "hint"),
@@ -439,14 +439,14 @@ def map_field_defaults_modal_section_rows() -> dict:
             ("strength 0~1", "map_vignette_strength", "text"),
             ("size 0~1 (중앙 밝은 영역)", "map_vignette_size", "text"),
             ("softness 0~1", "map_vignette_softness", "text"),
-            ("color R,G,B", "map_vignette_color", "text"),
+            ("color R,G,B", "map_vignette_color", "color"),
         ],
         "tone": [
             ("※ 톤/색온도 — SCREEN_FX kind=tone", "_hint_map_tone", "hint"),
             ("tone on", "map_tone_on", "dropdown", MAP_FX_ON_OPTS),
             ("preset", "map_tone_preset", "dropdown", MAP_TONE_PRESET_OPTS),
             ("strength 0~1", "map_tone_strength", "text"),
-            ("color R,G,B (custom)", "map_tone_color", "text"),
+            ("color R,G,B (custom)", "map_tone_color", "color"),
         ],
     }
 
@@ -620,7 +620,7 @@ def _entity_fx_editor_rows(*, prefix: str, label: str = "FX") -> list:
     p = str(prefix or "")
     return [
         (f"{label} mode (off|pulse|tint)", f"{p}efx_mode", "dropdown", ENTITY_FX_MODE_OPTS),
-        (f"{label} color R,G,B", f"{p}efx_color", "text"),
+        (f"{label} color R,G,B", f"{p}efx_color", "color"),
         (f"{label} alpha 0~255", f"{p}efx_alpha", "text"),
         (f"{label} cycle_sec (pulse)", f"{p}efx_cycle_sec", "text"),
         (f"{label} zoom (0.5~2, 1=기본 · 비우면 유지)", f"{p}efx_zoom", "text"),
@@ -1281,6 +1281,7 @@ def obj_inst_modal_section_rows(
             "_hint_obj_inst_intro",
             "hint",
         ),
+        ("zoom (0.5~2, 1=기본 · 비우면 1)", "inst_zoom", "text"),
     ]
     basic_setup.extend(_spawn_editor_rows(spawn_prefix="inst_spawn_"))
     basic_setup.extend(_object_text_label_rows("inst_label_", allow_fallback=True))
@@ -1607,6 +1608,7 @@ class _ConfigModal:
         self.dd_ui = None
         self._body_drag = False
         self._dd_drag = False
+        self.color_picker = None
 
     def _reset_section(self):
         sections = self.get_sections()
@@ -1706,6 +1708,7 @@ class _ConfigModal:
         self.show = False
         self.dd_open = False
         self.active_field = None
+        self.color_picker = None
 
     def _row_opts(self, row) -> list:
         if len(row) >= 4 and row[2] == "dropdown":
@@ -1720,13 +1723,17 @@ class _ConfigModal:
             return False
         from editor import (
             EDITOR_MODAL_ROW_H,
+            EDITOR_MODAL_LABEL_W,
+            _editor_any_wheel_delta,
+            _editor_color_picker_handle_event,
+            _editor_color_picker_open,
+            _editor_is_wheel_event,
             _editor_modal_body_scroll_layout,
             _editor_modal_sb_hit,
             _editor_pointer_xy,
             _editor_rects_contain_point,
             _editor_scroll_px_from_sb_my,
             _editor_std_modal_rect,
-            _editor_wheel_delta,
             _step_overlay_scrollbar_layout,
         )
 
@@ -1740,22 +1747,29 @@ class _ConfigModal:
         )
         save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
         canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
-        field_x = body_rect.x + 148
-        field_w, list_w = 220, 52
+        field_x = body_rect.x + EDITOR_MODAL_LABEL_W
+        field_w, list_w, color_w = 220, 52, 168
         dd_item_h = 22
         modal_body_drag = ctx.get("modal_body_drag")
         modal_dd_drag = ctx.get("modal_dropdown_drag")
 
-        if event.type == pygame.MOUSEWHEEL:
+        if self.color_picker is not None:
+            _cp = _editor_color_picker_handle_event(event, self.color_picker)
+            if _cp in ("done", "cancel"):
+                self.color_picker = None
+            return True
+
+        if _editor_is_wheel_event(event):
             px, py = _editor_pointer_xy(event, mx, my)
-            delta = _editor_wheel_delta(event)
+            delta = _editor_any_wheel_delta(event)
             if self.dd_open and self.dd_rect:
                 total_h = len(self.dd_options) * dd_item_h
                 vis = max(1, self.dd_rect.height)
                 max_dd = max(0, total_h - vis)
                 if max_dd > 0 and _editor_rects_contain_point(px, py, self.dd_rect, body_rect, panel_rect):
                     self.dd_scroll = max(0, min(max_dd, self.dd_scroll + delta))
-            elif _editor_rects_contain_point(px, py, body_rect, sb_rect, panel_rect) and max_scroll > 0:
+                    return True
+            if _editor_rects_contain_point(px, py, body_rect, sb_rect, panel_rect) and max_scroll > 0:
                 self.scroll = max(0, min(max_scroll, self.scroll + delta))
             return True
 
@@ -1864,6 +1878,20 @@ class _ConfigModal:
                     if val_rect.collidepoint(event.pos):
                         self.active_field = rk
                         return True
+                elif kind == "color":
+                    val_rect = pygame.Rect(field_x, ry + 3, color_w, EDITOR_MODAL_ROW_H - 6)
+                    pal_btn = pygame.Rect(val_rect.right + 4, ry + 3, list_w, EDITOR_MODAL_ROW_H - 6)
+                    sw = pygame.Rect(val_rect.x + 4, val_rect.y + 5, 20, 20)
+                    if pal_btn.collidepoint(event.pos) or sw.collidepoint(event.pos):
+                        self.dd_open = False
+                        self.active_field = None
+                        self.color_picker = _editor_color_picker_open(
+                            self.fields, rk, val_rect, sw, sh
+                        )
+                        return True
+                    if val_rect.collidepoint(event.pos):
+                        self.active_field = rk
+                        return True
                 elif kind == "events":
                     lb = pygame.Rect(field_x + field_w + 4, ry + 3, list_w, EDITOR_MODAL_ROW_H - 6)
                     val_rect = pygame.Rect(field_x, ry + 3, field_w, EDITOR_MODAL_ROW_H - 6)
@@ -1906,7 +1934,9 @@ class _ConfigModal:
 
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
-                if self.dd_open:
+                if self.color_picker is not None:
+                    self.color_picker = None
+                elif self.dd_open:
                     self.dd_open = False
                 else:
                     self.close()
@@ -1930,6 +1960,7 @@ class _ConfigModal:
             return
         from editor import (
             _draw_dropdown_with_scrollbar,
+            _editor_draw_color_picker,
             _editor_paint_modal_overlay,
             _editor_std_modal_rect,
         )
@@ -1976,6 +2007,8 @@ class _ConfigModal:
                 22,
                 colors={},
             )
+        if self.color_picker is not None:
+            _editor_draw_color_picker(screen, font, self.color_picker)
 
 
 class CharDefModal(_ConfigModal):
@@ -2252,6 +2285,16 @@ class ObjInstModal(_ConfigModal):
         inst = getattr(item, "interact_instance", None) or {}
         self.fields = _fields_from_interact_dict(inst if isinstance(inst, dict) else {})
         we = getattr(item, "_world_entry", None) or {}
+        try:
+            z0 = float(getattr(item, "entity_def_zoom", 1.0) or 1.0)
+        except Exception:
+            z0 = 1.0
+        if we.get("zoom") is not None:
+            try:
+                z0 = float(we.get("zoom"))
+            except Exception:
+                pass
+        self.fields["inst_zoom"] = "" if abs(z0 - 1.0) < 1e-4 else str(round(z0, 4))
         _state_patch_to_fields(we.get("spawn_state") or {}, self.fields, "inst_spawn_")
         _progress_apply_to_fields(we.get("progress_apply"), self.fields, slot_prefix="inst_prog")
         _object_text_label_to_fields(we.get("text_label"), self.fields, "inst_label_")
@@ -2278,6 +2321,29 @@ class ObjInstModal(_ConfigModal):
         we = dict(getattr(self.target_item, "_world_entry", None) or {})
         we["name"] = self.target_item.name
         we["pos"] = [int(self.target_item.pos[0]), int(self.target_item.pos[1])]
+        zoom_s = str(self.fields.get("inst_zoom") or "").strip()
+        if zoom_s:
+            try:
+                from engine import clamp_entity_def_zoom
+
+                zv = clamp_entity_def_zoom(float(zoom_s))
+                self.target_item.entity_def_zoom = zv
+                if abs(zv - 1.0) > 1e-4:
+                    we["zoom"] = round(zv, 4)
+                else:
+                    we.pop("zoom", None)
+            except Exception:
+                we.pop("zoom", None)
+                try:
+                    self.target_item.entity_def_zoom = 1.0
+                except Exception:
+                    pass
+        else:
+            we.pop("zoom", None)
+            try:
+                self.target_item.entity_def_zoom = 1.0
+            except Exception:
+                pass
         ss = _state_patch_from_fields(self.fields, "inst_spawn_")
         if ss:
             we["spawn_state"] = ss

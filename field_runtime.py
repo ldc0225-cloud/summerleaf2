@@ -4,6 +4,7 @@ main.py 비대화를 줄이기 위해 분리.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
@@ -488,12 +489,13 @@ def apply_map_screen_fx_defaults(ev_mgr, screen_fx_cfg) -> None:
             pass
 
 
-def apply_map_field_defaults(map_id, ui, ev_mgr=None, world_data=None):
-    """맵 진입 시 틸트·쉬어·화면 FX 를 world_data[map].field 에 맞게 설정.
+def apply_map_field_defaults(map_id, ui, ev_mgr=None, world_data=None, wave_ambient=None):
+    """맵 진입 시 틸트·쉬어·화면 FX·물결 타일 을 world_data[map].field 에 맞게 설정.
 
     world_data: flow.world_data.
     - tilt_on / shear_on: 생략 시 CONFIG 전역 기본값.
     - screen_fx: cloud|rain|vignette|tone — 맵 ambient (이벤트 SCREEN_FX 와 동일 빌더).
+    - wave_tiles: 공유 프레임 물결 타일 ambient (wave_ambient 인스턴스에 전달).
     스키마: data.resolve_map_field_defaults / data.py 주석.
     """
     from data import resolve_map_field_defaults
@@ -536,6 +538,15 @@ def apply_map_field_defaults(map_id, ui, ev_mgr=None, world_data=None):
 
     # 화면 FX ambient (구름·비·비네팅·톤) — 맵마다 리셋 후 적용
     apply_map_screen_fx_defaults(ev_mgr, cfg.get("screen_fx"))
+    # 물결 타일 ambient — 맵마다 재구성 (없으면 OFF)
+    if wave_ambient is not None:
+        try:
+            wave_ambient.configure(cfg.get("wave_tiles"))
+        except Exception:
+            try:
+                wave_ambient.configure(None)
+            except Exception:
+                pass
     return float(ui.tilt_target)
 
 
@@ -769,6 +780,87 @@ def parse_camera_step(step):
     }
 
 
+# RESULT 스텝 메타키 — 세이브에 쓰지 않음 (헤더 result 와 동일 페이로드 키만 반영)
+_RESULT_STEP_META_KEYS = frozenset(
+    {
+        "type",
+        "target",
+        "who",
+        "text",
+        "name",
+        "action",
+        "wait",
+        "instant",
+        "key",
+        "var",
+        "value",
+        "opt",
+        "options",
+        "extra",
+        "patch",
+    }
+)
+
+
+def parse_result_step(step):
+    """RESULT 스텝 → events.json 헤더 result 와 같은 patch dict.
+
+    사용 예:
+      { "type":"RESULT", "mainprogress":"ev_xxx" }
+      { "type":"RESULT", "key":"progress_flower1_1", "val":1004 }
+      { "type":"RESULT", "add_laugh_point":5, "progress_flower1_1":1004 }
+      { "type":"RESULT", "opt":"{\\"progress_x\\": 1002}" }  # JSON 추가키
+
+    헤더 result 는 이벤트 종료 시 그대로 적용. 이 스텝은 중간에 같은 갱신을 수행.
+    """
+    out = {}
+    if not isinstance(step, dict):
+        return out
+
+    # key/val (또는 var/value) 단축 — 진행 플래그 하나 갱신할 때
+    k = str(step.get("key") or step.get("var") or "").strip()
+    if k:
+        if "val" in step and step.get("val") is not None and str(step.get("val")).strip() != "":
+            out[k] = step.get("val")
+        elif "value" in step and step.get("value") is not None and str(step.get("value")).strip() != "":
+            out[k] = step.get("value")
+
+    # opt/extra: JSON 객체 문자열 또는 dict
+    for opt_key in ("opt", "options", "extra", "patch"):
+        raw = step.get(opt_key)
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, dict):
+            for rk, rv in raw.items():
+                sk = str(rk).strip()
+                if sk:
+                    out[sk] = rv
+            continue
+        try:
+            parsed = json.loads(str(raw))
+            if isinstance(parsed, dict):
+                for rk, rv in parsed.items():
+                    sk = str(rk).strip()
+                    if sk:
+                        out[sk] = rv
+        except Exception:
+            pass
+
+    # 스텝에 직접 적은 키 (mainprogress, add_laugh_point, progress_* …)
+    for rk, rv in step.items():
+        if rk in _RESULT_STEP_META_KEYS:
+            continue
+        # key/val 단축을 썼을 때 단독 val 은 세이브 키로 취급하지 않음
+        if rk == "val" and k:
+            continue
+        if rv is None:
+            continue
+        if isinstance(rv, str) and str(rv).strip() == "":
+            continue
+        out[str(rk)] = rv
+    return out
+
+
 def _canonical_tilt_json(parsed):
     return {
         "type": "TILT",
@@ -864,6 +956,26 @@ def fill_editor_fields_from_step(step_fields, step, step_type):
         step_fields["cam_smooth"] = "true" if p["smooth"] else "false"
         step_fields["cam_duration_sec"] = str(round(p["duration_sec"], 4))
         step_fields["cam_lerp"] = "" if p.get("lerp") is None else str(p["lerp"])
+    elif t == "FOLLOW_START":
+        step_fields["follower"] = str(step.get("follower") or step.get("target") or "")
+        step_fields["leader"] = str(step.get("leader") or step.get("follow") or "")
+        d = step.get("dist")
+        step_fields["dist"] = "" if d is None else str(d)
+        sp = step.get("speed")
+        step_fields["speed"] = "" if sp is None else str(sp)
+        step_fields["persist"] = "true" if parse_step_persist(step, default=False) else ""
+    elif t == "FOLLOW_STOP":
+        step_fields["follower"] = str(step.get("follower") or step.get("target") or "")
+        step_fields["persist"] = "true" if parse_step_persist(step, default=False) else ""
+
+
+def _editor_optional_float(raw, default=None):
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 def build_step_from_editor_fields(step_fields, step_type):
@@ -905,6 +1017,31 @@ def build_step_from_editor_fields(step_fields, step_type):
         if parse_step_bool(step_fields.get("zoom_persist"), False):
             stub["persist"] = True
         return _canonical_zoom_json(parse_zoom_step(stub))
+    if t == "FOLLOW_START":
+        out = {"type": "FOLLOW_START"}
+        fol = (step_fields.get("follower") or "").strip()
+        if fol:
+            out["follower"] = fol
+        lea = (step_fields.get("leader") or "").strip()
+        if lea:
+            out["leader"] = lea
+        d = _editor_optional_float(step_fields.get("dist"))
+        if d is not None:
+            out["dist"] = d
+        sp = _editor_optional_float(step_fields.get("speed"))
+        if sp is not None:
+            out["speed"] = sp
+        if parse_step_bool(step_fields.get("persist"), False):
+            out["persist"] = True
+        return out
+    if t == "FOLLOW_STOP":
+        out = {"type": "FOLLOW_STOP"}
+        fol = (step_fields.get("follower") or "").strip()
+        if fol:
+            out["follower"] = fol
+        if parse_step_bool(step_fields.get("persist"), False):
+            out["persist"] = True
+        return out
     return None
 
 
@@ -1306,8 +1443,10 @@ def game_exit_confirm_open(ev_mgr) -> bool:
 
 
 def install_game_exit_button(ev_mgr) -> None:
-    """오른쪽 위 작은 exit 버튼 — 필드 플레이 내내 표시 (임시 플레이스홀더, 추후 이미지 교체)."""
+    """오른쪽 위 작은 exit 버튼 설치. ev_mgr.game_exit_button_visible 이 켜진 경우에만 표시."""
     if not _game_exit_overlay_enabled():
+        return
+    if not bool(getattr(ev_mgr, "game_exit_button_visible", False)):
         return
     _apply_overlay_ui_step_dict(
         ev_mgr,
@@ -1328,6 +1467,34 @@ def install_game_exit_button(ev_mgr) -> None:
             click_action="game_exit_open",
         ),
     )
+
+
+def hide_game_exit_button(ev_mgr) -> None:
+    """오른쪽 위 exit 버튼과 확인창을 함께 제거."""
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if callable(rm):
+        try:
+            rm(GAME_EXIT_BTN_ID)
+        except Exception:
+            pass
+    hide_game_exit_confirm(ev_mgr)
+
+
+def set_game_exit_button_visible(ev_mgr, visible: bool, *, persist: bool | None = None) -> None:
+    """이벤트 스텝에서 exit 버튼 표시 상태를 제어한다."""
+    try:
+        ev_mgr.game_exit_button_visible = bool(visible)
+    except Exception:
+        pass
+    if persist is not None:
+        try:
+            ev_mgr._game_exit_button_persist = bool(persist)
+        except Exception:
+            pass
+    if bool(visible):
+        install_game_exit_button(ev_mgr)
+    else:
+        hide_game_exit_button(ev_mgr)
 
 
 def show_game_exit_confirm(ev_mgr) -> None:
@@ -1393,6 +1560,152 @@ def hide_game_exit_confirm(ev_mgr) -> None:
             rm(oid)
         except Exception:
             pass
+
+
+# =============================================================================
+# SELECTBOX: 이벤트 스텝 예/아니오 선택창
+# - show_selectbox : 창 크기·이름·질문·예/아니오 글자 등 SELECTBOX 스텝 파라미터로 표시
+# - hide_selectbox : 오버레이 제거
+# - selectbox_open : 현재 선택창이 열려 있는지 확인
+# 예/아니오 클릭 → handle_overlay_ui_click_action → ev_mgr.apply_selectbox_choice("yes"/"no")
+# =============================================================================
+
+SELECTBOX_IDS = (
+    "selectbox_bg",     # 배경 패널 (배경색 박스)
+    "selectbox_name",   # 창 이름(제목)
+    "selectbox_msg",    # 질문 텍스트
+    "selectbox_yes",    # 예 버튼
+    "selectbox_no",     # 아니오 버튼
+)
+
+
+def selectbox_open(ev_mgr) -> bool:
+    """SELECTBOX 창이 현재 열려 있는지.
+
+    show_selectbox 는 name/msg/yes/no 를 띄운다(selectbox_bg 는 안 만들 수 있음).
+    예전엔 SELECTBOX_IDS[0]==selectbox_bg 만 검사해서 항상 False → 클릭이 선택으로 안 이어짐.
+    """
+    try:
+        if bool(getattr(ev_mgr, "_selectbox_is_selecting", False)):
+            return True
+        known = set(SELECTBOX_IDS) | {
+            "selectbox_yes",
+            "selectbox_no",
+            "selectbox_msg",
+            "selectbox_name",
+        }
+        for ov in list(getattr(ev_mgr, "_ui_overlays", None) or []):
+            if ov.get("id") in known and ov.get("phase") != "done":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def hide_selectbox(ev_mgr) -> None:
+    """SELECTBOX 오버레이 전체 제거."""
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if not callable(rm):
+        return
+    for oid in SELECTBOX_IDS:
+        try:
+            rm(oid)
+        except Exception:
+            pass
+
+
+def show_selectbox(ev_mgr, step: dict) -> None:
+    """SELECTBOX 스텝 파라미터로 예/아니오 창 표시.
+
+    스텝 파라미터:
+      name        : 창 상단 제목(선택, 비우면 표시 안 함)
+      text / question : 질문 내용
+      yes_text    : 예 버튼 글자 (기본 "예")
+      no_text     : 아니오 버튼 글자 (기본 "아니오")
+      text_size   : 질문 폰트 크기 (기본 12)
+      name_size   : 이름 폰트 크기 (기본 12)
+      btn_size    : 버튼 글자 크기 (기본 12)
+      yes_color   : 예 버튼 배경색 "R,G,B" (기본 "52,110,72")
+      no_color    : 아니오 버튼 배경색 "R,G,B" (기본 "90,58,58")
+      margin_y    : 전체 수직 오프셋 (기본 0 → 화면 중앙)
+    """
+    # 기존 창이 있으면 먼저 제거
+    hide_selectbox(ev_mgr)
+
+    try:
+        text_size   = int(step.get("text_size") or CONFIG.get("SELECTBOX_TEXT_SIZE", 12) or 12)
+        name_size   = int(step.get("name_size") or CONFIG.get("SELECTBOX_NAME_SIZE", 12) or 12)
+        btn_size    = int(step.get("btn_size")  or CONFIG.get("SELECTBOX_BTN_SIZE",  12) or 12)
+        appear_sec  = float(step.get("appear") or 0.12)
+        disapp_sec  = float(step.get("disappear") or 0.15)
+        margin_y    = float(step.get("margin_y") or 0)
+    except Exception:
+        text_size, name_size, btn_size = 12, 12, 12
+        appear_sec, disapp_sec, margin_y = 0.12, 0.15, 0.0
+
+    question = str(step.get("text") or step.get("question") or "")
+    name_text = str(step.get("name") or "").strip()
+    yes_text  = str(step.get("yes_text")  or CONFIG.get("SELECTBOX_YES_TEXT",  "예"))
+    no_text   = str(step.get("no_text")   or CONFIG.get("SELECTBOX_NO_TEXT",   "아니오"))
+    yes_color = str(step.get("yes_color") or CONFIG.get("SELECTBOX_YES_COLOR", "52,110,72"))
+    no_color  = str(step.get("no_color")  or CONFIG.get("SELECTBOX_NO_COLOR",  "90,58,58"))
+
+    base_appear = dict(
+        type="OVERLAY_UI", action="show",
+        persist=True, hold_forever=True, mode="fade",
+        appear=appear_sec, disappear=disapp_sec,
+    )
+
+    # ── 배경 패널 (반투명 검정, 화면 전체 가리지 않는 중앙 박스 역할)
+    # 버튼들과 텍스트의 뒤에 깔리는 시각적 그룹핑 역할
+    if name_text:
+        # 이름이 있으면 이름 텍스트 먼저 표시 (질문 바로 위)
+        name_step = dict(
+            base_appear,
+            content="text", text=name_text,
+            font="default", size=name_size,
+            color="230,230,230",
+            overlay_id=SELECTBOX_IDS[1],
+            anchor="center", margin_x=0, margin_y=margin_y - 30,
+        )
+        _apply_overlay_ui_step_dict(ev_mgr, name_step)
+
+    # ── 질문 텍스트
+    msg_step = dict(
+        base_appear,
+        content="text", text=question,
+        font="default", size=text_size,
+        color="245,245,250",
+        overlay_id=SELECTBOX_IDS[2],
+        anchor="center", margin_x=0, margin_y=margin_y - 10,
+    )
+    _apply_overlay_ui_step_dict(ev_mgr, msg_step)
+
+    # ── 예 버튼 (왼쪽)
+    yes_step = dict(
+        base_appear,
+        content="button", text=yes_text,
+        font="default", size=btn_size,
+        color="255,255,255", bg_color=yes_color,
+        pad_x=14, pad_y=5,
+        overlay_id=SELECTBOX_IDS[3],
+        anchor="center", margin_x=-40, margin_y=margin_y + 20,
+        clickable=True, click_action="selectbox_yes",
+    )
+    _apply_overlay_ui_step_dict(ev_mgr, yes_step)
+
+    # ── 아니오 버튼 (오른쪽)
+    no_step = dict(
+        base_appear,
+        content="button", text=no_text,
+        font="default", size=btn_size,
+        color="255,255,255", bg_color=no_color,
+        pad_x=14, pad_y=5,
+        overlay_id=SELECTBOX_IDS[4],
+        anchor="center", margin_x=40, margin_y=margin_y + 20,
+        clickable=True, click_action="selectbox_no",
+    )
+    _apply_overlay_ui_step_dict(ev_mgr, no_step)
 
 
 # =============================================================================
@@ -1786,6 +2099,18 @@ def handle_overlay_ui_click_action(
     """
     act = (ov_act or "").strip()
 
+    # --- SELECTBOX 선택창: 예/아니오 버튼 · 창 열린 동안 바깥 클릭 ---
+    # act 가 selectbox_yes/no 이면 창 감지 실패해도 적용 (open 검사 버그 대비)
+    if act in ("selectbox_yes", "selectbox_no") or selectbox_open(ev_mgr):
+        choice_fn = getattr(ev_mgr, "apply_selectbox_choice", None)
+        if callable(choice_fn):
+            if act == "selectbox_yes":
+                choice_fn("yes")
+            else:
+                # 아니오 버튼 또는 선택창 바깥 클릭 모두 "no" 처리
+                choice_fn("no")
+        return "consumed"
+
     # --- 종료 확인창 열림: 응/아니/바깥 클릭 ---
     if game_exit_confirm_open(ev_mgr):
         if act == "game_exit_yes":
@@ -1846,6 +2171,26 @@ def handle_overlay_ui_click_action(
             pass
         try:
             ev_mgr.remove_ui_overlay("racing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+        return "consumed"
+
+    if act == "stop_lotus_cross":
+        try:
+            if field_activities is not None:
+                field_activities.cancel()
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("lotus_cross_exit")
         except Exception:
             pass
         try:
@@ -2148,6 +2493,33 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
             }
         except Exception:
             pass
+    elif n == "start_lotus_cross":
+        from activities import request_field_activity
+
+        params = {}
+        if isinstance(step, dict):
+            if step.get("map") or step.get("map_id"):
+                params["map"] = step.get("map") or step.get("map_id")
+            if step.get("from_side"):
+                params["from_side"] = step.get("from_side")
+        request_field_activity(ev_mgr, "lotus_cross", **params)
+    elif n == "stop_lotus_cross":
+        try:
+            ev_mgr.field_activity_stop_request = True
+        except Exception:
+            pass
+        try:
+            ev_mgr.remove_ui_overlay("lotus_cross_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
     elif n == "start_bullfrog":
         from activities import request_field_activity
 
@@ -2234,7 +2606,7 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
         act_id = n[len("start_activity_") :].strip()
         params = {}
         if isinstance(step, dict):
-            for k in ("pond", "pond_id", "win_flag", "map", "map_id", "mode", "return_map", "return_pos"):
+            for k in ("pond", "pond_id", "win_flag", "map", "map_id", "mode", "return_map", "return_pos", "from_side"):
                 if k in step and step.get(k) is not None:
                     params[k] = step.get(k)
         if act_id in ("baseball", "racing", "bullfrog"):
@@ -2722,3 +3094,500 @@ class CloudShadowSystem:
             surf = self._cache_get_render(c["img_i"], c["scale"], zoom, f_q, alpha, soften=soft)
             screen.blit(surf, (int(round(sx)), int(round(sy))))
         self._clouds = keep
+
+
+# ---------------------------------------------------------------------------
+# 맵 ambient 물결 타일
+# - 프레임 Surface 는 1세트만 로드·공유 (_load_anim_dir_cached)
+# - 타일마다 엔티티/상태를 두지 않음 (전역 t + 격자 인덱스만)
+# - 카메라 뷰에 겹치는 칸만 blit
+# - world_data[map].field.wave_tiles 로 ON (apply_map_field_defaults → configure)
+# - polygons: 꼭짓점만 저장 → configure 시 타일 마스크로 1회 bake (마스크 파일 없음)
+# ---------------------------------------------------------------------------
+
+
+class WaveTileAmbient:
+    """필드 물결 ambient — 공유 애니 프레임을 격자 반복 blit."""
+
+    __slots__ = (
+        "enabled",
+        "_frames",
+        "_fx_dir",
+        "_t",
+        "_fps",
+        "_scale",
+        "_alpha",
+        "_phase_stagger",
+        "_fill_map",
+        "_rects",
+        "_polygons",
+        "_poly_mask",
+        "_step_x",
+        "_step_y",
+        "_tile_w0",
+        "_tile_h0",
+        "_render_cache",
+    )
+
+    def __init__(self):
+        self.enabled = False
+        self._frames = []
+        self._fx_dir = ""
+        self._t = 0.0
+        self._fps = 8.0
+        self._scale = 1.0
+        self._alpha = 220
+        self._phase_stagger = True
+        self._fill_map = False
+        self._rects = []
+        self._polygons = []  # list[list[(x,y), ...]]
+        self._poly_mask = set()  # {(col, row)} 월드 격자, configure 시 bake
+        self._step_x = 0.0
+        self._step_y = 0.0
+        self._tile_w0 = 0
+        self._tile_h0 = 0
+        self._render_cache = OrderedDict()
+
+    @staticmethod
+    def _parse_on(block) -> bool:
+        if not isinstance(block, dict):
+            return False
+        if "on" in block:
+            v = block.get("on")
+            if isinstance(v, str):
+                return v.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+            return bool(v)
+        # on 생략 + 영역 키가 있으면 ON
+        if block.get("fill_map") or block.get("rects") or block.get("polygons") or block.get("polygon"):
+            return True
+        return False
+
+    @staticmethod
+    def _parse_rects(raw) -> list:
+        out = []
+        if not isinstance(raw, (list, tuple)):
+            return out
+        for it in raw:
+            if not isinstance(it, (list, tuple)) or len(it) < 4:
+                continue
+            try:
+                x, y, w, h = float(it[0]), float(it[1]), float(it[2]), float(it[3])
+            except (TypeError, ValueError):
+                continue
+            if w <= 0 or h <= 0:
+                continue
+            out.append((x, y, w, h))
+        return out
+
+    @staticmethod
+    def _is_xy_point(p) -> bool:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            return False
+        if isinstance(p[0], (list, tuple)):
+            return False
+        try:
+            float(p[0])
+            float(p[1])
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _normalize_polygon(cls, raw) -> list:
+        """[[x,y], ...] → [(x,y), ...] (꼭짓점 3개 이상)."""
+        if not isinstance(raw, (list, tuple)):
+            return []
+        pts = []
+        for p in raw:
+            if not cls._is_xy_point(p):
+                continue
+            try:
+                pts.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError):
+                continue
+        if len(pts) < 3:
+            return []
+        # 닫힌 링의 중복 끝점 제거
+        if pts[0][0] == pts[-1][0] and pts[0][1] == pts[-1][1]:
+            pts = pts[:-1]
+        return pts if len(pts) >= 3 else []
+
+    @classmethod
+    def _parse_polygons(cls, raw) -> list:
+        """polygons / polygon 값 파싱.
+        - 한 개: [[x,y],[x,y],...]
+        - 여러 개: [ [[x,y],...], [[x,y],...] ]
+        """
+        out = []
+        if not isinstance(raw, (list, tuple)) or not raw:
+            return out
+        if cls._is_xy_point(raw[0]):
+            poly = cls._normalize_polygon(raw)
+            if poly:
+                out.append(poly)
+            return out
+        for item in raw:
+            poly = cls._normalize_polygon(item)
+            if poly:
+                out.append(poly)
+        return out
+
+    @staticmethod
+    def _point_in_polygon(x: float, y: float, poly) -> bool:
+        """홀수-짝수 규칙 (경계 근처는 포함에 가깝게)."""
+        n = len(poly)
+        if n < 3:
+            return False
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = poly[i]
+            xj, yj = poly[j]
+            if (yi > y) != (yj > y):
+                denom = yj - yi
+                if abs(denom) > 1e-12 and x < (xj - xi) * (y - yi) / denom + xi:
+                    inside = not inside
+            j = i
+        return inside
+
+    def configure(self, cfg) -> None:
+        """맵 field.wave_tiles 적용. None/빈 dict → OFF.
+        polygons 는 이 시점에 타일 마스크로 bake (디스크 마스크 파일 없음).
+        """
+        self._t = 0.0
+        self._render_cache.clear()
+        self._polygons = []
+        self._poly_mask = set()
+        if not isinstance(cfg, dict) or not cfg:
+            self.enabled = False
+            self._frames = []
+            self._fx_dir = ""
+            self._rects = []
+            self._fill_map = False
+            return
+        if not self._parse_on(cfg):
+            self.enabled = False
+            self._frames = []
+            return
+
+        fx_dir = str(cfg.get("fx_dir") or cfg.get("dir") or "").strip()
+        fx_name = str(cfg.get("fx") or cfg.get("wave_fx") or "").strip()
+        if not fx_dir and fx_name:
+            fx_dir = f"assets/images/fx/{fx_name}"
+        if not fx_dir:
+            fx_dir = str(CONFIG.get("FIELD_WAVE_TILES_FX_DIR") or "assets/images/fx/wave01").strip()
+
+        try:
+            fps = float(cfg.get("fps", CONFIG.get("FIELD_WAVE_TILES_FPS", 8.0)))
+        except (TypeError, ValueError):
+            fps = 8.0
+        self._fps = max(0.5, min(60.0, fps))
+
+        try:
+            sc = float(cfg.get("scale", CONFIG.get("FIELD_WAVE_TILES_SCALE", 1.0)))
+        except (TypeError, ValueError):
+            sc = 1.0
+        self._scale = max(0.1, min(4.0, sc))
+
+        try:
+            a = int(cfg.get("alpha", CONFIG.get("FIELD_WAVE_TILES_ALPHA", 220)))
+        except (TypeError, ValueError):
+            a = 220
+        self._alpha = max(0, min(255, a))
+
+        if "phase_stagger" in cfg:
+            v = cfg.get("phase_stagger")
+            if isinstance(v, str):
+                self._phase_stagger = v.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+            else:
+                self._phase_stagger = bool(v)
+        else:
+            self._phase_stagger = bool(CONFIG.get("FIELD_WAVE_TILES_PHASE_STAGGER", True))
+
+        fill = cfg.get("fill_map")
+        if isinstance(fill, str):
+            self._fill_map = fill.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+        else:
+            self._fill_map = bool(fill) if fill is not None else False
+        self._rects = self._parse_rects(cfg.get("rects"))
+        polys = self._parse_polygons(cfg.get("polygons"))
+        if not polys:
+            polys = self._parse_polygons(cfg.get("polygon"))
+        self._polygons = polys
+
+        # 명시 step (월드 px). 0이면 스케일된 프레임 크기 사용
+        try:
+            self._step_x = float(cfg.get("step_x") or cfg.get("tile_w") or 0) or 0.0
+        except (TypeError, ValueError):
+            self._step_x = 0.0
+        try:
+            self._step_y = float(cfg.get("step_y") or cfg.get("tile_h") or 0) or 0.0
+        except (TypeError, ValueError):
+            self._step_y = 0.0
+
+        self._ensure_frames(fx_dir)
+        self._rebuild_poly_mask()
+        self.enabled = bool(self._frames) and (
+            self._fill_map or bool(self._rects) or bool(self._poly_mask)
+        )
+
+    def _rebuild_poly_mask(self) -> None:
+        """polygons → (col,row) 집합.
+
+        타일 중심만 쓰면 타일보다 얇은 다각형이 전부 누락되므로
+        중심·모서리·변 중점 + 다각형 꼭짓점이 타일 안에 있는지도 본다.
+        (디스크 마스크 파일 없음 — configure 시 1회 bake)
+        """
+        self._poly_mask = set()
+        if not self._polygons or not self._frames:
+            return
+        step_x, step_y, _tw, _th = self._scaled_step()
+
+        def _tile_hits(col: int, row: int, poly) -> bool:
+            wx = col * step_x
+            wy = row * step_y
+            samples = (
+                (wx + step_x * 0.5, wy + step_y * 0.5),
+                (wx, wy),
+                (wx + step_x, wy),
+                (wx, wy + step_y),
+                (wx + step_x, wy + step_y),
+                (wx + step_x * 0.5, wy),
+                (wx + step_x * 0.5, wy + step_y),
+                (wx, wy + step_y * 0.5),
+                (wx + step_x, wy + step_y * 0.5),
+            )
+            for sx, sy in samples:
+                if self._point_in_polygon(sx, sy, poly):
+                    return True
+            # 다각형 꼭짓점이 이 타일 안에 있으면 포함
+            for px, py in poly:
+                if wx <= px <= wx + step_x and wy <= py <= wy + step_y:
+                    return True
+            return False
+
+        for poly in self._polygons:
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            minx, maxx = min(xs), max(xs)
+            miny, maxy = min(ys), max(ys)
+            col0 = int(math.floor(minx / step_x))
+            col1 = int(math.floor(maxx / step_x))
+            row0 = int(math.floor(miny / step_y))
+            row1 = int(math.floor(maxy / step_y))
+            for row in range(row0 - 1, row1 + 2):
+                for col in range(col0 - 1, col1 + 2):
+                    if _tile_hits(col, row, poly):
+                        self._poly_mask.add((col, row))
+
+    def _ensure_frames(self, fx_dir: str) -> None:
+        d = os.path.normpath(str(fx_dir or "").strip())
+        if not d:
+            self._frames = []
+            self._fx_dir = ""
+            return
+        if d == self._fx_dir and self._frames:
+            return
+        self._fx_dir = d
+        self._frames = []
+        self._tile_w0 = 0
+        self._tile_h0 = 0
+        try:
+            from engine import _load_anim_dir_cached
+
+            loaded = _load_anim_dir_cached(d)
+            if loaded:
+                self._frames = list(loaded)
+                tw, th = self._frames[0].get_size()
+                self._tile_w0 = int(tw)
+                self._tile_h0 = int(th)
+        except Exception:
+            self._frames = []
+
+    def _scaled_step(self):
+        tw = max(1.0, float(self._tile_w0) * float(self._scale))
+        th = max(1.0, float(self._tile_h0) * float(self._scale))
+        sx = float(self._step_x) if self._step_x > 0 else tw
+        sy = float(self._step_y) if self._step_y > 0 else th
+        return max(4.0, sx), max(4.0, sy), tw, th
+
+    def _cache_frame(self, frame_ix: int, zoom: float, f_q: float, alpha: int):
+        qz = round(float(zoom) * float(self._scale), 3)
+        qfq = round(float(f_q), 3)
+        a = int(max(0, min(255, alpha)))
+        key = (int(frame_ix), qz, qfq, a)
+        hit = self._render_cache.get(key)
+        if hit is not None:
+            try:
+                self._render_cache.move_to_end(key)
+            except Exception:
+                pass
+            return hit
+        base = self._frames[int(frame_ix) % len(self._frames)]
+        w0, h0 = base.get_size()
+        w = max(2, int(round(w0 * qz)))
+        h = max(2, int(round(h0 * qz * qfq)))
+        if (w, h) == (w0, h0) and a >= 255:
+            surf = base
+        else:
+            surf = pygame.transform.scale(base, (w, h))
+            if a < 255:
+                if surf is base:
+                    surf = base.copy()
+                surf.fill((255, 255, 255, a), special_flags=pygame.BLEND_RGBA_MULT)
+        self._render_cache[key] = surf
+        try:
+            self._render_cache.move_to_end(key)
+        except Exception:
+            pass
+        while len(self._render_cache) > 64:
+            try:
+                self._render_cache.popitem(last=False)
+            except Exception:
+                break
+        return surf
+
+    def _iter_regions(self, map_w: float, map_h: float):
+        if self._fill_map and map_w > 0 and map_h > 0:
+            yield (0.0, 0.0, float(map_w), float(map_h))
+        for r in self._rects:
+            yield r
+
+    def _blit_one_tile(
+        self,
+        screen,
+        *,
+        wx,
+        wy,
+        col,
+        row,
+        cam_origin_x,
+        cam_origin_y,
+        z,
+        base_ix,
+        n_fr,
+        alpha,
+        fq,
+        y_transform,
+        x_offset_fn,
+    ):
+        if self._phase_stagger:
+            fix = (base_ix + col + row) % n_fr
+        else:
+            fix = base_ix
+        surf = self._cache_frame(fix, z, fq, alpha)
+        sx = (wx - float(cam_origin_x)) * z
+        sy = (wy - float(cam_origin_y)) * z
+        if callable(y_transform):
+            try:
+                sy = float(y_transform(float(sy)))
+            except Exception:
+                pass
+        if callable(x_offset_fn):
+            try:
+                sx = float(sx) + float(x_offset_fn(float(sy)))
+            except Exception:
+                pass
+        screen.blit(surf, (int(round(sx)), int(round(sy))))
+
+    def update_and_draw(
+        self,
+        screen,
+        dt_sec: float,
+        *,
+        cam_origin_x: float,
+        cam_origin_y: float,
+        zoom: float,
+        map_size=None,
+        y_transform=None,
+        x_offset_fn=None,
+        f_q: float = 1.0,
+        mode7_ctx=None,
+    ) -> None:
+        """배경 위 · 캐릭터 아래. Mode7 활성 시에는 스킵(원근 샘플과 좌표계가 다름)."""
+        if not self.enabled or not self._frames:
+            return
+        if mode7_ctx is not None:
+            return
+        try:
+            self._t += max(0.0, float(dt_sec or 0.0))
+        except Exception:
+            pass
+
+        try:
+            mw = float(map_size[0]) if map_size else 0.0
+            mh = float(map_size[1]) if map_size else 0.0
+        except Exception:
+            mw, mh = 0.0, 0.0
+
+        step_x, step_y, tile_w, tile_h = self._scaled_step()
+        z = max(1e-6, float(zoom or 1.0))
+        try:
+            view_w = float(screen.get_width())
+            view_h = float(screen.get_height())
+        except Exception:
+            return
+        # 카메라가 보는 월드 영역 (+ 타일 1칸 여유)
+        vx0 = float(cam_origin_x) - step_x
+        vy0 = float(cam_origin_y) - step_y
+        vx1 = float(cam_origin_x) + view_w / z + step_x
+        vy1 = float(cam_origin_y) + view_h / z + step_y
+
+        n_fr = len(self._frames)
+        base_ix = int(self._t * self._fps) % n_fr
+        alpha = self._alpha
+        fq = float(f_q) if f_q is not None else 1.0
+        if fq <= 0:
+            fq = 1.0
+
+        blit_kw = dict(
+            cam_origin_x=cam_origin_x,
+            cam_origin_y=cam_origin_y,
+            z=z,
+            base_ix=base_ix,
+            n_fr=n_fr,
+            alpha=alpha,
+            fq=fq,
+            y_transform=y_transform,
+            x_offset_fn=x_offset_fn,
+        )
+
+        # 1) fill_map / rects — 영역 격자
+        for rx, ry, rw, rh in self._iter_regions(mw, mh):
+            x0 = max(rx, vx0)
+            y0 = max(ry, vy0)
+            x1 = min(rx + rw, vx1)
+            y1 = min(ry + rh, vy1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            col0 = int(math.floor((x0 - rx) / step_x))
+            row0 = int(math.floor((y0 - ry) / step_y))
+            col1 = int(math.floor((x1 - rx) / step_x))
+            row1 = int(math.floor((y1 - ry) / step_y))
+            for row in range(row0, row1 + 1):
+                wy = ry + row * step_y
+                if wy + tile_h < y0 or wy > y1:
+                    continue
+                for col in range(col0, col1 + 1):
+                    wx = rx + col * step_x
+                    if wx + tile_w < x0 or wx > x1:
+                        continue
+                    self._blit_one_tile(screen, wx=wx, wy=wy, col=col, row=row, **blit_kw)
+
+        # 2) polygons — bake 된 마스크 (월드 격자 col/row)
+        if self._poly_mask:
+            col0 = int(math.floor(vx0 / step_x))
+            row0 = int(math.floor(vy0 / step_y))
+            col1 = int(math.floor(vx1 / step_x))
+            row1 = int(math.floor(vy1 / step_y))
+            for row in range(row0, row1 + 1):
+                wy = row * step_y
+                if wy + tile_h < vy0 or wy > vy1:
+                    continue
+                for col in range(col0, col1 + 1):
+                    if (col, row) not in self._poly_mask:
+                        continue
+                    wx = col * step_x
+                    if wx + tile_w < vx0 or wx > vx1:
+                        continue
+                    self._blit_one_tile(screen, wx=wx, wy=wy, col=col, row=row, **blit_kw)

@@ -61,6 +61,7 @@
     "path": "images/object/flower1_",
     "is_holdable": true,
     "collision": false,
+    "name": "쓰러져 있는 꽃",
     "match_id": "TOY",
     "category": "들 수 있는 물건",
     "interact": {
@@ -313,6 +314,30 @@
   },
   "signpost02": {
     "path": "images/object/signpost02.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "signpost03": {
+    "path": "images/object/signpost03.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "signpost04": {
+    "path": "images/object/signpost04.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "signpost05": {
+    "path": "images/object/signpost05.png",
     "is_holdable": false,
     "collision": true,
     "can_hide_player": false,
@@ -623,6 +648,81 @@
     "anim_delay_ms": 180,
     "is_holdable": false,
     "collision": false,
+    "category": "자연/식물"
+  },
+  "bigflower_b": {
+    "path": "images/object/bigflower_b.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "bigflower_y": {
+    "path": "images/object/bigflower_y.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "bigflower_p": {
+    "path": "images/object/bigflower_p.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "biggrass_1": {
+    "path": "images/object/biggrass_1.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "biggrass_2": {
+    "path": "images/object/biggrass_2.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "biggrass_3": {
+    "path": "images/object/biggrass_3.png",
+    "anim_delay_ms": 180,
+    "is_holdable": false,
+    "collision": false,
+    "category": "자연/식물"
+  },
+  "lotusleaf1": {
+    "path": "images/object/lotusleaf1",
+    "anim_delay_ms": 100,
+    "is_holdable": false,
+    "collision": false,
+    "step_react": true,
+    "step_idle": "land",
+    "step_hit": "hit",
+    "step_radius": 14,
+    "category": "자연/식물"
+  },
+  "lotusleaf2": {
+    "path": "images/object/lotusleaf2",
+    "anim_delay_ms": 100,
+    "is_holdable": false,
+    "collision": false,
+    "step_react": true,
+    "step_idle": "land",
+    "step_hit": "hit",
+    "step_radius": 14,
+    "category": "자연/식물"
+  },
+  "lotusleaf3": {
+    "path": "images/object/lotusleaf3",
+    "anim_delay_ms": 100,
+    "is_holdable": false,
+    "collision": false,
+    "step_react": true,
+    "step_idle": "land",
+    "step_hit": "hit",
+    "step_radius": 14,
     "category": "자연/식물"
   },
   "vane": {

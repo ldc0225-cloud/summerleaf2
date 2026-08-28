@@ -102,12 +102,22 @@ CONFIG = {
     "PERF_PROFILE_LOG_ENABLED": False,
     "PERF_PROFILE_LOG_PATH": "logs/perf_profile.log",
 
+    # 다운/프리즈 원인 추적 — 콘솔·logs/runtime.log [DIAG] (끄려면 DIAG_TRACE: False)
+    "DIAG_TRACE": False,
+    "DIAG_HEARTBEAT_EVERY": 30,           # 평상시 N프레임마다 하트비트
+    "DIAG_VERBOSE_FRAMES_AFTER_BOOT": 240,  # field_boot 직후 이 프레임 수는 더 자주
+    "DIAG_SLOW_FRAME_SEC": 1.5,             # 이보다 긴 구간이면 SLOW 로그
+
 
     "START_MAP": "bg_title",  # 처음 시작할 맵 ID
     # 온보딩: 매 실행 인트로→데모 후 본편. 세이브 없으면 데모 뒤 캐릭터 선택(boot_phase=15).
     # 조건식의 gamestart는 세이브가 아니라 GameFlow.boot_phase(0/1/15/2)로만 평가
     "INTRO_EVENT_ID": "ev_intro_scene",
     "DEMO_EVENT_ID": "ev_gl_demo_02",
+    # 본편 진입 폴백 auto. 다른 auto가 없을 때 FADEIN·exit 등 필수 UI.
+    # events.json condition: field_boot_ready == 0 / priority 후순위(큰 숫자).
+    # main()이 매 실행 field_boot_ready=0 으로 리셋 → 세션당 1회.
+    "FIELD_BOOT_EVENT_ID": "ev_gl_field_boot",
     "NEW_GAME_SPAWN_MAP": "bg_jjangpu",
     "NEW_GAME_SPAWN_POS": [653, 1360],
     "NPC_INTERACT_RANGE": 48,
@@ -153,6 +163,8 @@ CONFIG = {
     "CHAR_SELECT_PROMPT": "여러분과 함께 모험을 떠날 친구를 선택 해 주세요",
     "CHAR_SELECT_CONFIRM_FMT": "{name}로 선택 하시겠어요?",  # {name}=캐릭터 UI 이름
     "CHAR_SELECT_FAREWELL": "그럼 짱짱 친구들과 함께 신나는 모험의 세계로 떠나 볼까요~",
+    # 캐릭터 선택 종료 → 본편 스폰 직전 페이드아웃 초. 밝히기는 본편 첫 auto 이벤트(FADEIN)에 맡긴다.
+    "CHAR_SELECT_EXIT_FADEOUT_SEC": 1.0,
     "CHAR_SPEED": 1.6, "CURSOR_SPEED": 3.5,
     # 클릭 이동
     "DOUBLE_CLICK_MS": 500,
@@ -181,11 +193,11 @@ CONFIG = {
     "SAY_LINE_GAP_PX_320": 2,
     "SAY_NAME_GAP_PX_320": 4,
     # 타자 효과
-    "SAY_TYPE_MS_PER_CHAR": 28,
+    "SAY_TYPE_MS_PER_CHAR": 35,
     # 완전히 표시된 뒤 바로 닫히지 않게 최소 대기(초)
-    "SAY_MIN_CLOSE_DELAY_SEC": 0.8,
+    "SAY_MIN_CLOSE_DELAY_SEC": 0.3,
     # SAY 시작 직후 입력 무시 시간(초): 타자 시작 직후 실수로 바로 넘기는 것 방지
-    "SAY_MIN_OPEN_DELAY_SEC": 0.8,
+    "SAY_MIN_OPEN_DELAY_SEC": 0.3,
     # 텍스트박스 등장/퇴장 페이드(초)
     "SAY_UI_FADE_ENABLED": True,
     "SAY_UI_FADE_IN_SEC": 0.2,
@@ -196,6 +208,29 @@ CONFIG = {
     "VISUAL_DT_REF_SEC": 1.0 / 60.0,
     # 같은 이벤트 안에서 SAY가 연속일 때: 박스 페이드아웃/인 없이 다음 대사만 갱신
     "SAY_CHAIN_WITHIN_EVENT": True,
+    # --- SAY 중 카메라 회피: 화자가 하단 대화창에 가리면 카메라를 아래로 밀어 캐릭터를 박스 위로 ---
+    # true: 자동 회피. false: 끔 (스크립트 CAMERA 고정 연출은 fixed_world 일 때 자동 무시)
+    "SAY_CAM_AVOID_COVER": True,
+    # 대화창 상단(SAY_TEXTBOX_RECT_320.y)보다 이만큼(320 기준 px) 위에 화자(머리)를 유지
+    "SAY_CAM_AVOID_PADDING_PX_320": 16,
+    # 발→머리 추정(레거시). 가림 판정은 발 기준을 씀
+    "SAY_CAM_AVOID_HEAD_OFFSET_PX_320": 28,
+    # 한 번에 올릴 수 있는 최대량(320 기준 px) — 맵 가장자리에서 과한 패닝 방지
+    "SAY_CAM_AVOID_MAX_PX_320": 90,
+    # 회피 오프셋 lerp (0~1). 클수록 빨리 따라감
+    "SAY_CAM_AVOID_LERP": 0.2,
+    # 맵 끝이라 카메라를 못 올리면 대화창을 화면 위쪽으로 (차선책)
+    "SAY_BOX_TOP_FALLBACK": True,
+    # 카메라로 못 메우는 양(320 기준 px)이 이보다 크면 상단 박스
+    "SAY_BOX_TOP_FALLBACK_SLACK_PX_320": 10,
+    # 상단 텍스트 영역 [x,y,w,h]. null 이면 하단 RECT 대칭(y≈6 → 너무 위에 붙을 수 있음)
+    # y 를 키우면 글자가 아래로, 줄이면 위로. (예: [30, 20, 284, 52])
+    "SAY_TEXTBOX_RECT_TOP_320": [48, 38, 302, 70],
+    # 상단 폴백일 때 뒤집은 textbox 이미지를 화면 위쪽에서 얼마나 내릴지(320 기준 px)
+    # 0=맨 위 붙임. 글자 RECT 와 비슷하게 맞추려면 14~20 권장.
+    "SAY_TEXTBOX_TOP_BLIT_Y_PX_320": 14,
+    # 상단일 때 textbox 풀스크린 이미지를 세로 뒤집기 (하단용 아트 재사용)
+    "SAY_TEXTBOX_FLIP_FOR_TOP": True,
     # 색상 — 게임 텍스트 통일: 검정 글자 + 흰 테두리 (가독성)
     "SAY_NAME_COLOR": (0, 0, 0),
     "SAY_TEXT_COLOR": (0, 0, 0),
@@ -213,10 +248,27 @@ CONFIG = {
     "UI_FONT_OUTLINE_PX_320": 1,
     "UI_FONT_OUTLINE_COLOR": (255, 255, 255),
 
-    # --- SAY 말풍선 (assets/{prefix}_0.png … 연속 번호) ---
-    # SAY 스텝에 "bubble": true 및 bubble_target(비우면 who) 가 있을 때만 표시.
+    # --- SELECTBOX: 이벤트 스텝 예/아니오 선택창 기본값 ---
+    # SELECTBOX 스텝 파라미터로 개별 오버라이드 가능.
+    # SELECTBOX_YES_TEXT / NO_TEXT : 버튼 글자
+    "SELECTBOX_YES_TEXT": "예",
+    "SELECTBOX_NO_TEXT": "아니오",
+    # 버튼 배경색 (R,G,B 문자열)
+    "SELECTBOX_YES_COLOR": "52,110,72",
+    "SELECTBOX_NO_COLOR": "90,58,58",
+    # 폰트 크기 (320 논리 해상도 기준 px)
+    "SELECTBOX_TEXT_SIZE": 12,    # 질문 텍스트
+    "SELECTBOX_NAME_SIZE": 12,    # 창 이름(제목)
+    "SELECTBOX_BTN_SIZE": 12,     # 버튼 글자
+
+    # --- SAY 말풍선 (assets/images/ui/speechbubble0N/speechbubble0N_0.png …) ---
+    # SAY_BUBBLE_DEFAULT True: 스텝에 bubble 을 안 적어도 speechbubble01 표시
+    #   (bubble_target 비우면 who 머리 위). false 로 끄거나 스텝 bubble:false
+    # SAY_BUBBLE_DEFAULT_SET: 기본/ true / "..." 일 때 쓸 세트 폴더명
     "SAY_BUBBLE_DEFAULT": True,
-    "SAY_BUBBLE_UI_PREFIX": "images/ui/speechbubble",
+    "SAY_BUBBLE_DEFAULT_SET": "speechbubble01",
+    # 구형 flat 연속번호 폴백 stem (폴더 로드 실패 시)
+    "SAY_BUBBLE_UI_PREFIX": "images/ui/speechbubble01/speechbubble01",
     "SAY_BUBBLE_MAX_FRAMES": 16,
     "SAY_BUBBLE_FRAME_MS": 140,
     # 말풍선 앵커: 스프라이트 머리(상단 중앙) 기준 오프셋(논리 px, UI_LAYOUT_WIDTH 기준 1:1)
@@ -241,6 +293,11 @@ CONFIG = {
     "EDITOR_TOOLTIP_BG_ALPHA": 185,
 
     # --- 이벤트 존(contact_confirm) 클릭 가능 표시(FX) ---
+    # event_zones[].block: 조건 참이면 해당 rect 를 벽처럼 막음
+    #   예) "block": { "var": "gotothepond00", "op": "!=", "val": 1, "say": "아직 할 일이 남았어.", "who": "player" }
+    #   또는 "block": { "when": "progress_x < 1002" } / "block": true (항상)
+    # ZONE_BLOCK_SAY_PAD_PX: 벽에서 떨어져도 '같은 접촉'으로 볼 여유(px) — 떨어지면 대사 재발동 가능
+    "ZONE_BLOCK_SAY_PAD_PX": 10,
     "ZONE_CONFIRM_PROMPT_ENABLED": True,
     # assets/images/ui/pushbutton0.png ... pushbutton3.png
     "ZONE_CONFIRM_PROMPT_PREFIX": "assets/images/ui/pushbutton",
@@ -286,6 +343,7 @@ CONFIG = {
     # --- 개별 오브젝트 줌(별개 기능) ---
     # 이벤트 ZOOM에서 target이 player/NPC/오브젝트인 경우에만 사용. (camera/global 대상 줌은 WORLD_ZOOM으로 처리)
     # val/strength = 직접 배율 (0.5=절반, 1.0=기본, 2.0=2배). on=false → 1.0
+    # world_data.json objects[].zoom / object_defs zoom 에도 동일 범위 적용 (맵 배치 크기)
     "ENTITY_ZOOM_MIN": 0.5,
     "ENTITY_ZOOM_MAX": 2.0,
     "ENTITY_ZOOM_DEFAULT_DURATION_SEC": 1.0,
@@ -453,6 +511,19 @@ CONFIG = {
     "CLOUD_SHADOW_GRID_MAX_CLOUDS": 200,
     # 구름 스폰 시 화면 밖 최소 여백(px). 스프라이트 크기에 따라 자동 확장된다.
     "CLOUD_SHADOW_SPAWN_MARGIN_PX": 96,
+
+    # --- 맵 ambient 물결 타일 (field.wave_tiles) ---
+    # 프레임 1세트만 로드·공유, 카메라에 보이는 칸만 blit (오브젝트 다수 배치보다 훨씬 가벼움).
+    # world_data.json → [맵].field.wave_tiles 예:
+    #   { "on": true, "fill_map": true, "fps": 8, "scale": 0.5, "phase_stagger": true }
+    #   { "on": true, "rects": [[0,200,320,280]], "fx_dir": "assets/images/fx/wave01" }
+    #   { "on": true, "polygons": [[[10,100],[300,100],[280,220],[40,240]]], "scale": 0.5 }
+    #     → 꼭짓점만 저장. 맵 진입 시 타일 마스크로 1회 bake (마스크 파일 없음)
+    "FIELD_WAVE_TILES_FX_DIR": "assets/images/fx/wave01",  # 기본 애니 폴더 (wave01_0.png …)
+    "FIELD_WAVE_TILES_FPS": 8.0,       # 전역 프레임 속도
+    "FIELD_WAVE_TILES_SCALE": 1.0,     # 스프라이트 스케일 (1=원본 px)
+    "FIELD_WAVE_TILES_ALPHA": 220,     # 0~255
+    "FIELD_WAVE_TILES_PHASE_STAGGER": True,  # (col+row)로 프레임 위상 어긋나 반복감 완화
 
     # --- 엔티티 FX ---
     # 예: { "type":"ENTITY_FX","target":"player","mode":"pulse","color":"255,220,100","alpha":160,"cycle_sec":1.2 }
@@ -659,15 +730,24 @@ CONFIG = {
     "DITCH_COLOR_R_MAX": 90,
     "DITCH_COLOR_G_MAX": 90,
     "DITCH_COLOR_B_MIN": 200,
-    # 직선 이동 구간에서 이 거리(px) 이하의 도랑만 자동 점프로 건넜다가 목표까지 계속 걷기 (오카리나식)
-    "JUMP_MAX_GAP_PX": 30,
+    # false: 터치 이동 중 도랑/짧은 갭 자동 점프 끔 (ACTION_ANIM hop·그네 점프는 유지)
+    # true: JUMP_MAX_GAP_PX 이하 갭을 자동 hop
+    "JUMP_AUTO_ENABLED": False,
+    # 직선 이동 구간에서 이 거리(px) 이하의 갭만 자동 점프로 건넜다가 목표까지 계속 걷기 (오카리나식)
+    # 징검다리(연꽃잎) 맵: 섬 사이 20~50px → 여유 포함 56
+    "JUMP_MAX_GAP_PX": 26,
+    # true: 흰색 walk 섬 사이 검정(wall)도 짧은 갭이면 자동 점프 (파란 ditch 안 칠해도 됨)
+    # false: 예전처럼 파란 ditch 만 점프
+    "JUMP_ALLOW_WALL_GAP": True,
+    # 필드 연꽃잎(step_react) 기본 밟힘 반경(px). object_defs.step_radius 가 있으면 그쪽 우선
+    "STEP_REACT_DEFAULT_RADIUS": 30,
     # 점프 높이(픽셀). 자동 조절 기본 최대치
     "JUMP_ARC_HEIGHT": 50,
     # 도랑 폭(span)에 따른 자동 점프 높이/시간 조절
     "JUMP_ARC_HEIGHT_MIN": 30, #10
     "JUMP_ARC_HEIGHT_MAX": 50,
     # dist(px) * 이 값 = 기본 점프 시간(ms) (최종은 MIN/MAX로 클램프)
-    "JUMP_DUR_PER_PX": 12.0,
+    "JUMP_DUR_PER_PX": 15.0,
     # span 비율(0~1)에 따른 시간 배수 (좁으면 더 짧게, 넓으면 더 길게)
     "JUMP_DUR_SPAN_MUL_MIN": 0.85,
     "JUMP_DUR_SPAN_MUL_MAX": 1.15,
@@ -705,7 +785,12 @@ CONFIG = {
     "PATHFIND_ESCAPE_MAX_NODES": 3200,
     "PATHFIND_ESCAPE_MAX_DIST_PX": 96.0,
     "PATHFIND_ESCAPE_MIN_BEFORE_REPLAN_PX": 4.0,
-    "PATHFIND_ESCAPE_MIN_OPEN_NEIGHBORS": 0,
+    # 0이면 BFS 거의 모든 노드에서 동기 A* → 프레임 수십 초 스톨 가능. 기본 1 유지.
+    "PATHFIND_ESCAPE_MIN_OPEN_NEIGHBORS": 1,
+    # 코너 탈출 동기 A* 상한 (한 프레임 hitch 방지)
+    "PATHFIND_ESCAPE_MAX_ASTAR_TRIES": 6,
+    "PATHFIND_ESCAPE_BUDGET_MS": 6.0,
+    "PATHFIND_ESCAPE_ASTAR_MAX_VISITED": 900,
 
     # 캐릭터/오브젝트 자연 회피: 이동 중 엔티티에 막히면 멈추지 않고 A* 재계획으로 우회.
     # 성능 위해 재계획은 쿨다운/누적횟수/포기시간으로 제한한다(밀어내기 separation 없음).
@@ -723,6 +808,10 @@ CONFIG = {
     "FOLLOW_REPLAN_DIST_PX": 24.0, #24
     # 리더 뒤 목표점을 픽셀 격자로 반올림(미세 플로트 변동으로 인한 불필요 재계획·떨림 완화)
     "FOLLOW_SLOT_QUANTIZE_PX": 4, #4
+    # FOLLOW_START 여러 명이 같은 leader 를 따를 때: 세로 간격(px, 320 기준 아님 — 월드 px)
+    "FOLLOW_MULTI_SPACING_PX": 18.0,
+    # 슬롯 목표점까지 이 거리 이하면 정지
+    "FOLLOW_SLOT_ARRIVE_PX": 12.0,
 
     # PLACE persist + behavior:follow(또는 travel:true) 동행 — 맵 전환 시 플레이어 근처 스폰
     # PLACED_FOLLOW_SPAWN_OFFSET_PX: 첫 동행 NPC를 플레이어 왼쪽으로 띄울 거리(px)
@@ -754,7 +843,7 @@ CONFIG = {
     "progress_frog_minigame_win": 0,
     "progress_frog_seed": 0,
     "progress_frog_minigame_tried": 0,
-    # 황소개구리 보스(activities/bullfrog) 클리어 플래그
+    # 황소개구리 보스(activities/bullfrog) — 0=미도전, 1=승리, 2=패배(1회 이상)
     "progress_bullfrog_win": 0,
     "progress_fishing_win": 0,
     "score_frog_trial_best": 0,
@@ -778,12 +867,139 @@ CONFIG = {
 #     "ally1"…"ally5" → 조력자 char id (주인공 제외 인덱스)
 #     "ally1_parent"…"ally5_parent" → 해당 조력자의 부모
 #     "summer_k_parent" 등 → PLAYABLE_KIDS/PLAYER_PARENTS 키의 부모
+#   같은 name 복제 NPC(예: frog01×3): target 에 instance_id 사용
+#     world_data npcs[].instance_id 예) "frog01@64_416"
+#     → MOVE/PLACE/TUNE 등에서 그 개체만 지정
+#   FOLLOW_START follower: 여러 명 쉼표 가능 ("ally1,ally2,ally3")
+#     → 같은 leader 로 일괄 등록 + 슬롯 대형(겹침 완화)
+#     → 이벤트 종료 후에도 FOLLOW_STOP 전까지 유지 (필드 동행)
+#   FOLLOW_STOP 로 해제 (비우면 전부)
 #   player 는 엔진이 엔티티로 특별 처리하므로 그대로 둔다.
 #   SAY 문구 {player_name} {player_call} {parent_name} {parent_call}
 #           {ally1_name}…{ally5_name} {ally1_call}…{ally5_call}
 #           {ally1_parent_name}…{ally5_parent_call}
 #           {summer_k_parent_name} 등 (아이 id + _parent_name/_parent_call)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# SAY / EMOTE 말풍선 세트
+# bubble 필드 토큰 → assets/images/ui/speechbubble0N/
+#   ... → 01(말줄임)  !!! → 02  ??? → 03  ^^ → 04  ㅠㅠ → 05
+# ---------------------------------------------------------------------------
+
+# 에디터 SAY/EMOTE bubble 드롭다운 ("" = data 기본값 사용)
+SAY_BUBBLE_EDITOR_CHOICES = (
+    "",
+    "false",
+    "...",
+    "!!!",
+    "???",
+    "^^",
+    "ㅠㅠ",
+    "01",
+    "02",
+    "03",
+    "04",
+    "05",
+)
+
+# 감정 토큰 → 세트 폴더명
+SAY_BUBBLE_TOKEN_TO_SET = {
+    "...": "speechbubble01",
+    "…": "speechbubble01",
+    "dots": "speechbubble01",
+    "dot": "speechbubble01",
+    "!!!": "speechbubble02",
+    "!": "speechbubble02",
+    "exclaim": "speechbubble02",
+    "???": "speechbubble03",
+    "?": "speechbubble03",
+    "question": "speechbubble03",
+    "^^": "speechbubble04",
+    "^_^": "speechbubble04",
+    "happy": "speechbubble04",
+    "ㅠㅠ": "speechbubble05",
+    "ㅜㅜ": "speechbubble05",
+    "tt": "speechbubble05",
+    "sad": "speechbubble05",
+}
+
+
+def resolve_say_bubble_set(bubble, config=None):
+    """
+    SAY/EMOTE 의 bubble 필드 → speechbubble0N 세트명.
+    끄면 None 반환 (말풍선 미표시).
+
+    - None / "" : CONFIG SAY_BUBBLE_DEFAULT 가 True 면 DEFAULT_SET(기본 speechbubble01)
+    - false / off / 0 / no : 끔
+    - true / on / 1 / yes : DEFAULT_SET
+    - ... !!! ??? ^^ ㅠㅠ / 01~05 / speechbubble03 : 해당 세트
+    """
+    cfg = config if isinstance(config, dict) else CONFIG
+    try:
+        default_set = str(
+            cfg.get("SAY_BUBBLE_DEFAULT_SET", "speechbubble01") or "speechbubble01"
+        ).strip()
+    except Exception:
+        default_set = "speechbubble01"
+    if not default_set:
+        default_set = "speechbubble01"
+
+    def _norm_set(name: str) -> str:
+        sn = str(name or "").strip().replace("\\", "/").strip("/")
+        if not sn:
+            return default_set
+        base = sn.split("/")[-1]
+        # "3" / "03" → speechbubble03
+        if base.isdigit():
+            n = int(base)
+            if 1 <= n <= 9:
+                return f"speechbubble{n:02d}"
+        low = base.lower()
+        if low.startswith("speechbubble"):
+            return low
+        return base
+
+    if bubble is None:
+        if bool(cfg.get("SAY_BUBBLE_DEFAULT", True)):
+            return _norm_set(default_set)
+        return None
+
+    if isinstance(bubble, bool):
+        return _norm_set(default_set) if bubble else None
+
+    if isinstance(bubble, (int, float)):
+        try:
+            v = float(bubble)
+        except (TypeError, ValueError):
+            return None
+        if v == 0:
+            return None
+        if v == 1:
+            return _norm_set(default_set)
+        # 2~5 → speechbubble0N
+        if 2 <= int(v) <= 9:
+            return f"speechbubble{int(v):02d}"
+        return _norm_set(default_set)
+
+    raw = str(bubble).strip()
+    if not raw:
+        if bool(cfg.get("SAY_BUBBLE_DEFAULT", True)):
+            return _norm_set(default_set)
+        return None
+
+    low = raw.lower()
+    if low in ("0", "false", "f", "no", "n", "off", "none", "null", "hide", "clear"):
+        return None
+    if low in ("1", "true", "t", "yes", "y", "on", "default", "show"):
+        return _norm_set(default_set)
+
+    mapped = SAY_BUBBLE_TOKEN_TO_SET.get(raw) or SAY_BUBBLE_TOKEN_TO_SET.get(low)
+    if mapped:
+        return _norm_set(mapped)
+
+    return _norm_set(raw)
+
 
 def get_playable_kids(config=None) -> list:
     """조작·선택 가능한 짱짱어린이집 아이들 id 목록."""
@@ -1003,24 +1219,64 @@ def resolve_story_target_id(target, save_data=None, config=None) -> str:
 
 def resolve_story_who_label(who, save_data=None, config=None) -> str:
     """
-    SAY who 표시용.
-    ally1~5 / player_parent / allyN_parent / {kid}_parent 별칭이면 실제 캐릭터 UI 이름.
-    그 외(이미 쓴 표시명·일반 id)는 원문 유지.
+    SAY who → 대화창에 찍히는 이름.
+
+    - player → 세이브 주인공의 char_defs.name (예: 여름이)
+    - ally1~5 / *_parent 별칭 → 실제 캐릭터 UI 이름
+    - char_defs 키(summer_k, frog01 …) → 그 정의의 name (없으면 id)
+    - 여러 명: "a,b,c" → 각각 풀어 ", " 로 연결
+    - 이미 한글로 쓴 표시명·알 수 없는 토큰 → 원문 유지
     """
     raw = str(who or "").strip()
     if not raw:
         return raw
-    if not is_story_target_alias(raw, config):
-        return raw
-    cid = resolve_story_target_id(raw, save_data=save_data, config=config)
-    if not cid:
-        return raw
+    cfg = config if isinstance(config, dict) else CONFIG
+
+    # 여러 who: "player,ally1,summer_k"
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if str(p).strip()]
+        if len(parts) > 1:
+            labels = [resolve_story_who_label(p, save_data=save_data, config=cfg) for p in parts]
+            return ", ".join(labels)
+
+    key = raw.lower()
     try:
         from char_behavior import get_char_ui_name
-
-        return str(get_char_ui_name(cid) or cid)
     except Exception:
-        return cid
+        def get_char_ui_name(cid):  # noqa: N802
+            return str(cid or "")
+
+    # player → 현재 주인공 표시 이름
+    if key == "player":
+        try:
+            cid = get_player_char_id(save_data, cfg)
+        except Exception:
+            cid = ""
+        if cid:
+            return str(get_char_ui_name(cid) or cid)
+        return raw
+
+    # 스토리 별칭 (ally1, player_parent, summer_k_parent …)
+    if is_story_target_alias(raw, cfg):
+        cid = resolve_story_target_id(raw, save_data=save_data, config=cfg)
+        if cid:
+            return str(get_char_ui_name(cid) or cid)
+        return raw
+
+    # char_defs 에 있는 id → name (who: "summer_k" → "여름이")
+    assets = CHAR_ASSETS if isinstance(CHAR_ASSETS, dict) else {}
+    cid = raw if raw in assets else None
+    if cid is None:
+        for k in assets:
+            if str(k).lower() == key:
+                cid = k
+                break
+    if cid is not None:
+        label = str(get_char_ui_name(cid) or "").strip()
+        if label:
+            return label
+
+    return raw
 
 
 def resolve_story_alias_ui_name(token, save_data=None, config=None) -> str:
@@ -1135,7 +1391,7 @@ def expand_story_text(text, save_data=None, config=None) -> str:
 
 
 
-# 맵별 필드 기본값 (틸트·쉬어·화면 FX ambient)
+# 맵별 필드 기본값 (틸트·쉬어·화면 FX·물결 타일 ambient)
 # - 저장: world_data.json → [맵ID].field
 #   예: "field": {
 #         "tilt_on": false, "shear_on": true,
@@ -1144,11 +1400,18 @@ def expand_story_text(text, save_data=None, config=None) -> str:
 #           "rain": {"density":0.4,"speed":280,"angle":82},
 #           "vignette": {"strength":0.55,"size":0.42,"softness":0.65},
 #           "tone": {"preset":"warm","strength":0.35}
+#         },
+#         "wave_tiles": {
+#           "on": true, "fill_map": true, "fps": 8, "scale": 0.5,
+#           "fx_dir": "assets/images/fx/wave01", "phase_stagger": true
 #         }
+#         # 또는 부분: "rects": [[x,y,w,h], ...]
+#         # 또는 다각형(마스크 파일 없이 꼭짓점만): "polygons": [[[x,y],...], ...]
 #       }
 # - 맵 진입 시 field_runtime.apply_map_field_defaults
 # - tilt_on/shear_on 생략 → CONFIG (FIELD_PERSPECTIVE_DEFAULT_ON / TILT_SHEAR_ENABLED)
 # - screen_fx 의 kind 키가 있으면 ON (엔진 build_*_from_step 과 동일 파라미터). 없으면 해당 FX OFF.
+# - wave_tiles: 공유 프레임 + 뷰포트 컬링. polygons 는 configure 시 타일 마스크 bake.
 # - presence_zones[].field 는 존 체류 중 틸트/쉬어만 덮어쓰기. 맵 루트 field 는 진입 시 1회.
 
 
@@ -1163,9 +1426,10 @@ def get_map_field_raw(map_id: str, world_data=None) -> dict:
 
 
 def resolve_map_field_defaults(map_id: str, world_data=None) -> dict:
-    """맵 ID → {tilt_on: bool, shear_on: bool, screen_fx: dict}.
+    """맵 ID → {tilt_on: bool, shear_on: bool, screen_fx: dict, wave_tiles: dict|None}.
 
     screen_fx 는 kind→파라미터 dict (키가 있으면 해당 FX ON). 없으면 {}.
+    wave_tiles 는 field.wave_tiles (없으면 None = OFF).
     """
     out: dict = {}
     field = get_map_field_raw(map_id, world_data)
@@ -1187,6 +1451,8 @@ def resolve_map_field_defaults(map_id: str, world_data=None) -> dict:
         out["shear_on"] = bool(CONFIG.get("TILT_SHEAR_ENABLED", False))
     sfx = field.get("screen_fx")
     out["screen_fx"] = dict(sfx) if isinstance(sfx, dict) else {}
+    wt = field.get("wave_tiles")
+    out["wave_tiles"] = dict(wt) if isinstance(wt, dict) else None
     return out
 
 
@@ -1784,6 +2050,9 @@ BULLFROG_DEFAULTS = {
     # 플레이어 타일 점프(인접 1칸) 시간·높이 (기존 0.22/14 → 1.5배)
     "player_jump_sec": 0.4,
     "player_jump_height": 25.0,
+    # 점프 중 물방울 피격: 출발 칸으로 남는 시간 비율 (1.0=착지 전까지, 0.5=전반부만, 0=즉시 도착칸)
+    # 예전에는 점프 전체가 무적이라 난이도가 낮았음. 착지 전까지는 출발 칸에 떨어진 물방울에 맞음.
+    "jump_hit_origin_frac": 1.0,
     # 착지 후 다음 점프까지 쿨타임(초)
     "player_land_cooldown_sec": 0.05,
     # 착지 바운스: 연꽃잎이 가라앉았다가 튕기는 느낌. 휴식 발점 기준 Y오프셋(px, +아래)
@@ -1807,6 +2076,74 @@ BULLFROG_DEFAULTS = {
     "result_hold_sec": 2.2,
     # 애니 FPS (에셋 있을 때)
     "anim_fps": 10.0,
+}
+
+# ---------------------------------------------------------------------------
+# 징검다리 횡단 (activities/lotus_cross) — 황소개구리 축약판
+# 맵별 덮어쓰기: world_data.json → [맵ID].lotus_cross
+# 진입: bg_pond02 이벤트존 A/B → start_lotus_cross (from_side=a|b)
+#       이벤트박스 발 위치에서 시작 타일로 점프 착지 (순간이동 없음)
+# 타일: bullfrog 와 같이 origin + cols×rows 균일 그리드 (칸 개별 좌표 없음)
+# 표시: 활동 시작 전에도 같은 그리드로 연꽃잎을 그림. world_data.objects 에 따로 깔지 말 것
+# 퇴장: 끝 열에서 강가 쪽으로 한 칸 더 점프 → exit_pos_* 착지 후 필드 복귀
+#       타일 위에서는 A·B 양쪽 모두 나갈 수 있음 (순간이동 없음)
+# ---------------------------------------------------------------------------
+LOTUS_CROSS_DEFAULTS = {
+    # 기본 맵 (맵 전환 없이 그 자리에서 플레이)
+    "default_map_id": "bg_pond02",
+    # --- 그리드 (황소개구리 BULLFROG_DEFAULTS 와 같은 키) ---
+    # tile_size: 한 칸 크기(px)
+    "tile_size": 32,
+    # grid_origin_x/y: 좌상단 타일의 왼쪽·위 모서리 (중심이 아님)
+    "grid_origin_x": 590.5,
+    "grid_origin_y": 46.5,
+    # grid_cols / grid_rows: 가로·세로 칸 수. 전부 연꽃잎
+    "grid_cols": 5,
+    "grid_rows": 1,
+    # 진입 시 시작 칸 (col, row). A=왼쪽, B=오른쪽
+    "start_a": [0, 0],
+    "start_b": [4, 0],
+    # 이 열에서 그리드 밖으로 점프하면 해당 강가로 퇴장
+    # exit_a_col: 더 왼쪽(←) → exit_pos_a / exit_b_col: 더 오른쪽(→) → exit_pos_b
+    "exit_a_col": 0,
+    "exit_b_col": 4,
+    # 퇴장 착지 좌표 (이벤트박스 밖·걸어갈 수 있는 길)
+    "exit_pos_a": [516.0, 78.0],
+    "exit_pos_b": [824.0, 140.0],
+    # 끝 열에서 exit_pos 를 직접 터치할 때 인정 반경 = tile_size * 이 값
+    "exit_click_radius_ratio": 1.25,
+    # --- 연꽃잎 ---
+    # 타일마다 lotusleaf1~3 고정 순환 (col+row*cols). 필드 장식과 활동 중 동일
+    "lotus_leaf_sets": ["lotusleaf1", "lotusleaf2", "lotusleaf3"],
+    # pond02 는 tilt/shear 없음 → 1.0(세움). 황소개구리 아레나는 0.0(눕힘)
+    "lotus_sprite_tilt": 1.0,
+    # hit 애니 길이(초). 0이면 프레임수/anim_fps 자동
+    "leaf_hit_sec": 0.0,
+    "anim_fps": 10.0,
+    # --- 점프 (황소개구리와 같은 값) ---
+    "player_jump_sec": 0.4,
+    "player_jump_height": 25.0,
+    # 점프 중 물방울 피격: 출발 칸으로 남는 시간 비율 (1.0=착지 전까지, 0.5=전반부만)
+    "jump_hit_origin_frac": 0.5,
+    "player_land_cooldown_sec": 0.05,
+    "player_land_bob_y": [3, 1, 0, 0, -3, -1],
+    # 이벤트박스→시작타일 거리가 이 값(px) 이하면 점프 없이 스냅 (이미 칸 위)
+    "enter_snap_px": 6.0,
+    # follow NPC: 이벤트박스 진입 시 fadeout → exit_pos 착지 후 플레이어 근처 fadein (초). 0이면 즉시
+    "follow_fade_sec": 0.5,
+    # --- 튜토리얼 물방울 (황소개구리 축약, BULLFROG_DEFAULTS 의 drop/falldown 에셋 재사용) ---
+    # drops_enabled: true 면 ST_PLAY 중 그림자→낙하 반복 (목숨·점수 없음)
+    "drops_enabled": True,
+    # drop_first_delay_sec: ST_PLAY 진입 후 첫 그림자까지 대기(초)
+    "drop_first_delay_sec": 2.0,
+    # drop_interval_sec: 한 번 낙하·착지 연출이 끝난 뒤 다음 그림자까지 대기(초)
+    "drop_interval_sec": 4.0,
+    # drop_shadow_sec: 그림자만 보이는 예고 시간(초)
+    "drop_shadow_sec": 1.0,
+    # drops_per_wave: 한 번에 떨어질 랜덤 칸 수
+    "drops_per_wave": 1,
+    # drop_exclude_player_tile: true 면 플레이어가 서 있는 칸은 후보에서 제외
+    "drop_exclude_player_tile": False,
 }
 
 # 시크릿 상자·소환 시 실제로 나올 수 있는 효과 풀
@@ -2062,6 +2399,7 @@ CONFIG["UI_FONT_PROFILES"] = {
 # source_set: 세트 전체를 동일 변환으로 복사할 때
 CHAR_DERIVED_ANIM_SETS = {
     # 피격 쓰러짐: seat_idle_4 → idle_4 (각 시계방향 90° + 발 정렬)
+    # ACTION_ANIM: { "anim":"falldown", "mode":"hold" } — loop=false·release=stop 자동, frame_sec=BULLFROG_DEFAULTS
     "falldown": {
         "offset_y": 20,
         "frames": [
@@ -2262,6 +2600,8 @@ UI_OVERLAY_DEFAULTS = {
 # SAY 레이아웃 키 — ui.state.json say{} 에서 CONFIG 로 반영
 UI_SAY_LAYOUT_KEYS = (
     "SAY_TEXTBOX_RECT_320",
+    "SAY_TEXTBOX_RECT_TOP_320",
+    "SAY_TEXTBOX_TOP_BLIT_Y_PX_320",
     "SAY_LINE_GAP_PX_320",
     "SAY_NAME_GAP_PX_320",
     "SAY_BUBBLE_OFFSET_X_PX_320",
