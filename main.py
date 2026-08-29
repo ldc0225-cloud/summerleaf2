@@ -56,6 +56,10 @@ from field_runtime import (
     event_picker_is_open,
     event_picker_handle,
     draw_event_picker,
+    install_game_debug_button,
+    debug_panel_is_open,
+    debug_panel_handle,
+    draw_debug_panel,
 )
 from render_align import snap_render_zoom
 from activities import FieldActivityHost, FieldDrawContext
@@ -1540,6 +1544,7 @@ def main():
     ev_mgr = EventManager(flow, music_mgr=music_mgr)
     ev_mgr.set_fragment_catalog(fragment_catalog)
     install_game_exit_button(ev_mgr)
+    install_game_debug_button(ev_mgr)
     _restore_followers_from_save(ev_mgr, flow, map_id, objs=objs, npcs=npcs, player=player)
 
     def _reload_event_bundles():
@@ -2260,6 +2265,7 @@ def main():
             pass
         try:
             install_game_exit_button(ev_mgr)
+            install_game_debug_button(ev_mgr)
         except Exception:
             pass
 
@@ -3705,6 +3711,38 @@ def main():
                 pygame.JOYDEVICEREMOVED,
             ):
                 app_force_quit_feed_event(event)
+
+            # 디버그 설정 패널 — 이벤트 피커보다 먼저
+            if debug_panel_is_open() or event.type in (
+                pygame.KEYDOWN,
+                pygame.MOUSEBUTTONDOWN,
+                pygame.MOUSEBUTTONUP,
+                pygame.MOUSEMOTION,
+                pygame.MOUSEWHEEL,
+            ):
+                _dbg_xy = None
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    try:
+                        _dbg_xy = _embed_phys_to_logical_xy(
+                            event.pos[0], event.pos[1], scale_factor=scale_factor
+                        )
+                    except Exception:
+                        _dbg_xy = None
+                if debug_panel_is_open():
+                    _dbg_res = debug_panel_handle(
+                        event,
+                        ev_mgr=ev_mgr,
+                        cam=cam,
+                        flow=flow,
+                        map_id=map_id,
+                        player=player,
+                        event_data=raw_events,
+                        logical_xy=_dbg_xy,
+                    )
+                    if _dbg_res == "consumed":
+                        continue
+                    if debug_panel_is_open() and event.type != pygame.QUIT:
+                        continue
 
             # 이벤트 피커(E) — 다른 필드 입력보다 먼저 처리
             if event.type in (
@@ -7078,6 +7116,17 @@ def main():
         try:
             if event_picker_is_open():
                 draw_event_picker(
+                    render_surf,
+                    font_title=get_ui_font(scale_ui_text_px(12), "ui"),
+                    font_row=get_ui_font(scale_ui_text_px(10), "ui"),
+                )
+        except Exception:
+            pass
+
+        # 디버그 설정 패널 (안드로이드 터치용)
+        try:
+            if debug_panel_is_open():
+                draw_debug_panel(
                     render_surf,
                     font_title=get_ui_font(scale_ui_text_px(12), "ui"),
                     font_row=get_ui_font(scale_ui_text_px(10), "ui"),

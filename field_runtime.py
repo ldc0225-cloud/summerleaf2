@@ -1480,8 +1480,12 @@ def hide_game_exit_button(ev_mgr) -> None:
     hide_game_exit_confirm(ev_mgr)
 
 
-def set_game_exit_button_visible(ev_mgr, visible: bool, *, persist: bool | None = None) -> None:
-    """이벤트 스텝에서 exit 버튼 표시 상태를 제어한다."""
+def set_game_exit_button_visible(
+    ev_mgr, visible: bool, *, persist: bool | None = None, with_debug: bool = True
+) -> None:
+    """이벤트 스텝에서 exit 버튼 표시 상태를 제어한다.
+    with_debug=True(기본)면 debug 버튼도 같이 on/off (안드로이드 터치 디버그).
+    """
     try:
         ev_mgr.game_exit_button_visible = bool(visible)
     except Exception:
@@ -1495,6 +1499,8 @@ def set_game_exit_button_visible(ev_mgr, visible: bool, *, persist: bool | None 
         install_game_exit_button(ev_mgr)
     else:
         hide_game_exit_button(ev_mgr)
+    if with_debug:
+        set_game_debug_button_visible(ev_mgr, bool(visible), persist=persist)
 
 
 def show_game_exit_confirm(ev_mgr) -> None:
@@ -1560,6 +1566,346 @@ def hide_game_exit_confirm(ev_mgr) -> None:
             rm(oid)
         except Exception:
             pass
+
+
+# =============================================================================
+# 디버그 버튼 + 설정 패널 (안드로이드 터치용 — 키보드 핫키 대체)
+# - GAME_EXIT_BUTTON 과 함께 오른쪽 위에 "debug" 버튼
+# - 누르면 주요 DEV_CMD / 이벤트 피커 on·off 패널
+# =============================================================================
+
+GAME_DEBUG_BTN_ID = "game_debug_btn"
+
+_DEBUG_PANEL = {
+    "open": False,
+    "row_hit": [],
+    "panel_rect": None,
+    "close_rect": None,
+    "confirm_restart": False,
+}
+
+
+def _debug_panel_rows() -> list:
+    """디버그 패널 항목 — label / key 힌트 / kind(cmd|picker|restart)."""
+    # 단축키 표기는 GLOBAL_EVENT_HOTKEYS·EVENT_PICKER 실제 매핑과 맞춤
+    # (l=틸트, r=쉬어, z/x=줌 — CONFIG 의 zoom 키를 우선)
+    zoom_key = "z"
+    try:
+        for row in CONFIG.get("GLOBAL_EVENT_HOTKEYS") or []:
+            if str((row or {}).get("event_id") or "") == "ev_hotkey_zoom_cycle":
+                zoom_key = str((row or {}).get("key") or "z").strip() or "z"
+                break
+    except Exception:
+        pass
+    return [
+        {"id": "restart", "label": "초기화 (세이브 삭제)", "key": "d", "kind": "restart"},
+        {"id": "events", "label": "이벤트 피커", "key": "e", "kind": "picker"},
+        {"id": "overlay", "label": "HUD 오버레이", "key": "o", "kind": "cmd", "cmd": "toggle_show_overlay"},
+        {"id": "rotate3d", "label": "3D_ROTATE", "key": "q", "kind": "cmd", "cmd": "toggle_3d_rotate"},
+        {"id": "mask", "label": "이벤트존 마스크", "key": "m", "kind": "cmd", "cmd": "toggle_show_mask"},
+        {"id": "shear", "label": "쉬어", "key": "r", "kind": "cmd", "cmd": "toggle_shear_debug"},
+        {"id": "tilt", "label": "틸트", "key": "l", "kind": "cmd", "cmd": "toggle_tilt_demo"},
+        {"id": "zoom", "label": "줌 순환", "key": zoom_key, "kind": "cmd", "cmd": "cycle_zoom_debug"},
+    ]
+
+
+def _debug_feature_on(row: dict) -> bool | None:
+    """현재 on/off. 순환·피커·초기화는 None(상태 표시 없음)."""
+    kind = str(row.get("kind") or "")
+    if kind in ("restart",):
+        return None
+    if kind == "picker":
+        try:
+            return bool(event_picker_is_open())
+        except Exception:
+            return None
+    cmd = str(row.get("cmd") or "").strip().lower()
+    rt = FIELD_RUNTIME_UI
+    if cmd == "toggle_show_overlay":
+        return bool(getattr(rt, "show_overlay_text", False))
+    if cmd == "toggle_3d_rotate":
+        return bool(getattr(rt, "rotate3d_on", False)) or float(getattr(rt, "rotate3d_target", 0) or 0) > 0.02
+    if cmd == "toggle_show_mask":
+        return bool(getattr(rt, "show_mask", False))
+    if cmd == "toggle_shear_debug":
+        try:
+            default_shear = bool(CONFIG.get("TILT_SHEAR_ENABLED", False))
+        except Exception:
+            default_shear = False
+        if default_shear:
+            return not bool(getattr(rt, "shear_suppressed", False))
+        return bool(getattr(rt, "shear_debug_on", False))
+    if cmd == "toggle_tilt_demo":
+        return bool(getattr(rt, "tilt_bg_demo", False))
+    if cmd == "cycle_zoom_debug":
+        return None
+    return None
+
+
+def debug_panel_is_open() -> bool:
+    return bool(_DEBUG_PANEL.get("open"))
+
+
+def debug_panel_close() -> None:
+    _DEBUG_PANEL["open"] = False
+    _DEBUG_PANEL["row_hit"] = []
+    _DEBUG_PANEL["panel_rect"] = None
+    _DEBUG_PANEL["close_rect"] = None
+    _DEBUG_PANEL["confirm_restart"] = False
+
+
+def debug_panel_open() -> None:
+    _DEBUG_PANEL["confirm_restart"] = False
+    _DEBUG_PANEL["open"] = True
+
+
+def debug_panel_toggle() -> bool:
+    if debug_panel_is_open():
+        debug_panel_close()
+        return False
+    debug_panel_open()
+    return True
+
+
+def install_game_debug_button(ev_mgr) -> None:
+    """오른쪽 위 exit 아래 'debug' 버튼."""
+    if not _game_exit_overlay_enabled():
+        return
+    if not bool(getattr(ev_mgr, "game_debug_button_visible", False)):
+        return
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="debug",
+            font="default",
+            size=10,
+            pad_x=6,
+            pad_y=3,
+            color="210,230,255",
+            bg_color="36,48,64",
+            overlay_id=GAME_DEBUG_BTN_ID,
+            anchor="top_right",
+            margin_x=6,
+            margin_y=28,
+            clickable=True,
+            click_action="game_debug_open",
+        ),
+    )
+
+
+def hide_game_debug_button(ev_mgr) -> None:
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if callable(rm):
+        try:
+            rm(GAME_DEBUG_BTN_ID)
+        except Exception:
+            pass
+    debug_panel_close()
+
+
+def set_game_debug_button_visible(ev_mgr, visible: bool, *, persist: bool | None = None) -> None:
+    """GAME_DEBUG_BUTTON / GAME_EXIT_BUTTON 공통 — debug 버튼 표시."""
+    try:
+        ev_mgr.game_debug_button_visible = bool(visible)
+    except Exception:
+        pass
+    if persist is not None:
+        try:
+            ev_mgr._game_debug_button_persist = bool(persist)
+        except Exception:
+            pass
+    if bool(visible):
+        install_game_debug_button(ev_mgr)
+    else:
+        hide_game_debug_button(ev_mgr)
+
+
+def _debug_panel_layout(surf_w, surf_h):
+    rows = _debug_panel_rows()
+    row_h = 20
+    pad = 8
+    title_h = 22
+    n = len(rows) + (1 if _DEBUG_PANEL.get("confirm_restart") else 0)
+    panel_w = min(int(surf_w * 0.9), max(200, int(surf_w) - 16))
+    list_h = max(row_h, n * row_h)
+    panel_h = title_h + pad + list_h + pad + 14
+    panel_h = min(panel_h, int(surf_h) - 12)
+    px = max(4, (int(surf_w) - panel_w) // 2)
+    py = max(4, (int(surf_h) - panel_h) // 2)
+    panel = pygame.Rect(px, py, panel_w, panel_h)
+    close_r = pygame.Rect(panel.right - 22, panel.top + 4, 18, 14)
+    list_r = pygame.Rect(panel.left + pad, panel.top + title_h + 2, panel_w - pad * 2, panel_h - title_h - pad - 12)
+    return panel, close_r, list_r, row_h
+
+
+def draw_debug_panel(surf, *, font_title=None, font_row=None) -> None:
+    """논리 해상도 surf 위 디버그 설정 패널."""
+    if not debug_panel_is_open() or surf is None:
+        return
+    sw, sh = surf.get_width(), surf.get_height()
+    panel, close_r, list_r, row_h = _debug_panel_layout(sw, sh)
+    _DEBUG_PANEL["panel_rect"] = panel
+    _DEBUG_PANEL["close_rect"] = close_r
+
+    try:
+        dim = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 150))
+        surf.blit(dim, (0, 0))
+    except Exception:
+        pygame.draw.rect(surf, (0, 0, 0), surf.get_rect())
+
+    pygame.draw.rect(surf, (28, 36, 48), panel, border_radius=6)
+    pygame.draw.rect(surf, (100, 140, 180), panel, 1, border_radius=6)
+
+    if font_title is None:
+        try:
+            font_title = pygame.font.SysFont("malgungothic", 12)
+        except Exception:
+            font_title = pygame.font.Font(None, 14)
+    if font_row is None:
+        font_row = font_title
+
+    title = font_title.render("Debug", True, (220, 235, 255))
+    surf.blit(title, (panel.left + 8, panel.top + 4))
+    pygame.draw.rect(surf, (90, 50, 50), close_r, border_radius=3)
+    xlbl = font_row.render("x", True, (255, 220, 220))
+    surf.blit(xlbl, (close_r.centerx - xlbl.get_width() // 2, close_r.centery - xlbl.get_height() // 2))
+
+    hits = []
+    y = list_r.top
+    rows = _debug_panel_rows()
+    for row in rows:
+        rr = pygame.Rect(list_r.left, y, list_r.width, row_h)
+        on = _debug_feature_on(row)
+        if on is True:
+            pygame.draw.rect(surf, (40, 70, 55), rr, border_radius=3)
+        elif on is False:
+            pygame.draw.rect(surf, (40, 42, 48), rr, border_radius=3)
+        else:
+            pygame.draw.rect(surf, (38, 44, 56), rr, border_radius=3)
+        key = str(row.get("key") or "")
+        label = str(row.get("label") or "")
+        if on is True:
+            state = "ON"
+            scolor = (140, 230, 160)
+        elif on is False:
+            state = "OFF"
+            scolor = (160, 160, 170)
+        else:
+            state = "·"
+            scolor = (180, 190, 210)
+        left = f"[{key}] {label}"
+        img = font_row.render(left, True, (230, 235, 245))
+        max_w = rr.width - 36
+        if img.get_width() > max_w:
+            t = left
+            while t and font_row.size(t + "…")[0] > max_w:
+                t = t[:-1]
+            img = font_row.render(t + "…", True, (230, 235, 245))
+        surf.blit(img, (rr.left + 4, rr.top + max(0, (row_h - img.get_height()) // 2)))
+        simg = font_row.render(state, True, scolor)
+        surf.blit(simg, (rr.right - simg.get_width() - 4, rr.top + max(0, (row_h - simg.get_height()) // 2)))
+        hits.append((rr, dict(row)))
+        y += row_h
+
+    if _DEBUG_PANEL.get("confirm_restart"):
+        rr = pygame.Rect(list_r.left, y, list_r.width, row_h)
+        pygame.draw.rect(surf, (90, 40, 40), rr, border_radius=3)
+        img = font_row.render("세이브 삭제 후 재시작?  다시 탭", True, (255, 200, 190))
+        surf.blit(img, (rr.left + 4, rr.top + max(0, (row_h - img.get_height()) // 2)))
+        hits.append((rr, {"id": "restart_confirm", "kind": "restart_confirm"}))
+
+    hint = font_row.render("탭=토글 · 바깥/× 닫기", True, (140, 150, 165))
+    surf.blit(hint, (panel.left + 8, panel.bottom - 12))
+    _DEBUG_PANEL["row_hit"] = hits
+
+
+def debug_panel_handle(
+    event,
+    *,
+    ev_mgr,
+    cam=None,
+    flow=None,
+    map_id=None,
+    player=None,
+    event_data=None,
+    logical_xy=None,
+) -> str | None:
+    """
+    디버그 패널 입력.
+    Returns: "consumed" | None
+    """
+    if not debug_panel_is_open():
+        return None
+    if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_e):
+        # E 는 이벤트 피커와 겹칠 수 있어 패널만 닫음
+        if event.key == pygame.K_ESCAPE:
+            debug_panel_close()
+            return "consumed"
+    if event.type == pygame.MOUSEBUTTONDOWN and int(getattr(event, "button", 0) or 0) == 1:
+        if logical_xy is not None:
+            mx, my = int(logical_xy[0]), int(logical_xy[1])
+        else:
+            mx, my = int(event.pos[0]), int(event.pos[1])
+        close_r = _DEBUG_PANEL.get("close_rect")
+        panel = _DEBUG_PANEL.get("panel_rect")
+        if close_r is not None and close_r.collidepoint(mx, my):
+            debug_panel_close()
+            return "consumed"
+        for rr, row in list(_DEBUG_PANEL.get("row_hit") or []):
+            if not rr.collidepoint(mx, my):
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "restart_confirm" or (
+                kind == "restart" and _DEBUG_PANEL.get("confirm_restart")
+            ):
+                _DEBUG_PANEL["confirm_restart"] = False
+                apply_dev_runtime_command(
+                    "restart_delete_save",
+                    ev_mgr=ev_mgr,
+                    cam=cam,
+                    flow=flow,
+                    map_id=map_id,
+                    player=player,
+                )
+                return "consumed"
+            if kind == "restart":
+                _DEBUG_PANEL["confirm_restart"] = True
+                return "consumed"
+            if kind == "picker":
+                debug_panel_close()
+                try:
+                    event_picker_open(event_data if event_data is not None else {})
+                except Exception:
+                    pass
+                return "consumed"
+            if kind == "cmd":
+                cmd = str(row.get("cmd") or "").strip()
+                if cmd:
+                    apply_dev_runtime_command(
+                        cmd,
+                        ev_mgr=ev_mgr,
+                        cam=cam,
+                        flow=flow,
+                        map_id=map_id,
+                        player=player,
+                    )
+                _DEBUG_PANEL["confirm_restart"] = False
+                return "consumed"
+            return "consumed"
+        if panel is not None and not panel.collidepoint(mx, my):
+            debug_panel_close()
+            return "consumed"
+        return "consumed"
+    if event.type in (
+        pygame.MOUSEBUTTONDOWN,
+        pygame.MOUSEBUTTONUP,
+        pygame.MOUSEMOTION,
+        pygame.MOUSEWHEEL,
+    ):
+        return "consumed"
+    return None
 
 
 # =============================================================================
@@ -2121,6 +2467,10 @@ def handle_overlay_ui_click_action(
 
     if act == "game_exit_open":
         show_game_exit_confirm(ev_mgr)
+        return "consumed"
+
+    if act == "game_debug_open":
+        debug_panel_toggle()
         return "consumed"
 
     if act == "stop_fishing":

@@ -881,7 +881,8 @@
             "title": "본편 부팅(페이드인·필수 UI)",
             "steps": [
                 { "type": "FADEIN", "val": 1.0 },
-                { "type": "GAME_EXIT_BUTTON", "val": 1, "persist": true }
+                { "type": "GAME_EXIT_BUTTON", "val": 1, "persist": true },
+                { "type": "GAME_DEBUG_BUTTON", "val": 1, "persist": true }
             ],
             "result": {
                 "field_boot_ready": 1

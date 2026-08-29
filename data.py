@@ -609,7 +609,7 @@ CONFIG = {
         {"key": "r", "event_id": "ev_hotkey_shear"},  # 쉬어 토글
         {"key": "q", "event_id": "ev_hotkey_3d_rotate"},  # 3D_ROTATE 토글
         {"key": "F9", "event_id": "ev_hotkey_jump_shadow"},  # 점프 그림자 토글
-        {"key": "x", "event_id": "ev_hotkey_zoom_cycle"},  # 줌 순환
+        {"key": "z", "event_id": "ev_hotkey_zoom_cycle"},  # 줌 순환
         {"key": "y", "event_id": "ev_hotkey_cloud"},  # 구름 효과
         # e: 이벤트 피커(목록 모달) — GLOBAL_EVENT_HOTKEYS 가 아님. field_runtime EventPicker
     ],

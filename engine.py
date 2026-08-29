@@ -10793,6 +10793,9 @@ class EventManager:
         self.game_exit_button_visible = False  # 데모 시작 전에는 exit 버튼을 숨긴다.
         self._game_exit_button_visible_snapshot = False
         self._game_exit_button_persist = False
+        self.game_debug_button_visible = False
+        self._game_debug_button_visible_snapshot = False
+        self._game_debug_button_persist = False
         self.cursor_visible = True # 커서 가시성 제어 추가
         self._cursor_visible_persist = False  # True면 이벤트 종료 후에도 cursor_visible 유지
         self.last_ended_event_id = None  # 직전에 끝난 이벤트 ID (온보딩 후 스폰 등)
@@ -10909,6 +10912,8 @@ class EventManager:
         self._move_sync_group = None
         self._game_exit_button_visible_snapshot = bool(getattr(self, "game_exit_button_visible", False))
         self._game_exit_button_persist = False
+        self._game_debug_button_visible_snapshot = bool(getattr(self, "game_debug_button_visible", False))
+        self._game_debug_button_persist = False
         self._cursor_visible_persist = False
         self._loop_end_to_head, self._loop_pairs = _parse_loop_jump_table(event_list)
         self._selectbox_jump = _parse_selectbox_jump_table(event_list)
@@ -14706,6 +14711,17 @@ class EventManager:
             set_game_exit_button_visible(self, bool(visible), persist=bool(persist))
             self.next_step()
 
+        elif s_type == "GAME_DEBUG_BUTTON":
+            from field_runtime import parse_step_bool, parse_step_persist, set_game_debug_button_visible
+
+            visible = parse_step_bool(
+                step.get("val", step.get("on", step.get("show", True))),
+                True,
+            )
+            persist = parse_step_persist(step, default=False)
+            set_game_debug_button_visible(self, bool(visible), persist=bool(persist))
+            self.next_step()
+
         elif s_type == "PLACE":
             # 다중 target / all_npcs — 동일 pos는 사용자 책임(주로 dir/behavior 일괄용)
             tokens = _split_event_target_tokens(step.get("target"))
@@ -15922,6 +15938,15 @@ class EventManager:
             set_game_exit_button_visible(
                 self,
                 bool(getattr(self, "_game_exit_button_visible_snapshot", False)),
+                persist=False,
+                with_debug=False,
+            )
+        if not bool(getattr(self, "_game_debug_button_persist", False)):
+            from field_runtime import set_game_debug_button_visible
+
+            set_game_debug_button_visible(
+                self,
+                bool(getattr(self, "_game_debug_button_visible_snapshot", False)),
                 persist=False,
             )
         self._commit_persisted_entity_event_zooms()

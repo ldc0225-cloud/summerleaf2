@@ -3035,6 +3035,7 @@ STEP_TYPE_KO = {
     "PLAYER_VISIBLE": "플레이어 표시 (PLAYER_VISIBLE)",
     "CURSOR_VISIBLE": "커서 표시 (CURSOR_VISIBLE)",
     "GAME_EXIT_BUTTON": "종료 버튼 (GAME_EXIT_BUTTON)",
+    "GAME_DEBUG_BUTTON": "디버그 버튼 (GAME_DEBUG_BUTTON)",
     "FOLLOW_START": "따라가기 시작 (FOLLOW_START)",
     "FOLLOW_STOP": "따라가기 종료 (FOLLOW_STOP)",
     "CONDITION": "조건 분기 (CONDITION)",
@@ -3336,6 +3337,11 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "CURSOR_VISIBLE":
         return [("Val(true/false)", "val")]
     if t == "GAME_EXIT_BUTTON":
+        return [
+            ("표시 (val: true/false)", "val"),
+            ("이벤트 종료 후 유지 (persist)", "persist"),
+        ]
+    if t == "GAME_DEBUG_BUTTON":
         return [
             ("표시 (val: true/false)", "val"),
             ("이벤트 종료 후 유지 (persist)", "persist"),
@@ -3823,6 +3829,11 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
     if t == "WAIT" and empt("val"):
         step_fields["val"] = "1.0"
     elif t == "GAME_EXIT_BUTTON":
+        if empt("val"):
+            step_fields["val"] = "1"
+        if empt("persist"):
+            step_fields["persist"] = "false"
+    elif t == "GAME_DEBUG_BUTTON":
         if empt("val"):
             step_fields["val"] = "1"
         if empt("persist"):
@@ -5954,6 +5965,7 @@ def editor_main():
         "PLAYER_VISIBLE",
         "CURSOR_VISIBLE",
         "GAME_EXIT_BUTTON",
+        "GAME_DEBUG_BUTTON",
         "FOLLOW_START",
         "FOLLOW_STOP",
         "CONDITION",
@@ -8497,6 +8509,13 @@ def editor_main():
                                 p_raw = (step_fields.get("persist") or "").strip()
                                 if p_raw:
                                     new_step["persist"] = p_raw
+                            elif t == "GAME_DEBUG_BUTTON":
+                                v_raw = (step_fields.get("val") or "").strip()
+                                if v_raw != "":
+                                    new_step["val"] = v_raw
+                                p_raw = (step_fields.get("persist") or "").strip()
+                                if p_raw:
+                                    new_step["persist"] = p_raw
                             elif t in ("FOLLOW_START", "FOLLOW_STOP"):
                                 built = build_step_from_editor_fields(step_fields, t)
                                 if built:
@@ -10049,6 +10068,9 @@ def editor_main():
                                                     step.get("cmd") or step.get("command") or step.get("action", "") or ""
                                                 )
                                             elif t == "GAME_EXIT_BUTTON":
+                                                step_fields["val"] = str(step.get("val", "") or "")
+                                                step_fields["persist"] = "true" if step.get("persist") else ""
+                                            elif t == "GAME_DEBUG_BUTTON":
                                                 step_fields["val"] = str(step.get("val", "") or "")
                                                 step_fields["persist"] = "true" if step.get("persist") else ""
                                             elif t == "CAMERA":
