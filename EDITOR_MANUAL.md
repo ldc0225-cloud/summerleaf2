@@ -153,18 +153,27 @@ python editor.py
 
 ### 상호작용 → progress → 이벤트 (이벤트존 없이)
 
-NPC/오브젝트 클릭 시 `interact.bindings` 를 `mainprogress`·`progress_*` 등과 비교해 `events.json` 이벤트를 실행합니다.
+**권장 모델:** NPC/오브젝트 클릭 → `interact.enabled` + 조건 → `events.json` 이벤트 실행.  
+대화·분기·FX·MOVE 등은 전부 **그 이벤트의 스텝**으로 편집합니다 (`talk.lines` 는 구형·짧은 SAY 전용).
 
 | 설정 위치 | 에디터 |
 |-----------|--------|
-| NPC 타입 | 맵에서 NPC 선택 → **타입 기본값** → `Interact bindings` |
-| NPC 맵만 | **인스턴스** → interact 필드 |
+| NPC 타입 | 맵에서 NPC 선택 → **타입 기본값** → **상호작용→이벤트** (설정 + 전용 이벤트 1개) |
+| NPC 맵만 | **인스턴스** → 동일 (▶ 이벤트 편집 → EVENT 모드·우측 스텝 목록) |
 | 오브젝트 타입 | **타입 interact** → `object_defs.json` |
 | 오브젝트 맵만 | **맵 interact** → `world_data` `objects[].interact` |
 
 bindings 한 줄: `조건식 | event_id | priority` (조건 비우면 항상 참, priority 생략 시 100).  
-조건 문법은 GLOBAL `condition` 과 동일 (`mainprogress == "010200"`, `progress_flower_1 == 1001` 등).  
-매칭 없으면 NPC는 기존 `talk`, 오브젝트는 들기(CARRY)로 폴백합니다.
+작성 편의로 최상위만 써도 됩니다:
+
+```json
+"interact": { "enabled": true, "condition": "progress_x == 1", "event_id": "ev_…" }
+```
+
+(런타임에 `bindings` 한 줄로 펼쳐짐.)
+
+조건 문법은 GLOBAL `condition` 과 동일.  
+bindings 조건이 안 맞으면 이벤트는 안 뜸. bindings 가 **없을 때만** 구형 `talk.lines` / 오브젝트 들기(CARRY)로 폴백합니다.
 
 **CALL_EVENT 스텝:** `target` = `LOCAL` / `GLOBAL` / `SYNC` / `FRAGMENTS` 아무 이벤트 ID. 호출한 이벤트의 `result`는 끝날 때 세이브에 반영된 뒤 부모로 복귀합니다. 순환·깊이 초과는 런타임에서 감지합니다(최대 깊이 8).
 
@@ -215,13 +224,15 @@ bindings 한 줄: `조건식 | event_id | priority` (조건 비우면 항상 참
 
 - **strength 0** → 화면 평면(압축 없음)  
 - **strength 1** → `data.py`의 `TILT_FACTOR_MIN` 까지 최대 기울임  
+- **reverse_tilt** (선택): `true`면 쉬어 방향을 반대로(맵 윗쪽→왼쪽). 생략 시 맵 `field.reverse_tilt` 유지.  
 
-에디터 필드: `tilt_on`, `tilt_strength`, `tilt_duration_sec`
+에디터 필드: `tilt_on`, `tilt_strength`, `tilt_duration_sec`, `tilt_reverse`
 
 ### SHEAR (위쪽이 오른쪽으로 밀림)
 
 - **strength** 가 쉬어 강도 (`TILT_SHEAR_TOP_PX` 에 비례)  
 - 선택: `shear_px` 로 최대 픽셀 직접 지정  
+- 방향 반전은 TILT/`field.reverse_tilt` 로 제어 (SHEAR strength 와 독립)  
 
 에디터 필드: `shear_on`, `shear_strength`, `shear_duration_sec`, `shear_px`(선택)
 
@@ -246,6 +257,7 @@ bindings 한 줄: `조건식 | event_id | priority` (조건 비우면 항상 참
 
 ```json
 { "type": "TILT", "on": true, "strength": 0.8, "duration_sec": 1.0 }
+{ "type": "TILT", "on": true, "strength": 1.0, "duration_sec": 1.0, "reverse_tilt": true }
 { "type": "SHEAR", "on": true, "strength": 0.5, "duration_sec": 1.0 }
 { "type": "ZOOM", "on": true, "strength": 1.0, "duration_sec": 1.0 }
 ```

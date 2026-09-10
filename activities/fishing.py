@@ -1,6 +1,9 @@
 """
 activities.fishing — 호숫가 필드 낚시.
 
+  DEV_CMD: start_fishing / stop_fishing / return_from_fishing
+  나가기 버튼(stop_fishing) → ev_fishing_exit → return_from_fishing (맵 전환 없음)
+
 [물고기 그림자]
   - 수면 위로 랜덤 등장 → 제자리에서 방향 2~3회 변경하며 이동 → 5~15초 후 퇴장
   - 희귀할수록 수면 체류 시간 짧음 (data.py fish_types)
@@ -854,6 +857,7 @@ class FishingActivity(BaseFieldActivity):
             "win_value": 1,
             "reason": self._fail_reason,
             "elapsed": float(self._elapsed),
+            "exit_event_id": "ev_fishing_exit",
         }
 
     def _cast_charge_power_now(self) -> float:

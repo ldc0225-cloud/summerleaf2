@@ -7,23 +7,23 @@ activities — 필드 위 미니게임(그네·낚시·야구·레이스·황소
 [호출 — 이벤트에서 직관적으로]
   { "type": "DEV_CMD", "cmd": "start_fishing" }
   { "type": "DEV_CMD", "cmd": "start_fishing", "pond": "jjangpu_pond" }
+  OVERLAY_UI click_action: stop_fishing → ev_fishing_exit → return_from_fishing
 
   범용 형태 (추가 활동용):
   { "type": "DEV_CMD", "cmd": "start_activity_baseball" }
 
 [야구]
   { "type": "DEV_CMD", "cmd": "start_baseball" }
-  { "type": "DEV_CMD", "cmd": "start_baseball", "mode": "story" }
-  OVERLAY_UI click_action: stop_baseball
+  퇴장: ev_baseball_exit 의 MAP 이 착지. return_from_baseball 은 오버레이·카메라·세이브만.
 
 [레이스]
   { "type": "DEV_CMD", "cmd": "start_racing", "map": "bg_town" }
-  OVERLAY_UI click_action: stop_racing
+  퇴장: ev_racing_exit 의 MAP 이 착지. return_from_racing 은 정리만.
 
 [황소개구리]
   { "type": "DEV_CMD", "cmd": "start_bullfrog", "map": "bg_pond01",
     "return_map": "bg_jjangpu", "return_pos": [816, 2304] }
-  OVERLAY_UI click_action: stop_bullfrog
+  return_map 은 퇴장 이벤트 켤지 여부. 착지는 ev_bullfrog_exit 의 MAP.
 
 [징검다리 — 황소개구리 축약, 맵 전환 없음]
   { "type": "DEV_CMD", "cmd": "start_lotus_cross", "from_side": "a" }

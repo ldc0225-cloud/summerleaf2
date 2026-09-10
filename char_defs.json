@@ -3,38 +3,35 @@
     "type": "adult",
     "jump_max_gap": 30,
     "name": "당근",
-    "display_name": "carrot",
+    "display_name": "당근",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "randomwalk"
+      "mode": "idle"
     }
   },
   "broccoli_a": {
     "type": "adult",
     "jump_max_gap": 30,
     "name": "브로콜리",
-    "display_name": "broccoli",
+    "display_name": "브로콜리",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "randomwalk"
+      "mode": "idle"
     }
-  },
-  "summer": {
-    "jump_max_gap": 30
-  },
+  },  
   "babydino": {
     "type": "animal",
     "jump_max_gap": 30,
     "name": "아기공룡",
-    "display_name": "babydino",
+    "display_name": "아기공룡",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -46,14 +43,10 @@
   },
   "dog": {
     "type": "animal",
-    "jump_max_gap": 30
-  },
-  "nachos_a": {
-    "type": "adult",
     "jump_max_gap": 30,
     "mask_nav": true,
-    "name": "나쵸",
-    "display_name": "nachos",
+    "name": "강아지",
+    "display_name": "강아지",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -61,6 +54,21 @@
     },
     "behavior": {
       "mode": "randomwalk"
+    }
+  },
+  "nachos_a": {
+    "type": "adult",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "name": "나쵸",
+    "display_name": "나쵸",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
     }
   },
   "redtilefish_a": {
@@ -75,7 +83,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "randomwalk"
+      "mode": "idle"
     }
   },
   "jjanga_a": {
@@ -90,7 +98,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "randomwalk"
+      "mode": "idle"
     }
   },
   "firefly_a": {
@@ -120,7 +128,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "randomwalk"
+      "mode": "idle"
     }
   },
   "sugar_a": {
@@ -135,7 +143,7 @@
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "randomwalk"
+      "mode": "idle"
     }
   },
   "ppiyak_a": {
@@ -143,48 +151,16 @@
     "jump_max_gap": 30,
     "mask_nav": true,
     "name": "삐약이선생님",
-    "display_name": "ppiyak",
+    "display_name": "삐약이선생님",
     "interact": {
       "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
-      "mode": "randomwalk"
+      "mode": "idle"
     }
-  },
-  "c3": {
-    "jump_max_gap": 30
-  },
-  "c4": {
-    "jump_max_gap": 30
-  },
-  "c5": {
-    "jump_max_gap": 30
-  },
-  "c6": {
-    "type": "adult",
-    "jump_max_gap": 30,
-    "name": "여름이",
-    "display_name": "c6",
-    "interact": {
-      "enabled": false,
-      "range": 48.0,
-      "face_player_on_talk": true
-    },
-    "behavior": {
-      "mode": "randomwalk"
-    }
-  },
-  "c7": {
-    "jump_max_gap": 30
-  },
-  "c8": {
-    "jump_max_gap": 30
-  },
-  "c9": {
-    "jump_max_gap": 30
-  },
+  },    
   "summer_k": {
     "type": "kid",
     "jump_max_gap": 30,
@@ -193,81 +169,13 @@
     "display_name": "여름이",
     "interact": {
       "enabled": false,
-      "range": 52.0,
-      "face_player_on_talk": true
-    },
-    "behavior": {
-      "mode": "randomplay"
-    },
-    "talk": {
-      "lines": [
-        {
-          "id": "line1",
-          "when": "progress_c10_talk == 0",
-          "say": {
-            "who": "summer_k",
-            "text": "안녕! 여기는 짱푸 공원이야. 처음 왔구나?",
-            "show_name": true
-          },
-          "after": {
-            "progress_summer_k_talk": 1,
-            "progress_summer_k_affinity": 5
-          }
-        },
-        {
-          "id": "line2",
-          "when": "progress_summer_k_affinity >= 10",
-          "say": {
-            "who": "summer_k",
-            "text": "너랑 이야기하는 건 재밌어. 또 놀자!",
-            "show_name": true
-          },
-          "after": {
-            "progress_summer_k_affinity": 15
-          }
-        },
-        {
-          "id": "line3",
-          "when": "mainprogress == 010100",
-          "say": {
-            "who": "summer_k",
-            "text": "저기 벤치에 앉으면 쉬기 좋아.",
-            "show_name": true
-          }
-        },
-        {
-          "id": "line4",
-          "when": "progress_summer_k_talk == 1",
-          "say": {
-            "who": "summer_k",
-            "text": "오늘도 산책이야? 날씨가 좋네.",
-            "show_name": true
-          }
-        }
-      ],
-      "fallback": {
-        "say": {
-          "text": "…",
-          "show_name": false
-        }
-      }
-    }
-  },
-  "boy1_k": {
-    "type": "kid",
-    "jump_max_gap": 30,
-    "mask_nav": true,
-    "name": "boy1",
-    "display_name": "boy1",
-    "interact": {
-      "enabled": false,
       "range": 48.0,
       "face_player_on_talk": true
     },
     "behavior": {
       "mode": "randomplay"
     }
-  },
+  },  
   "rockie_k": {
     "type": "kid",
     "jump_max_gap": 30,
@@ -346,7 +254,8 @@
   "fairy1": {
     "type": "kid",
     "jump_max_gap": 30,
-    "display_name": "fairy1",
+    "mask_nav": true,
+    "display_name": "들꽃요정",
     "name": "들꽃요정",
     "interact": {
       "enabled": false,
@@ -361,8 +270,23 @@
     "type": "animal",
     "jump_max_gap": 30,
     "mask_nav": true,
-    "display_name": "frog01",
-    "name": "개구리",
+    "display_name": "폴짝이",
+    "name": "폴짝이",
+    "interact": {
+      "enabled": false,
+      "range": 48.0,
+      "face_player_on_talk": true
+    },
+    "behavior": {
+      "mode": "idle"
+    }
+  },
+  "tadpole01": {
+    "type": "animal",
+    "jump_max_gap": 30,
+    "mask_nav": true,
+    "display_name": "올챙이",
+    "name": "올챙이",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -375,9 +299,9 @@
   "bullfrog": {
     "type": "animal",
     "jump_max_gap": 30,
-    "mask_nav": true,
-    "display_name": "frog01",
-    "name": "개구리",
+    "mask_nav": false,
+    "display_name": "황소개구리",
+    "name": "황소개구리",
     "interact": {
       "enabled": false,
       "range": 48.0,
@@ -389,82 +313,27 @@
   },
   "flower_fairy1": {
     "type": "kid",
-    "jump_max_gap": 30,
-    "display_name": "들꽃요정",
+    "jump_max_gap": 0,
+    "mask_nav": true,    
+    "name": "들꽃요정",
+    "display_name": "들꽃요정",    
     "spawn_state": {
-      "visible": false,
       "dir": "left"
     },
-    "progress_apply": [
-      {
-        "when": "progress_flower1_1 < 1003",
-        "visible": false
-      },
-      {
-        "when": "progress_flower1_1 == 1003",
-        "visible": true,
-        "anim": "idle",
-        "anim_mode": "hold",
-        "dir": "left"
-      },
-      {
-        "when": "progress_flower1_1 == 1006",
-        "visible": false
-      },
-      {
-        "when": "progress_flower1_1 >= 1004",
-        "visible": true,
-        "anim": "jump",
-        "anim_mode": "hold",
-        "dir": "left",
-        "entity_fx": {
-          "mode": "pulse"
-        }
-      }
-    ],
     "interact": {
-      "enabled": true,
+      "enabled": false,
       "range": 16.0,
       "offset": [
         0.0,
         -10.0
       ],
       "bindings": [
-        {
-          "condition": "progress_wateringcan==1002",
-          "event_id": "ev_flower1_3",
-          "priority": 100
-        },
-        {
-          "condition": "progress_flower1_1>=1004",
-          "event_id": "ev_flower1_4",
-          "priority": 100
-        },
-        {
-          "condition": "progress_flower1_1==1006",
-          "event_id": "ev_flower1_5_2b",
-          "priority": 100
-        }
       ],
       "face_player_on_talk": true
     },
     "behavior": {
       "mode": "idle"
-    },
-    "talk": {
-      "lines": [
-        {
-          "id": "line1",
-          "say": {
-            "who": "flower_fairy1",
-            "text": "물..이.. 필요해.....",
-            "show_name": true
-          },
-          "when": "progress_flower1_1 == 1003"
-        }
-      ]
-    },
-    "name": "flower_fairy1"
+    }    
   },
   "lotusleaf1": {
     "jump_max_gap": 30

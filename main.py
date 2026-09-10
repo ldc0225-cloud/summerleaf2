@@ -5,6 +5,7 @@ import time
 import gc
 import atexit
 import statistics
+import copy
 import pygame, math
 from collections import deque
 from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS
@@ -22,6 +23,9 @@ from flow import (
     collect_active_zone_blocks,
     find_zone_block_at,
     try_trigger_zone_block_say,
+    iter_save_progress_vars,
+    eval_session_vars,
+    zone_conditions_ok,
 )
 from engine import Player, FieldItem, BaseCharacter, Camera, EventManager, MusicManager, mask_terrain_class
 import engine as engine_mod
@@ -34,6 +38,8 @@ from field_runtime import (
     auto_res_zoom_out_trigger,
     native_world_zoom_draw,
     tilt_shear_effective,
+    shear_reverse_active,
+    shear_screen_x_offset,
     apply_map_field_defaults,
     apply_pending_camera_command,
     ui_layout_scale,
@@ -42,7 +48,7 @@ from field_runtime import (
     apply_dev_runtime_command,
     install_game_exit_button,
     handle_overlay_ui_click_action,
-    game_exit_confirm_open,
+    field_overlay_modal_open,
     app_force_quit_combo_pressed,
     app_force_quit_feed_event,
     app_force_quit_combo_a_held,
@@ -57,6 +63,7 @@ from field_runtime import (
     event_picker_handle,
     draw_event_picker,
     install_game_debug_button,
+    install_game_options_button,
     debug_panel_is_open,
     debug_panel_handle,
     draw_debug_panel,
@@ -168,6 +175,25 @@ def get_ui_font(size: int, slot: str = "ui"):
         f = OutlinedUIFont(pygame.font.SysFont("arial", size_i), font_key="default")
     _UI_FONT_CACHE[key] = f
     return f
+
+
+def _make_overlay_hud_font():
+    """
+    O키 HUD·존 라벨 폰트.
+    대화/OVERLAY_UI와 같이 320 설계폭 기준으로 스케일한다.
+    (예전 get_ui_font(10)은 640 기준 고정이라, NATIVE_640을 320 창에 줄이면 너무 작아 보였음.)
+    """
+    try:
+        from engine import font_profile_size_px
+
+        sz = font_profile_size_px("ui")
+    except Exception:
+        try:
+            s320 = float(CONFIG.get("OVERLAY_HUD_FONT_SIZE_320", 12) or 12)
+        except (TypeError, ValueError):
+            s320 = 12.0
+        sz = max(8, int(round(scale_ui_text_px(s320))))
+    return get_ui_font(sz, slot="ui")
 
 
 def activity_font_fn(activity_id: str | None = None):
@@ -648,10 +674,11 @@ def rss_mb():
     return None
 
 
-def _screen_to_world_field(mx, my, *, cam, cam_x_start, cam_y_start, player, bg_h, tilt_current, tilt_eps, shear_smoothed):
+def _screen_to_world_field(mx, my, *, cam, cam_x_start, cam_y_start, player, bg_h, tilt_current, tilt_eps, shear_smoothed, shear_reverse=False):
     """
     쉬어/틸트가 켜져도 '클릭한 곳'이 맞도록 screen(px) → world(px) 역변환.
     렌더링에서 오브젝트가 쓰는 변환을 역으로 적용한다.
+    shear_reverse: True면 윗쪽→왼쪽 쉬어(리버스 틸트) 기준 역변환.
     """
     try:
         zoom = snap_render_zoom(float(cam.current_zoom))
@@ -720,7 +747,19 @@ def _screen_to_world_field(mx, my, *, cam, cam_x_start, cam_y_start, player, bg_
     h = max(1.0, h)
     rel = (float(my) - top) / h
     rel = 0.0 if rel < 0.0 else (1.0 if rel > 1.0 else rel)
-    xoff = (1.0 - rel) * float(shear_eff)
+    # BG_VIEWPORT_BLIT_ENABLED=False 기본: blit_x=bg → 리버스는 +rel*S (부호 반전 아님)
+    try:
+        blit_shifted = bool(CONFIG.get("BG_VIEWPORT_BLIT_ENABLED", False))
+    except Exception:
+        blit_shifted = False
+    xoff = float(
+        shear_screen_x_offset(
+            rel,
+            shear_eff,
+            reverse=bool(shear_reverse),
+            blit_origin_shifted=bool(blit_shifted),
+        )
+    )
 
     dx_raw = float(mx) - xoff
     wx = float(cam_x_start) + float(dx_raw) / zoom
@@ -776,12 +815,12 @@ def _screen_to_world_from_render_xform(mx, my, *, xf):
     f_q = max(1e-6, float(f_q))
     y0 = bg_dy + (my - bg_dy - shift_y) / f_q
 
-    # 3) 쉬어 x 역변환 (x_offset_fn의 역)
+    # 3) 쉬어 x 역변환 (x_offset_fn의 역). shear_reverse 시 부호 반전.
     try:
         shear_eff = float(xf.get("shear_eff", 0.0))
     except Exception:
         shear_eff = 0.0
-    if shear_eff > 0.0:
+    if abs(shear_eff) > 0.0:
         try:
             h = float(xf.get("shear_h", 1.0))
         except Exception:
@@ -790,7 +829,14 @@ def _screen_to_world_from_render_xform(mx, my, *, xf):
         top = float(bg_dy) + float(shift_y)
         rel = (float(my) - top) / h
         rel = 0.0 if rel < 0.0 else (1.0 if rel > 1.0 else rel)
-        xoff = (1.0 - rel) * float(shear_eff)
+        xoff = float(
+            shear_screen_x_offset(
+                rel,
+                abs(float(shear_eff)),
+                reverse=bool(xf.get("shear_reverse", False)),
+                blit_origin_shifted=bool(xf.get("shear_blit_shifted", False)),
+            )
+        )
         x0 = float(mx) - xoff
     else:
         x0 = float(mx)
@@ -906,6 +952,45 @@ def _player_feet_screen_xy_like_draw(px, py, cam_draw_x, cam_draw_y, z, y_transf
     )
 
 
+def _onboarding_boot_phase(flow) -> int:
+    try:
+        return int(getattr(flow, "boot_phase", 2) or 0)
+    except (TypeError, ValueError):
+        return 2
+
+
+def _char_select_boot_phase() -> int:
+    try:
+        return int(CONFIG.get("CHAR_SELECT_BOOT_PHASE", 15) or 15)
+    except (TypeError, ValueError):
+        return 15
+
+
+def _is_onboarding_save_blocked(flow, field_activities=None) -> bool:
+    """
+    인트로/데모/캐릭터선택 중에는 디스크 세이브를 막는다.
+    (데모 PLACE·FOLLOW 가 본편 세이브를 덮거나, 선택 UI 중 종료로
+     player_char_selected:false 가 굳는 것을 방지)
+    """
+    bp = _onboarding_boot_phase(flow)
+    if bp < 2:
+        return True
+    if bp == _char_select_boot_phase():
+        return True
+    if bool(getattr(flow, "pending_new_game_after_char_select", False)):
+        return True
+    if bool(getattr(flow, "pending_char_select_spawn_after_fade", False)):
+        return True
+    try:
+        if field_activities is not None:
+            cid = getattr(field_activities, "active_id", None)
+            if str(cid or "").strip() == "char_select":
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _save_game_with_activity_anchor(
     flow, field_activities, map_id, player_pos, *, objs=None, npcs=None, ev_mgr=None
 ):
@@ -919,6 +1004,9 @@ def _save_game_with_activity_anchor(
     objs/npcs 를 넘기면 PLACE persist 엔티티 위치·behavior 도 함께 스냅샷.
     ev_mgr 를 넘기면 FOLLOW persist 동행 리더·속도도 placed 에 기록.
     """
+    if _is_onboarding_save_blocked(flow, field_activities):
+        print("[save] skipped — onboarding (intro/demo/char_select)")
+        return
     ov = None
     try:
         ov = field_activities.get_save_location_override()
@@ -1034,6 +1122,8 @@ def _spawn_new_game_after_char_select(flow, field_activities, ev_mgr, *, cam=Non
     flow.pending_char_select_spawn_after_fade = False
     flow.save_data["current_map"] = CONFIG["NEW_GAME_SPAWN_MAP"]
     flow.save_data["player_pos"] = list(CONFIG["NEW_GAME_SPAWN_POS"])
+    # 본편 진입으로 표시한 뒤 세이브 (boot_phase=15 이면 onboarding 가드에 막힘)
+    flow.boot_phase = 2
     loaded = flow.load_map(
         save_data={
             "current_map": flow.save_data["current_map"],
@@ -1042,7 +1132,6 @@ def _spawn_new_game_after_char_select(flow, field_activities, ev_mgr, *, cam=Non
         }
     )
     if loaded is None:
-        flow.boot_phase = 2
         return None
     map_id, bg, mask, player, objs, npcs = loaded
     flow.save_data["player_pos"] = [int(player.pos[0]), int(player.pos[1])]
@@ -1050,7 +1139,6 @@ def _spawn_new_game_after_char_select(flow, field_activities, ev_mgr, *, cam=Non
         _save_game_with_activity_anchor(flow, field_activities, map_id, player.pos)
     except Exception:
         pass
-    flow.boot_phase = 2
     if cam is not None:
         try:
             cam.snap_to(player.pos)
@@ -1064,6 +1152,14 @@ def _spawn_new_game_after_char_select(flow, field_activities, ev_mgr, *, cam=Non
         f"스폰 맵={map_id}, pos={flow.save_data['player_pos']}"
     )
     return loaded
+
+
+def _should_start_fishing_exit_event(act_res):
+    """낚시 종료(그만두기·성공·실패) 후 ev_fishing_exit. 맵 전환 없음."""
+    return (
+        isinstance(act_res, dict)
+        and str(act_res.get("activity") or "").strip() == "fishing"
+    )
 
 
 def _should_start_baseball_exit_event(act_res):
@@ -1228,6 +1324,46 @@ def _try_start_bullfrog_exit_event(
     return True
 
 
+def _try_start_fishing_exit_event(
+    flow,
+    ev_mgr,
+    events_catalog,
+    act_res,
+    *,
+    field_tilt_snapshot=None,
+):
+    if not _should_start_fishing_exit_event(act_res):
+        return False
+    from flow import start_system_event
+
+    event_id = str(act_res.get("exit_event_id") or "ev_fishing_exit").strip()
+    if not start_system_event(
+        ev_mgr,
+        events_catalog,
+        event_id,
+        field_tilt_snapshot=field_tilt_snapshot,
+    ):
+        try:
+            ev_mgr.remove_ui_overlay("fishing_exit")
+        except Exception:
+            pass
+        try:
+            ev_mgr.pending_camera_command = {
+                "mode": "follow_player",
+                "smooth": True,
+                "duration_sec": 0.5,
+            }
+        except Exception:
+            pass
+        return False
+    try:
+        ev_mgr.remove_ui_overlay("fishing_exit")
+    except Exception:
+        pass
+    print(f"[fishing] exit event started: {event_id}")
+    return True
+
+
 def _process_activity_finished(
     flow,
     ev_mgr,
@@ -1288,6 +1424,14 @@ def _process_activity_finished(
         flow.pending_char_select_spawn_after_fade = True
         return None
     if _try_start_baseball_exit_event(
+        flow,
+        ev_mgr,
+        events_catalog,
+        act_res,
+        field_tilt_snapshot=field_tilt_snapshot,
+    ):
+        return None
+    if _try_start_fishing_exit_event(
         flow,
         ev_mgr,
         events_catalog,
@@ -1374,6 +1518,10 @@ def main():
 
     # 자동 가변 해상도 전환(옵션): 월드 줌 2x "완료" 시 320x240 업스케일로 전환 + 줌 1x로 리맵
     auto_res_enabled = bool(CONFIG.get("AUTO_OUTPUT_MODE_ENABLED", False))
+    try:
+        auto_res_allow_native_640 = bool(CONFIG.get("AUTO_OUTPUT_MODE_ALLOW_NATIVE_640", True))
+    except Exception:
+        auto_res_allow_native_640 = True
     auto_zoom_in_trigger = auto_res_zoom_in_trigger()
     auto_zoom_out_trigger = auto_res_zoom_out_trigger()
     try:
@@ -1398,6 +1546,9 @@ def main():
             pass
         m = str(mode or "").strip().upper()
         if m not in ("UPSCALE_320", "NATIVE_640"):
+            m = "UPSCALE_320"
+        # 논리 320 고정: NATIVE_640 요청도 UPSCALE_320 으로 강제
+        if (not auto_res_allow_native_640) and m == "NATIVE_640":
             m = "UPSCALE_320"
         output_mode = m
         fullscreen_on = bool(fullscreen)
@@ -1483,7 +1634,7 @@ def main():
     shear_mask_strip_tmp = None
     vp_bg_scale_tmp = None  # BG_VIEWPORT: 맵 크롭→스케일 재사용 버퍼
 
-    font = get_ui_font(10)
+    font = _make_overlay_hud_font()
 
     # 하드웨어 마우스 커서:
     # - PC에선 커서가 보이는 게 디버그/조작에 유리
@@ -1511,6 +1662,8 @@ def main():
     had_save_at_launch = os.path.isfile(flow.save_path)
     needs_char_select_at_launch = needs_player_char_select(flow.save_data, CONFIG)
     save_spawn_snapshot = None
+    # 이어하기용: 데모 중 PLACE/FOLLOW 가 메모리를 더럽혀도 디스크 원본으로 복구
+    onboarding_continue_save = None
     if (
         had_save_at_launch
         and not needs_char_select_at_launch
@@ -1521,6 +1674,10 @@ def main():
             "current_map": flow.save_data.get("current_map"),
             "player_pos": flow.save_data.get("player_pos"),
         }
+        try:
+            onboarding_continue_save = copy.deepcopy(flow.save_data)
+        except Exception:
+            onboarding_continue_save = None
     # 본편 부팅 auto(ev_gl_field_boot): 매 실행 세션당 1회만 돌도록 래치 리셋
     try:
         flow.save_data["field_boot_ready"] = 0
@@ -1529,6 +1686,7 @@ def main():
     print(
         f"[온보딩] launch had_save={had_save_at_launch} "
         f"needs_char_select={needs_char_select_at_launch} "
+        f"player_char_selected={flow.save_data.get('player_char_selected')!r} "
         f"mainprogress={flow.save_data.get('mainprogress')}"
     )
 
@@ -1545,6 +1703,7 @@ def main():
     ev_mgr.set_fragment_catalog(fragment_catalog)
     install_game_exit_button(ev_mgr)
     install_game_debug_button(ev_mgr)
+    install_game_options_button(ev_mgr)
     _restore_followers_from_save(ev_mgr, flow, map_id, objs=objs, npcs=npcs, player=player)
 
     def _reload_event_bundles():
@@ -1583,7 +1742,7 @@ def main():
             flow.save_data,
             target_map_id,
             events_catalog,
-            session_vars={"gamestart": flow.boot_phase},
+            session_vars=eval_session_vars(flow),
         )
 
     def _try_start_pending_sync_event():
@@ -1795,6 +1954,27 @@ def main():
     world_zoom_off_x = 0.0
     world_zoom_off_y = 0.0
     world_zoom_draw = 1.0
+    world_zoom_use_cam_fov = False
+    # 320 고정 + 기본 줌 2.0: 처음부터 줌치환(mul)을 걸어 시야를 640@2.0 과 맞춤
+    if (
+        auto_res_enabled
+        and (not auto_res_allow_native_640)
+        and str(output_mode).strip().upper() == "UPSCALE_320"
+    ):
+        auto_res_zoom_mul = float(upscale_factor)
+        try:
+            _zd0 = native_world_zoom_draw(
+                world_zoom_current, output_mode, auto_res_zoom_mul
+            )
+        except Exception:
+            _zd0 = max(1e-6, float(world_zoom_current) / float(upscale_factor))
+        # 카메라 시야로 옮김(후처리 draw=1). zoom2 → cam 1.0, zoom1 → cam 0.5
+        world_zoom_use_cam_fov = True
+        try:
+            cam._force_view_zoom = max(1e-6, float(_zd0))
+        except Exception:
+            pass
+        world_zoom_draw = 1.0
     world_zoom_tmp = None  # 스케일 결과 재사용 버퍼
     rotate3d_tmp = None
     rotate3d_mask_tmp = None
@@ -2029,12 +2209,28 @@ def main():
     last_move_key = None
 
     def _auto_res_to_native640():
-        """320(UPSCALE) + 줌2x 치환 상태 → 640(NATIVE)으로 복귀. world_zoom은 640 기준(1.0~2.0) 유지."""
+        """줌아웃 준비.
+
+        ALLOW_NATIVE_640=True: 320+줌치환 → 640(NATIVE)으로 복귀 (mul=1, zoom 1~2 그대로).
+        ALLOW_NATIVE_640=False: 논리는 320 유지. mul=UPSCALE_FACTOR 유지 → draw=zoom/mul 로 시야만 넓힘.
+        """
         nonlocal output_mode, auto_res_zoom_mul, last_auto_switch_ms
         if not auto_res_enabled:
             return
         if rotate3d_res_snapshot is not None:
             # Mode7 강제 320 중에는 640으로 되돌리지 않음
+            return
+        if not auto_res_allow_native_640:
+            # 320 고정: 해상도 전환 없이 줌치환 배수만 보장
+            if output_mode != "UPSCALE_320" or float(auto_res_zoom_mul) <= 1.0 + 1e-6:
+                prev_sf = float(scale_factor)
+                _apply_output_mode(mode="UPSCALE_320", fullscreen=fullscreen_on)
+                _after_resolution_change(prev_scale_factor=prev_sf)
+                auto_res_zoom_mul = float(upscale_factor)
+                try:
+                    _preserve_cam_world_center(cam, bg_w, bg_h)
+                except Exception:
+                    pass
             return
         if output_mode == "NATIVE_640" and float(auto_res_zoom_mul) <= 1.0:
             return
@@ -2069,9 +2265,7 @@ def main():
                 # 강제 꺼진 뒤 남은 스냅샷만 정리
                 rotate3d_res_snapshot = None
             return
-        # SCREEN hi_res(640) 가 우선
-        if getattr(ev_mgr, "active_screen", None) and ev_mgr.active_screen.get("hi_res"):
-            return
+        # SCREEN은 논리 해상도를 바꾸지 않음 — 여기서 640 전환을 막지 않는다.
         if rotate3d_on:
             need_320 = (
                 str(output_mode).strip().upper() != "UPSCALE_320"
@@ -2118,9 +2312,13 @@ def main():
         restore_mode = str(snap.get("output_mode") or "NATIVE_640").strip().upper()
         if restore_mode not in ("UPSCALE_320", "NATIVE_640"):
             restore_mode = "NATIVE_640"
+        if not auto_res_allow_native_640:
+            restore_mode = "UPSCALE_320"
         _apply_output_mode(mode=restore_mode, fullscreen=fullscreen_on)
         _after_resolution_change(prev_scale_factor=prev_sf)
         auto_res_zoom_mul = float(snap.get("auto_res_zoom_mul", 1.0))
+        if not auto_res_allow_native_640 and float(auto_res_zoom_mul) <= 1.0 + 1e-6:
+            auto_res_zoom_mul = float(upscale_factor)
         try:
             world_zoom_current = float(snap.get("world_zoom_current", world_zoom_current))
             world_zoom_target = float(snap.get("world_zoom_target", world_zoom_target))
@@ -2145,55 +2343,35 @@ def main():
         last_auto_switch_ms = int(pygame.time.get_ticks())
 
     def _sync_screen_hi_res_output():
-        """SCREEN hi_res 활성 시 NATIVE_640(640x480), 종료 후 이전 출력 모드 복구."""
+        """SCREEN 오버레이는 출력 모드를 바꾸지 않음.
+
+        예전 hi_res 가 NATIVE_640 으로 잠깐 올렸던 스냅샷만 있으면 복구한다.
+        그림은 draw_screen_overlay 가 현재 논리 화면(보통 320×240)에 맞춰 스케일.
+        """
         nonlocal output_mode, auto_res_zoom_mul, world_zoom_current, world_zoom_target, last_auto_switch_ms
-        scr = getattr(ev_mgr, "active_screen", None)
-        wants = bool(scr and scr.get("hi_res"))
         snap = getattr(ev_mgr, "screen_hi_res_snapshot", None)
-        if wants:
-            need_native = (
-                str(output_mode).strip().upper() != "NATIVE_640"
-                or float(auto_res_zoom_mul) > 1.0
-            )
-            if need_native:
-                if snap is None:
-                    ev_mgr.screen_hi_res_snapshot = {
-                        "output_mode": output_mode,
-                        "auto_res_zoom_mul": float(auto_res_zoom_mul),
-                        "world_zoom_current": float(world_zoom_current),
-                        "world_zoom_target": float(world_zoom_target),
-                    }
-                prev_sf = float(scale_factor)
-                _apply_output_mode(mode="NATIVE_640", fullscreen=fullscreen_on)
-                _after_resolution_change(prev_scale_factor=prev_sf)
-                auto_res_zoom_mul = 1.0
-                try:
-                    _preserve_cam_world_center(cam, bg_w, bg_h)
-                except Exception:
-                    pass
-                last_auto_switch_ms = int(pygame.time.get_ticks())
+        if snap is None:
             return
-        if snap is not None:
-            prev_sf = float(scale_factor)
-            restore_mode = str(snap.get("output_mode") or "UPSCALE_320").strip().upper()
-            if restore_mode not in ("UPSCALE_320", "NATIVE_640"):
-                restore_mode = "UPSCALE_320"
-            _apply_output_mode(mode=restore_mode, fullscreen=fullscreen_on)
-            _after_resolution_change(prev_scale_factor=prev_sf)
-            auto_res_zoom_mul = float(snap.get("auto_res_zoom_mul", 1.0))
-            try:
-                world_zoom_current = float(snap.get("world_zoom_current", world_zoom_current))
-                world_zoom_target = float(snap.get("world_zoom_target", world_zoom_target))
-            except (TypeError, ValueError):
-                pass
-            try:
-                if restore_mode == "UPSCALE_320" and float(auto_res_zoom_mul) > 1.0:
-                    _auto_res_compensate_follow_offset(cam, prev_sf, float(scale_factor))
-                _preserve_cam_world_center(cam, bg_w, bg_h)
-            except Exception:
-                pass
-            ev_mgr.screen_hi_res_snapshot = None
-            last_auto_switch_ms = int(pygame.time.get_ticks())
+        prev_sf = float(scale_factor)
+        restore_mode = str(snap.get("output_mode") or "UPSCALE_320").strip().upper()
+        if restore_mode not in ("UPSCALE_320", "NATIVE_640"):
+            restore_mode = "UPSCALE_320"
+        _apply_output_mode(mode=restore_mode, fullscreen=fullscreen_on)
+        _after_resolution_change(prev_scale_factor=prev_sf)
+        auto_res_zoom_mul = float(snap.get("auto_res_zoom_mul", 1.0))
+        try:
+            world_zoom_current = float(snap.get("world_zoom_current", world_zoom_current))
+            world_zoom_target = float(snap.get("world_zoom_target", world_zoom_target))
+        except (TypeError, ValueError):
+            pass
+        try:
+            if restore_mode == "UPSCALE_320" and float(auto_res_zoom_mul) > 1.0:
+                _auto_res_compensate_follow_offset(cam, prev_sf, float(scale_factor))
+            _preserve_cam_world_center(cam, bg_w, bg_h)
+        except Exception:
+            pass
+        ev_mgr.screen_hi_res_snapshot = None
+        last_auto_switch_ms = int(pygame.time.get_ticks())
 
     def _after_resolution_change(*, prev_scale_factor=1):
         """해상도 전환 후: 카메라/커서/캐시·서피스 정리 + 커서/카메라 오프셋 스케일 보정."""
@@ -2252,20 +2430,21 @@ def main():
         world_zoom_tmp = None
         try:
             for _ok, _ov in list(overlay_cache.items()):
-                if str(_ok).endswith("_surf"):
+                if str(_ok).endswith("_surf") or _ok == "prog_surfs":
                     overlay_cache[_ok] = None
-                elif _ok in ("debug_text", "perf_text", "bgm_text", "rss_text", "cache_text"):
+                elif _ok in ("debug_text", "perf_text", "bgm_text", "rss_text", "cache_text", "prog_text"):
                     overlay_cache[_ok] = ""
             overlay_cache["zone_labels"] = {}
         except Exception:
             pass
         try:
-            font = get_ui_font(max(6, int(round(10.0 * float(CONFIG["WIDTH"]) / 640.0))))
+            font = _make_overlay_hud_font()
         except Exception:
             pass
         try:
             install_game_exit_button(ev_mgr)
             install_game_debug_button(ev_mgr)
+            install_game_options_button(ev_mgr)
         except Exception:
             pass
 
@@ -2379,6 +2558,7 @@ def main():
                 tilt_current=tilt_current,
                 tilt_eps=tilt_eps,
                 shear_smoothed=shear_render_in,
+                shear_reverse=shear_reverse_active(ev_mgr, ui),
             )
         return ww_fa
 
@@ -2397,7 +2577,7 @@ def main():
                 )
                 if _ov_res == "quit":
                     return "quit"
-                if _ov_res == "consumed" or game_exit_confirm_open(ev_mgr):
+                if _ov_res == "consumed" or field_overlay_modal_open(ev_mgr):
                     return "consumed"
             except Exception:
                 pass
@@ -2624,6 +2804,8 @@ def main():
         "zone_labels": {},  # event_id -> Surface (rarely changes)
         "cache_text": "",
         "cache_surf": None,
+        "prog_text": "",
+        "prog_surfs": None,
     }
 
     def _pnow():
@@ -3284,7 +3466,9 @@ def main():
         if getattr(ev_mgr, "_progress_refresh_pending", False):
             from char_behavior import apply_map_progress_states
 
-            objs, npcs = apply_map_progress_states(objs, npcs, flow.save_data)
+            objs, npcs = apply_map_progress_states(
+                objs, npcs, flow.save_data, session_vars=eval_session_vars(flow)
+            )
             ev_mgr._progress_refresh_pending = False
         if perf_enabled and t0 is not None:
             _padd("event", _pnow() - t0)
@@ -3402,6 +3586,8 @@ def main():
                         )
 
         # 입력 역변환/합성: 640 기준 world_zoom → 실제 draw 배율
+        # 논리 320 고정(ALLOW_NATIVE_640=False): draw<1 후처리 축소는 검은 테두리만 생기므로
+        # 같은 시야를 카메라 줌(_force_view_zoom)으로 옮겨 320 버퍼를 채운다.
         world_zoom_draw = (
             native_world_zoom_draw(
                 float(world_zoom_current) if world_zoom_enabled else 1.0,
@@ -3411,31 +3597,48 @@ def main():
             if world_zoom_enabled
             else 1.0
         )
-        try:
-            lw_i = int(CONFIG["WIDTH"])
-            lh_i = int(CONFIG["HEIGHT"])
-        except Exception:
-            lw_i, lh_i = 320, 240
-        # 후처리 줌 앵커: draw 단계에서 cam_draw+쉬어 기준으로 다시 잡는다(아래는 초기 추정).
-        try:
-            fwx, fwy = cam.get_focus_world_point(player, npcs, objs)
-            ax, ay = cam.to_screen(float(fwx), float(fwy))
-        except Exception:
-            ax, ay = float(lw_i) * 0.5, float(lh_i) * 0.5
-        try:
-            ax = float(ax)
-            ay = float(ay)
-        except Exception:
-            ax, ay = float(lw_i) * 0.5, float(lh_i) * 0.5
-        world_zoom_off_x = ax * (1.0 - float(world_zoom_draw))
-        world_zoom_off_y = ay * (1.0 - float(world_zoom_draw))
+        world_zoom_use_cam_fov = False
+        if (
+            auto_res_enabled
+            and (not auto_res_allow_native_640)
+            and str(output_mode).strip().upper() == "UPSCALE_320"
+            and float(auto_res_zoom_mul) > 1.0
+            and world_zoom_enabled
+        ):
+            world_zoom_use_cam_fov = True
+            try:
+                cam._force_view_zoom = max(1e-6, float(world_zoom_draw))
+            except Exception:
+                cam._force_view_zoom = 1.0
+            world_zoom_draw = 1.0
+            world_zoom_off_x = 0.0
+            world_zoom_off_y = 0.0
+        else:
+            try:
+                cam._force_view_zoom = None
+            except Exception:
+                pass
+            try:
+                lw_i = int(CONFIG["WIDTH"])
+                lh_i = int(CONFIG["HEIGHT"])
+            except Exception:
+                lw_i, lh_i = 320, 240
+            # 후처리 줌 앵커: draw 단계에서 cam_draw+쉬어 기준으로 다시 잡는다(아래는 초기 추정).
+            try:
+                fwx, fwy = cam.get_focus_world_point(player, npcs, objs)
+                ax, ay = cam.to_screen(float(fwx), float(fwy))
+            except Exception:
+                ax, ay = float(lw_i) * 0.5, float(lh_i) * 0.5
+            try:
+                ax = float(ax)
+                ay = float(ay)
+            except Exception:
+                ax, ay = float(lw_i) * 0.5, float(lh_i) * 0.5
+            world_zoom_off_x = ax * (1.0 - float(world_zoom_draw))
+            world_zoom_off_y = ay * (1.0 - float(world_zoom_draw))
         # --- 자동 가변 해상도 전환 (640 기준 world_zoom) ---
         # zoom=2.0 완료 → 320 출력(UPSCALE_320, mul=2, draw=1.0)
-        # zoom=1.0 완료 → 640 출력(NATIVE_640)
-        _screen_hi_res_active = bool(
-            getattr(ev_mgr, "active_screen", None)
-            and ev_mgr.active_screen.get("hi_res")
-        )
+        # zoom=1.0 완료 → ALLOW_NATIVE_640 이면 640, 아니면 320 유지(draw=0.5)
         try:
             _r3_force_320 = bool(CONFIG.get("ROTATE3D_FORCE_LOGICAL_320", True))
         except Exception:
@@ -3451,7 +3654,7 @@ def main():
                 and abs(float(rotate3d_current)) > float(_r3_eps_hold)
             )
         )
-        if auto_res_enabled and not _screen_hi_res_active and not _rotate3d_holds_320:
+        if auto_res_enabled and not _rotate3d_holds_320:
             now_ms = pygame.time.get_ticks()
             can_switch = (now_ms - int(last_auto_switch_ms)) >= int(auto_switch_cooldown_ms)
             zoom_done = abs(float(world_zoom_current) - float(world_zoom_target)) <= 1e-6
@@ -3487,7 +3690,8 @@ def main():
                     )
                     last_auto_switch_ms = int(now_ms)
                 elif (
-                    output_mode == "UPSCALE_320"
+                    auto_res_allow_native_640
+                    and output_mode == "UPSCALE_320"
                     and float(auto_res_zoom_mul) > 1.0
                     and abs(zc - float(auto_zoom_out_trigger)) <= 1e-6
                 ):
@@ -3498,16 +3702,37 @@ def main():
                     world_zoom_draw = 1.0
                     world_zoom_off_x = 0.0
                     world_zoom_off_y = 0.0
+                elif (
+                    (not auto_res_allow_native_640)
+                    and output_mode == "UPSCALE_320"
+                    and float(auto_res_zoom_mul) <= 1.0 + 1e-6
+                ):
+                    # 320 고정 부팅: 기본 줌(보통 2.0)이어도 치환 배수만 즉시 맞춤
+                    auto_res_zoom_mul = float(upscale_factor)
+                    world_zoom_draw = native_world_zoom_draw(
+                        world_zoom_current, output_mode, auto_res_zoom_mul
+                    )
         # 쉬어 "줌에 맞춤" 보정:
-        # - 카메라 줌(cam.current_zoom)은 여기선 보통 1로 고정
+        # - 카메라 줌(cam.current_zoom)은 여기선 보통 1로 고정(320 고정 줌아웃만 예외)
         # - AUTO_OUTPUT_MODE(640->320 업스케일)에서는 "줌 2x"를 해상도 치환(auto_res_zoom_mul)로 표현하므로
         #   쉬어(각도/보정)도 체감 줌 기준으로 동작해야 전환 순간에 플레이어 중앙 보정이 튀지 않는다.
         try:
-            world_z_for_shear = float(world_zoom_draw) if world_zoom_enabled else float(cam.current_zoom)
+            if world_zoom_use_cam_fov:
+                # draw 를 1로 고정했으므로 640 기준 world_zoom_current 를 그대로 씀
+                world_z_for_shear = (
+                    float(world_zoom_current) if world_zoom_enabled else float(cam.current_zoom)
+                )
+            else:
+                world_z_for_shear = float(world_zoom_draw) if world_zoom_enabled else float(cam.current_zoom)
         except Exception:
             world_z_for_shear = 1.0
         try:
-            if auto_res_enabled and output_mode == "UPSCALE_320" and float(auto_res_zoom_mul) > 1.0:
+            if (
+                (not world_zoom_use_cam_fov)
+                and auto_res_enabled
+                and output_mode == "UPSCALE_320"
+                and float(auto_res_zoom_mul) > 1.0
+            ):
                 world_z_for_shear = float(world_z_for_shear) * float(auto_res_zoom_mul)
         except Exception:
             pass
@@ -3721,7 +3946,11 @@ def main():
                 pygame.MOUSEWHEEL,
             ):
                 _dbg_xy = None
-                if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.type in (
+                    pygame.MOUSEBUTTONDOWN,
+                    pygame.MOUSEBUTTONUP,
+                    pygame.MOUSEMOTION,
+                ):
                     try:
                         _dbg_xy = _embed_phys_to_logical_xy(
                             event.pos[0], event.pos[1], scale_factor=scale_factor
@@ -3748,10 +3977,16 @@ def main():
             if event.type in (
                 pygame.KEYDOWN,
                 pygame.MOUSEBUTTONDOWN,
+                pygame.MOUSEBUTTONUP,
+                pygame.MOUSEMOTION,
                 pygame.MOUSEWHEEL,
             ) or event_picker_is_open():
                 _ep_xy = None
-                if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.type in (
+                    pygame.MOUSEBUTTONDOWN,
+                    pygame.MOUSEBUTTONUP,
+                    pygame.MOUSEMOTION,
+                ):
                     try:
                         _ep_xy = _embed_phys_to_logical_xy(
                             event.pos[0], event.pos[1], scale_factor=scale_factor
@@ -3804,7 +4039,7 @@ def main():
                     if _ov_res == "quit":
                         _request_stop("overlay_click:game_exit_yes")
                         continue
-                    if _ov_res == "consumed" or game_exit_confirm_open(ev_mgr):
+                    if _ov_res == "consumed" or field_overlay_modal_open(ev_mgr):
                         continue
                 except Exception:
                     pass
@@ -3869,6 +4104,7 @@ def main():
                     # 대사/스크린은 클릭(또는 키)로 넘길 수 있게 (탈출이 먼저 처리됨)
                     if ev_mgr.active_event and (
                         ev_mgr.is_talking
+                        or bool(getattr(ev_mgr, "is_notice", False))
                         or ev_mgr.active_screen
                         or getattr(ev_mgr, "emote_needs_advance_input", lambda: False)()
                     ):
@@ -3902,7 +4138,7 @@ def main():
                             if _ov_res == "quit":
                                 _request_stop("overlay_click_in_event:game_exit_yes")
                                 continue
-                            if _ov_res == "consumed" or game_exit_confirm_open(ev_mgr):
+                            if _ov_res == "consumed" or field_overlay_modal_open(ev_mgr):
                                 continue
                         except Exception:
                             pass
@@ -3965,6 +4201,7 @@ def main():
                         tilt_current=tilt_current,
                         tilt_eps=tilt_eps,
                         shear_smoothed=shear_render_in,
+                        shear_reverse=shear_reverse_active(ev_mgr, ui),
                     )
                 
                 # (world_x, world_y) 확보 완료
@@ -4075,11 +4312,14 @@ def main():
 
             if event.type == pygame.KEYDOWN:
                 # 출력 모드 토글: F5 (UPSCALE_320 ↔ NATIVE_640), 풀스크린 토글: F6
+                # ALLOW_NATIVE_640=False 이면 _apply_output_mode 가 640 요청을 320 으로 고정
                 if event.key == pygame.K_F5:
                     prev_sf = float(scale_factor)
                     new_mode = "NATIVE_640" if output_mode == "UPSCALE_320" else "UPSCALE_320"
                     _apply_output_mode(mode=new_mode, fullscreen=fullscreen_on)
                     _after_resolution_change(prev_scale_factor=prev_sf)
+                    if (not auto_res_allow_native_640) and output_mode == "UPSCALE_320":
+                        auto_res_zoom_mul = float(upscale_factor)
                 if event.key == pygame.K_F6:
                     _apply_output_mode(mode=output_mode, fullscreen=(not fullscreen_on))
                     try:
@@ -4153,6 +4393,7 @@ def main():
                             tilt_current=tilt_current,
                             tilt_eps=tilt_eps,
                             shear_smoothed=shear_render_in,
+                            shear_reverse=shear_reverse_active(ev_mgr, ui),
                         )
 
                     # 터치/키 동일: contact_confirm 판정용 상호작용 점(커서=포인터 위치)
@@ -4400,15 +4641,28 @@ def main():
         if ev_mgr.last_ended_event_id == demo_id:
             ev_mgr.last_ended_event_id = None
             from data import needs_player_char_select
+            from flow import merge_save_defaults
 
-            # 세이브 파일이 있어도 캐릭터를 고른 적 없으면 선택 UI (데모 중 세이브 생김 대비)
-            need_pick = needs_player_char_select(flow.save_data, CONFIG)
+            # 실행 시작 시점 플래그를 쓴다. 데모 중 메모리 세이브가 더럽혀져도 이어하기 판정은 유지.
+            need_pick = bool(needs_char_select_at_launch)
             if (
                 had_save_at_launch
                 and not need_pick
                 and save_spawn_snapshot
                 and save_spawn_snapshot.get("current_map")
             ):
+                # 데모 PLACE/FOLLOW 로 오염된 메모리를 버리고 런치 세이브로 복구
+                if isinstance(onboarding_continue_save, dict):
+                    try:
+                        flow.save_data = merge_save_defaults(
+                            copy.deepcopy(onboarding_continue_save), CONFIG
+                        )
+                    except Exception:
+                        flow.save_data = copy.deepcopy(onboarding_continue_save)
+                    try:
+                        flow.save_data["field_boot_ready"] = 0
+                    except Exception:
+                        pass
                 # CONTINUE_SPAWN_MODE: save=종료좌표 / map_start=맵 start_pos
                 resolved = resolve_continue_spawn(
                     save_spawn_snapshot, flow.world_data, CONFIG
@@ -4495,6 +4749,13 @@ def main():
 
         # --- 3. 상호작용 및 물리 로직 ---
         _diag_mark("before_sim")
+        # 캐릭터 선택 등: 입력만 막는 게 아니라 뒤 월드 시뮬(이동·애니)까지 정지
+        _freeze_field = False
+        try:
+            _ff = getattr(field_activities, "freeze_field", None)
+            _freeze_field = bool(_ff()) if callable(_ff) else False
+        except Exception:
+            _freeze_field = False
         for _sim_i in range(max(0, int(sim_steps))):
             # event_zones[].block 조건이 참이면 해당 rect 를 벽처럼 취급
             try:
@@ -4502,7 +4763,7 @@ def main():
                     flow.world_data,
                     map_id,
                     flow.save_data,
-                    session_vars={"gamestart": getattr(flow, "boot_phase", None)},
+                    session_vars=eval_session_vars(flow),
                 )
             except Exception:
                 _zone_blocks = []
@@ -4543,7 +4804,9 @@ def main():
                         player.target = list(player.pos)
                 except Exception:
                     pass
-            elif not bool(getattr(ev_mgr, "is_talking", False)):
+            elif not bool(getattr(ev_mgr, "is_talking", False)) and not bool(
+                getattr(ev_mgr, "is_notice", False)
+            ):
                 player.move(mask, objs, npcs)
             elif (
                 getattr(player, "_jump_arc", None) is not None
@@ -4554,8 +4817,13 @@ def main():
 
             # 필드 활동(야구 타구 추격 등) 중에도 NPC·오브젝트 path는 진행해야 함.
             # SAY 중에는 일반 이동은 멈추되, hop/점프 웨이포인트만 진행(대화 중 높이 고정 방지).
-            _talking = bool(getattr(ev_mgr, "is_talking", False))
-            if swing_ride_mode not in ("mount", "ride") and not _talking:
+            # freeze_field 는 캐릭터 선택처럼 뒤 장면을 완전히 멈출 때 (레이싱 등은 해당 없음).
+            _talking = bool(getattr(ev_mgr, "is_talking", False)) or bool(
+                getattr(ev_mgr, "is_notice", False)
+            )
+            if _freeze_field:
+                pass
+            elif swing_ride_mode not in ("mount", "ride") and not _talking:
                 for n in npcs:
                     n.move(mask, objs, npcs)
                 for o in objs:
@@ -4568,16 +4836,18 @@ def main():
                     if getattr(n, "_jump_arc", None) is not None or getattr(n, "_hop_repeat", None):
                         n.move(mask, objs, npcs)
             try:
-                from char_behavior import tick_npc_behaviors
-                tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id)
+                if not _freeze_field:
+                    from char_behavior import tick_npc_behaviors
+                    tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id)
             except Exception:
                 pass
 
             # 연꽃잎 등 step_react: 발 좌표 진입 시 land→hit→land (에지 트리거)
             try:
-                from engine import tick_field_step_react
+                if not _freeze_field:
+                    from engine import tick_field_step_react
 
-                tick_field_step_react(objs, [player] + list(npcs or []))
+                    tick_field_step_react(objs, [player] + list(npcs or []))
             except Exception:
                 pass
 
@@ -4589,7 +4859,7 @@ def main():
                 ev_mgr,
                 player,
                 map_id,
-                session_vars={"gamestart": getattr(flow, "boot_phase", None)},
+                session_vars=eval_session_vars(flow),
             )
         except Exception:
             pass
@@ -4600,6 +4870,7 @@ def main():
                 bool(ev_mgr.active_event)
                 or bool(getattr(ev_mgr, "is_busy", False))
                 or bool(getattr(ev_mgr, "is_talking", False))
+                or bool(getattr(ev_mgr, "is_notice", False))
                 or swing_ride_mode in ("approach", "mount", "ride")
                 or field_activities.is_active
             )
@@ -4869,7 +5140,7 @@ def main():
                 float(tilt_current),
                 bool(ui.shear_debug_on),
             )
-            _sess = {"gamestart": flow.boot_phase}
+            _sess = eval_session_vars(flow)
             if pending_action == "interact_npc" and target_npc:
                 from char_behavior import get_interact_range, start_npc_talk
 
@@ -4986,7 +5257,7 @@ def main():
                         raw_events,
                         flow.save_data,
                         events_catalog,
-                        session_vars={"gamestart": flow.boot_phase},
+                        session_vars=eval_session_vars(flow),
                     )
                     if gid:
                         _diag(f"start_global_auto gid={gid}")
@@ -5070,6 +5341,8 @@ def main():
         _diag_mark("before_anim")
         t0 = _pnow() if perf_enabled else None
         for o in objs:
+            if _freeze_field:
+                continue
             # --- optional auto scroll (background fog etc.) ---
             # Apply even if BGZONES update_policy == "none".
             try:
@@ -5149,6 +5422,8 @@ def main():
             o.update_anim()
             o.update(player.pos)
         for c in [player] + npcs:
+            if _freeze_field:
+                continue
             if c is player:
                 c.update_anim()
                 continue
@@ -5264,6 +5539,8 @@ def main():
         except Exception:
             sh_br = 0.02
         shear_eff = max(0, int(round(float(shear_render))))
+        # 리버스 틸트: 쉬어 픽셀 크기는 동일, 방향만 위→왼쪽
+        shear_rev = bool(shear_reverse_active(ev_mgr, ui)) if shear_eff > 0 else False
         use_perspective_branch = (tilt_active or float(shear_render) > sh_br) and (not rotate3d_active)
         try:
             is_zooming = abs(float(cam.current_zoom) - float(cam.target_zoom)) > 1e-9
@@ -5606,6 +5883,7 @@ def main():
                             float(f_q),
                             int(shear_eff),
                             int(slice_h),
+                            int(bool(shear_rev)),
                         )
                     elif use_shear_strip:
                         skey = (
@@ -5617,9 +5895,18 @@ def main():
                             int(slice_h),
                             int(strip_r0),
                             int(strip_r1),
+                            int(bool(shear_rev)),
                         )
                     else:
-                        skey = ("bg_shear", id(bg), zk, float(f_q), int(shear_eff), int(slice_h))
+                        skey = (
+                            "bg_shear",
+                            id(bg),
+                            zk,
+                            float(f_q),
+                            int(shear_eff),
+                            int(slice_h),
+                            int(bool(shear_rev)),
+                        )
 
                     s_bg3 = _shear_pin_get(skey)
                     if s_bg3 is None:
@@ -5654,6 +5941,10 @@ def main():
                             frame_shear_plan = engine_mod.vertical_top_shear_merged_plan_region(
                                 sh2, shear_eff, slice_h, strip_r0, strip_r1
                             )
+                            if shear_rev:
+                                frame_shear_plan = engine_mod.flip_vertical_top_shear_plan(
+                                    frame_shear_plan, shear_eff
+                                )
                             engine_mod.apply_vertical_top_shear_region(
                                 shear_bg_strip_tmp,
                                 tilt_bg_tmp,
@@ -5676,6 +5967,10 @@ def main():
                             if shear_bg_tmp is None or shear_bg_tmp.get_width() != out_w or shear_bg_tmp.get_height() != sh2:
                                 shear_bg_tmp = pygame.Surface((out_w, sh2), pygame.SRCALPHA)
                             frame_shear_plan = engine_mod.vertical_top_shear_merged_plan(sh2, shear_eff, slice_h)
+                            if shear_rev:
+                                frame_shear_plan = engine_mod.flip_vertical_top_shear_plan(
+                                    frame_shear_plan, shear_eff
+                                )
                             engine_mod.apply_vertical_top_shear(
                                 shear_bg_tmp,
                                 tilt_bg_tmp,
@@ -5695,19 +5990,31 @@ def main():
                     elif use_shear_strip:
                         shear_blit_row0 = int(strip_r0)
 
-                    def x_offset_fn(y_screen):
+                    # vp 확장이면 blit_x=bg-shear, 아니면 blit_x=bg.
+                    # 리버스 엔티티 오프셋은 배경 plan+blit 과 같아야 함(단순 부호 반전 X).
+                    _shear_blit_shifted = bool(vp_exp_r is not None and int(shear_eff) > 0)
+
+                    def x_offset_fn(y_screen, _shifted=_shear_blit_shifted):
                         try:
                             top = float(bg_blit_dy) + float(shift_y)
                             h = float(sh2f)
                             if h <= 1.0:
-                                return float(shear_eff)
-                            rel = (float(y_screen) - top) / h
-                            rel = 0.0 if rel < 0.0 else (1.0 if rel > 1.0 else rel)
-                            return (1.0 - rel) * float(shear_eff)
+                                rel = 0.0
+                            else:
+                                rel = (float(y_screen) - top) / h
+                                rel = 0.0 if rel < 0.0 else (1.0 if rel > 1.0 else rel)
+                            return float(
+                                shear_screen_x_offset(
+                                    rel,
+                                    shear_eff,
+                                    reverse=bool(shear_rev),
+                                    blit_origin_shifted=bool(_shifted),
+                                )
+                            )
                         except Exception:
                             return 0.0
 
-                    # 쉬어로 스프라이트가 화면에서 오른쪽으로 밀리므로, draw()와 동일한 feet_y로 x_offset을 구해 카메라 X를 보정한다.
+                    # 쉬어로 스프라이트가 화면에서 가로로 밀리므로, draw()와 동일한 feet_y로 x_offset을 구해 카메라 X를 보정한다.
                     try:
                         recen = bool(CONFIG.get("SHEAR_PLAYER_CENTER_CAM_ENABLED", True))
                     except Exception:
@@ -5873,6 +6180,11 @@ def main():
                 "shift_y": float(shift_y),
                 "f_q": float(f_q),
                 "shear_eff": float(shear_eff),
+                "shear_reverse": bool(shear_rev),
+                # True면 렌더 blit_x=bg-shear (뷰포트 확장). False면 blit_x=bg.
+                "shear_blit_shifted": bool(
+                    vp_exp_r is not None and int(shear_eff) > 0
+                ),
                 "shear_h": float(_shear_h),
                 "world_zoom_draw": float(world_zoom_draw) if world_zoom_enabled else 1.0,
                 "world_zoom_off_x": float(world_zoom_off_x),
@@ -6360,9 +6672,18 @@ def main():
                                     int(slice_h),
                                     int(strip_r0),
                                     int(strip_r1),
+                                    int(bool(shear_rev)),
                                 )
                             else:
-                                skey = ("mask_shear", id(mask), zk, float(f_q), int(shear_eff), int(slice_h))
+                                skey = (
+                                    "mask_shear",
+                                    id(mask),
+                                    zk,
+                                    float(f_q),
+                                    int(shear_eff),
+                                    int(slice_h),
+                                    int(bool(shear_rev)),
+                                )
                             s_mask3 = _shear_pin_get(skey)
                             if s_mask3 is None:
                                 s_mask3 = _rc_get(skey)
@@ -6390,6 +6711,10 @@ def main():
                                         mplan = engine_mod.vertical_top_shear_merged_plan_region(
                                             sh2, shear_eff, slice_h, strip_r0, strip_r1
                                         )
+                                        if shear_rev:
+                                            mplan = engine_mod.flip_vertical_top_shear_plan(
+                                                mplan, shear_eff
+                                            )
                                     engine_mod.apply_vertical_top_shear_region(
                                         shear_mask_strip_tmp,
                                         tilt_mask_tmp,
@@ -6414,6 +6739,10 @@ def main():
                                     mplan = frame_shear_plan
                                     if mplan is None:
                                         mplan = engine_mod.vertical_top_shear_merged_plan(sh2, shear_eff, slice_h)
+                                        if shear_rev:
+                                            mplan = engine_mod.flip_vertical_top_shear_plan(
+                                                mplan, shear_eff
+                                            )
                                     engine_mod.apply_vertical_top_shear(
                                         shear_mask_tmp,
                                         tilt_mask_tmp,
@@ -6734,14 +7063,6 @@ def main():
                         offy = float(CONFIG.get("ZONE_CONFIRM_PROMPT_OFFSET_Y_PX", -6) or -6)
                     except Exception:
                         offy = -6.0
-                    try:
-                        mp = str(flow.save_data.get("mainprogress", "") or "")
-                    except Exception:
-                        mp = ""
-                    try:
-                        lp = int(flow.save_data.get("laugh_point", 0) or 0)
-                    except Exception:
-                        lp = 0
 
                     shown = 0
                     for z0 in zones:
@@ -6760,18 +7081,11 @@ def main():
                                 continue
                         except Exception:
                             continue
-                        # conditions (match flow.check_zone_trigger)
-                        cond = z0.get("conditions", {}) if isinstance(z0.get("conditions", {}), dict) else {}
-                        try:
-                            if cond.get("mainprogress") and str(cond.get("mainprogress")) != str(mp):
-                                continue
-                        except Exception:
-                            pass
-                        try:
-                            if "min_laugh_point" in cond and int(lp) < int(cond.get("min_laugh_point") or 0):
-                                continue
-                        except Exception:
-                            pass
+                        # conditions (zone_conditions_ok — extra progress_* · RESULT session 포함)
+                        if not zone_conditions_ok(
+                            z0, flow.save_data, session_vars=eval_session_vars(flow)
+                        ):
+                            continue
 
                         cxw = zx + zw * 0.5
                         cyw = zy + zh * 0.5 + float(offy)
@@ -6843,7 +7157,7 @@ def main():
                 ep_fms = 110
             ep_fms = max(40, min(600, ep_fms))
             ep_tick = pygame.time.get_ticks()
-            _sess_ep = {"gamestart": flow.boot_phase}
+            _sess_ep = eval_session_vars(flow)
             ep_candidates = []
             for ent in list(npcs or []) + list(objs or []):
                 try:
@@ -7297,6 +7611,31 @@ def main():
                             overlay_cache["bgm_surf"] = None
                     else:
                         overlay_cache["bgm_surf"] = None
+
+                prog_rows = iter_save_progress_vars(
+                    getattr(flow, "save_data", None),
+                    getattr(flow, "session_progress", None),
+                )
+                try:
+                    prog_max = int(CONFIG.get("OVERLAY_PROGRESS_MAX_LINES", 24) or 24)
+                except (TypeError, ValueError):
+                    prog_max = 24
+                prog_max = max(1, min(80, prog_max))
+                extra_n = 0
+                if len(prog_rows) > prog_max:
+                    extra_n = len(prog_rows) - prog_max
+                    prog_rows = prog_rows[:prog_max]
+                    prog_rows.append(f"... +{extra_n}")
+                prog_text = "\n".join(prog_rows)
+                if prog_text != overlay_cache.get("prog_text", ""):
+                    overlay_cache["prog_text"] = prog_text
+                    surfs = []
+                    for line in prog_rows:
+                        try:
+                            surfs.append(font.render(line, True, (255, 230, 160)))
+                        except Exception:
+                            pass
+                    overlay_cache["prog_surfs"] = surfs or None
             else:
                 # overlay_text가 꺼져 있어도 RSS는 간단히 표시(갱신은 동일하게 1초 간격)
                 if overlay_cache["rss_mb"] is not None:
@@ -7326,14 +7665,34 @@ def main():
                 _ov_bgm_y = int(CONFIG["HEIGHT"]) - int(round(scale_ui_text_px(28, screen_w=int(CONFIG["WIDTH"]))))
             except Exception:
                 _ov_bgm_y = int(CONFIG["HEIGHT"]) - 28
+            try:
+                _ov_lh = max(10, int(font.get_height()) + 1)
+                _ov_y0 = int(round(scale_ui_text_px(8, screen_w=int(CONFIG["WIDTH"]))))
+            except Exception:
+                _ov_lh, _ov_y0 = 14, 8
             if overlay_cache.get("debug_surf") is not None:
-                render_surf.blit(overlay_cache["debug_surf"], (_ov_x, 20))
+                render_surf.blit(overlay_cache["debug_surf"], (_ov_x, _ov_y0))
             if overlay_cache.get("perf_surf") is not None:
-                render_surf.blit(overlay_cache["perf_surf"], (_ov_x, 34))
+                render_surf.blit(overlay_cache["perf_surf"], (_ov_x, _ov_y0 + _ov_lh))
             if overlay_cache.get("cache_surf") is not None:
-                render_surf.blit(overlay_cache["cache_surf"], (_ov_x, 48))
+                render_surf.blit(overlay_cache["cache_surf"], (_ov_x, _ov_y0 + _ov_lh * 2))
             if overlay_cache.get("bgm_surf") is not None:
                 render_surf.blit(overlay_cache["bgm_surf"], (int(round(scale_ui_text_px(70, screen_w=int(CONFIG["WIDTH"])))), _ov_bgm_y))
+            prog_surfs = overlay_cache.get("prog_surfs")
+            if prog_surfs:
+                try:
+                    _ov_prog_x = int(round(scale_ui_text_px(6, screen_w=int(CONFIG["WIDTH"]))))
+                    _ov_prog_y = int(round(scale_ui_text_px(20, screen_w=int(CONFIG["WIDTH"]))))
+                    _ov_prog_lh = max(10, int(font.get_height()) + 1)
+                except Exception:
+                    _ov_prog_x, _ov_prog_y, _ov_prog_lh = 6, 20, 12
+                for i, ps in enumerate(prog_surfs):
+                    if ps is None:
+                        continue
+                    try:
+                        render_surf.blit(ps, (_ov_prog_x, _ov_prog_y + i * _ov_prog_lh))
+                    except Exception:
+                        pass
         else:
             if bool(CONFIG.get("SHOW_RSS_OVERLAY_WHEN_OFF", False)):
                 if overlay_cache.get("rss_surf") is not None:
@@ -7464,15 +7823,15 @@ def main():
                 _pdump()
 
     # 종료 세이브:
-    # - 인트로/데모 중: 기존 세이브 유지 (START_MAP 으로 덮지 않음)
+    # - 인트로/데모/캐릭터선택 중: 기존 세이브 유지
     # - 이벤트 중: 시작 직전 체크포인트 유지 (이벤트용 맵으로 덮지 않음)
     _diag_mark(
         "loop_exit",
         f"leaving main loop stop_reason={_diag_stop_reason!r}",
         announce=True,
     )
-    if int(getattr(flow, "boot_phase", 2) or 0) < 2:
-        print("[save] skipped — boot intro/demo (existing save kept)")
+    if _is_onboarding_save_blocked(flow, field_activities):
+        print("[save] skipped — onboarding (intro/demo/char_select)")
     elif getattr(flow, "is_event_save_guarded", lambda: False)():
         print("[save] skipped — event in progress (pre-event checkpoint kept)")
     else:

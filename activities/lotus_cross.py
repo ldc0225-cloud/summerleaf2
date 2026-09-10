@@ -186,6 +186,7 @@ def draw_lotus_cross_idle(ctx: FieldDrawContext, map_id: str, world_data) -> Non
     활동 시작 전에도 징검다리 연꽃잎을 같은 그리드에 표시.
     world_data 에 오브젝트를 따로 깔지 않는다 (위치 이중 관리 방지).
     lotus_cross 활동 중에는 활동 draw_world_under 가 대신 그린다.
+    (착지 후 ST_QUIT·follow fade 동안에도 draw_world_under 가 잎을 유지한다.)
     """
     if ctx is None or ctx.surf is None:
         return
@@ -1726,8 +1727,13 @@ class LotusCrossActivity(BaseFieldActivity):
         )
 
     def draw_world_under(self, ctx: FieldDrawContext) -> None:
-        """배경 위 · 캐릭터 아래 — 연꽃잎만."""
-        if ctx is None or ctx.surf is None or self.state == ST_QUIT:
+        """배경 위 · 캐릭터 아래 — 연꽃잎만.
+        ST_QUIT(강가 착지·follow fadein) 중에도 그린다.
+        안 그리면 활동 id 가 아직 lotus_cross 라 idle 장식도 스킵되어 징검다리가 한동안 사라진다.
+        """
+        if ctx is None or ctx.surf is None:
+            return
+        if not self._leaf_tiles:
             return
         surf = ctx.surf
         z = float(ctx.z or 1.0)

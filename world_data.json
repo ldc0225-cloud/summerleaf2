@@ -1,5 +1,6 @@
 {
     "bg_title": {
+        "field": {},
         "bg_img": "bg_title.png",
         "mask_img": "bg_title_mask.png",
         "start_pos": [8, 8],
@@ -12,24 +13,30 @@
         "mask_img": "bg_jjangpu2_mask.png",
         "field": {
             "tilt_on": false,
-            "shear_on": true
+            "shear_on": true,
+            "music": "cheongyo_08_mr",
+            "music_loop": true,
+            "music_volume": 0.8
         },
         "event_zones": [
-            { "name": "테스트이벤트2", "rect": [432, 1952, 41, 30], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_tutorial_010500" },
-            { "name": "bench", "rect": [519, 2097, 36, 38], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_bench" },
-            { "name": "그네타기", "rect": [794, 1892, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_swing" },
-            { "name": "호숫가낚시", "rect": [736, 2288, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_fishing" },
-            { "name": "야구장 입장(테스트용)", "rect": [864, 2288, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_baseball_enter" },
-            { "name": "레이스 입장(테스트용)", "rect": [800, 2288, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_racing_enter" },
-            { "name": "황소개구리 보스(테스트용)", "rect": [976, 2384, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_bullfrog_enter" },
+            { "name": "EVENT 벤치", "rect": [519, 2097, 36, 38], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_bench" },
+            { "name": "EVENT 그네타기", "rect": [794, 1892, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_swing" },
+            { "name": "EVENT 호숫가낚시(테스트용)", "rect": [736, 2288, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_fishing" },
+            { "name": "EVENT 야구장 입장(테스트용)", "rect": [864, 2288, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_baseball_enter" },
+            { "name": "EVENT 레이스 입장(테스트용)", "rect": [800, 2288, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_racing_enter" },
+            { "name": "EVENT 황소개구리 보스(테스트용)", "rect": [976, 2384, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_bullfrog_enter" },
+            { "name": "EVENT 요정1 들꽃요정 위치", "rect": [640, 2112, 48, 48], "trigger": "contact_confirm", "conditions": { "progress_flower1_ground": 1 },
+                "event_id": "ev_flower1_talk"
+            },
             { "name": "DOOR 짱짱실내", "rect": [543, 1896, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_inside" },
-            { "name": "DOOR 짱짱실내2", "rect": [542, 1822, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_inside2" },
-            { "name": "DOOR 연못가", "rect": [1488, 2416, 16, 144], "trigger": "contact_player", "conditions": {}, "event_id": "ev_gotothepond00", "block": { "var": "progress_flower1_1", "op": "!=", "val": 1006, "say": "너무 멀리 가지는 말자", "who": "player" }
+            { "name": "DOOR 짱짱실내2층", "rect": [542, 1822, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_inside2" },
+            { "name": "DOOR 연못가", "rect": [1344, 2416, 16, 144], "trigger": "contact_player", "conditions": {}, "event_id": "ev_gotothepond00", "block": { "var": "progress_flower1_1", "op": "!=", "val": 1006, "say": "너무 멀리 가지는 말자", "who": "player" }
             },
             { "name": "BLOCK 이벤트중1", "rect": [976, 2032, 16, 80], "trigger": "contact_player", "conditions": {}, "event_id": "", "block": { "var": "block02", "op": "==", "val": 1, "say": "아직 할 일이 남았어.", "who": "player" }
             },
             { "name": "BLOCK 이벤트중2", "rect": [528, 2448, 16, 96], "trigger": "contact_player", "conditions": {}, "event_id": "", "block": { "var": "block02", "op": "==", "val": 1, "say": "아직 할 일이 남았어.", "who": "player" }
-            }
+            },
+            { "name": "EVENT 물뿌리개", "rect": [736, 1920, 32, 32], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_wateringcan" }
         ],
         "objects": [
             { "name": "jjangpu2_house", "pos": [676, 1916], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
@@ -285,7 +292,7 @@
             },
             {
                 "name": "signpost03",
-                "pos": [1472, 2560],
+                "pos": [1344, 2560],
                 "sprite_tilt": 1.0,
                 "height": 0,
                 "ysort": "ground",
@@ -293,7 +300,7 @@
             },
             {
                 "name": "signpost03",
-                "pos": [1472, 2464],
+                "pos": [1344, 2464],
                 "sprite_tilt": 1.0,
                 "height": 0,
                 "ysort": "ground",
@@ -309,8 +316,38 @@
             }
         ],
         "npcs": [
-            { "name": "flower_fairy1", "pos": [662, 2146], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "flower_fairy1@662_2141", "interact": { "range": 28.0 } },
-            { "name": "nachos_a", "pos": [896, 2288], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "nachos_a@912_2304", "behavior": { "mode": "randomwalk" } }
+            { "name": "nachos_a", "pos": [896, 2288], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "nachos_a@912_2304", "behavior": { "mode": "randomwalk", "radius": 64.0, "interval_ms": 3000 },
+                "interact": {
+                    "enabled": true,
+                    "range": 16.0,
+                    "offset": [0.0, -20.0],
+                    "face_player_on_talk": true,
+                    "bindings": [
+                        { "event_id": "ev_char_nachos_a", "priority": 100 }
+                    ]
+                }
+            },
+            {
+                "name": "broccoli_a",
+                "pos": [832, 2288],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "broccoli_a@832_2288",
+                "interact": {
+                    "enabled": true,
+                    "range": 16.0,
+                    "offset": [0.0, -20.0],
+                    "face_player_on_talk": true,
+                    "bindings": [
+                        {
+                            "event_id": "ev_char_broccoli_a",
+                            "priority": 100
+                        }
+                    ]
+                }
+            }
         ],
         "bg_zones": [
             { "name": "jjangpubgbox", "rect": [-48, -800, 1648, 2072], "layer": -50, "draw_only_when_tilt": true, "update_policy": "none", "sort_policy": "cached", "cull_margin_px": 160 }
@@ -337,7 +374,7 @@
         "event_zones": [
             {
                 "name": "DOOR 짱짱밖으로",
-                "rect": [112, 192, 32, 16],
+                "rect": [294, 416, 32, 16],
                 "trigger": "contact_confirm",
                 "conditions": {},
                 "event_id": "ev_jjangpu_outside"
@@ -346,19 +383,37 @@
         "npcs": [],
         "field": {
             "tilt_on": false,
-            "shear_on": false,
+            "shear_on": true,
+            "reverse_tilt": true,
             "screen_fx": {
                 "vignette": {}
-            }
+            },
+            "music": "cheongyo_08_mr",
+            "music_loop": true,
+            "music_volume": 0.8
         },
-        "objects": []
+        "objects": [
+            { "name": "jjangpu_inside_wall01", "pos": [431, 304], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_3d": true },
+            { "name": "jjangpu_inside_window", "pos": [534, 376], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 90.0, "wall_3d": true },
+            { "name": "jjangpu_inside_furniture1", "pos": [432, 320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_3d": true },
+            { "name": "jjangpu_inside_furniture3", "pos": [404, 316], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 90.0, "wall_3d": true },
+            { "name": "jjangpu_inside_furniture2", "pos": [432, 320], "sprite_tilt": 0.0, "height": 31, "ysort": "ground", "layer": 0, "wall_3d": true },
+            { "name": "jjangpu_inside_furniture3", "pos": [461, 316], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_angle": 90.0, "wall_3d": true },
+            { "name": "flowerinpot01", "pos": [327, 316], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+        ]
     },
     "bg_jjangpu_inside2": {
         "bg_img": "bg_jjangpu_inside2.png",
         "mask_img": "bg_jjangpu_inside2_mask.png",
         "start_pos": [127, 194],
         "event_zones": [
-            { "name": "DOOR 짱짱밖으로2", "rect": [112, 192, 32, 16], "trigger": "contact_confirm", "conditions": {}, "event_id": "ev_jjangpu_outside2" }
+            {
+                "name": "DOOR 짱짱밖으로2",
+                "rect": [112, 192, 32, 16],
+                "trigger": "contact_confirm",
+                "conditions": {},
+                "event_id": "ev_jjangpu_outside2"
+            }
         ],
         "npcs": [],
         "field": {
@@ -366,11 +421,19 @@
             "shear_on": false,
             "screen_fx": {
                 "vignette": {}
-            }
+            },
+            "music": "cheongyo_08_mr",
+            "music_loop": true,
+            "music_volume": 0.8
         },
         "objects": []
     },
     "bg_town": {
+        "field": {
+            "music": "demo_bgm",
+            "music_loop": true,
+            "music_volume": 0.8
+        },
         "bg_img": "bg_town.png",
         "mask_img": "bg_town_mask.png",
         "event_zones": [
@@ -436,6 +499,11 @@
         }
     },
     "bg_circurt01": {
+        "field": {
+            "music": "demo_bgm",
+            "music_loop": true,
+            "music_volume": 0.8
+        },
         "bg_img": "bg_circuit01.png",
         "display_name": "짱짱섬",
         "mask_img": "bg_town_mask.png",
@@ -760,6 +828,11 @@
         }
     },
     "bg_circurt02": {
+        "field": {
+            "music": "demo_bgm",
+            "music_loop": true,
+            "music_volume": 0.8
+        },
         "bg_img": "bg_circuit02.png",
         "display_name": "서킷 2",
         "mask_img": "bg_town_mask.png",
@@ -890,47 +963,278 @@
         }
     },
     "bg_jjangpu_test": {
-        "bg_img": "bg_jjangpu3.png",
-        "mask_img": "bg_jjangpu3_mask.png",
-        "event_zones": [
+        "bg_img": "bg_jjangpu2.png",
+        "mask_img": "bg_jjangpu2_mask.png",
+        "field": {
+            "tilt_on": false,
+            "shear_on": true,
+            "music": "cheongyo_08_mr",
+            "music_loop": true,
+            "music_volume": 0.8
+        },
+        "event_zones": [],
+        "objects": [
+            { "name": "jjangpu2_house", "pos": [676, 1916], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_3d": true },
+            { "name": "jjangpu2_house2", "pos": [613, 1792], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence1", "pos": [504, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence2", "pos": [952, 2192], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence2", "pos": [952, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2208], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2224], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2272], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2288], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2304], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2336], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2352], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2384], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2400], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2176], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2144], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [952, 2160], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence3", "pos": [584, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence5", "pos": [584, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "sky_clean", "pos": [768, -206], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain1", "pos": [768, -120], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "mountain2", "pos": [768, 16], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "fog1", "pos": [768, -96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "fog2", "pos": [768, 144], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_houseroof", "pos": [613, 1915], "sprite_tilt": 0.0, "height": 189, "ysort": "ground", "layer": 0 },
+            { "name": "faucet", "pos": [744, 1936], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench1-1", "pos": [522, 2148], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench1-1", "pos": [522, 2104], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
+            { "name": "jjangpu2_bench1-2", "pos": [524, 2148], "sprite_tilt": 0.0, "height": 10, "ysort": "visual", "layer": -1 },
+            { "name": "jjangpu2_bench1-3", "pos": [514, 2148], "sprite_tilt": 0.0, "height": 21, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench2-1", "pos": [512, 2016], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench2-1", "pos": [512, 1984], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench2-2", "pos": [512, 2016], "sprite_tilt": 0.0, "height": 57, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench2-3", "pos": [512, 2013], "sprite_tilt": 0.0, "height": 10, "ysort": "ground", "layer": -1 },
+            { "name": "jjangpu2_bench2-4", "pos": [494, 2000], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench3-1", "pos": [490, 2426], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench3-3", "pos": [490, 2426], "sprite_tilt": 0.0, "height": 66, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench3-4", "pos": [488, 2426], "sprite_tilt": 0.0, "height": 10, "ysort": "visual", "layer": -1 },
+            { "name": "tree6", "pos": [476, 2094], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree7", "pos": [920, 2046], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [1168, 1728], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [1096, 1664], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [416, 1664], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1216, 1680], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1176, 2400], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [392, 2000], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [456, 2144], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [456, 2192], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [376, 2400], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence3", "pos": [488, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence1", "pos": [520, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence2", "pos": [536, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence4", "pos": [536, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_column", "pos": [812, 1916], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_bench3-2", "pos": [512, 2385], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "swing1", "pos": [688, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
+            { "name": "swing1", "pos": [704, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
+            { "name": "tree5", "pos": [764, 2181], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "pole1", "pos": [660, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence1", "pos": [960, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence1", "pos": [960, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence2", "pos": [976, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence2", "pos": [976, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_fence3", "pos": [944, 2096], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "apartment1", "pos": [800, 48], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "apartment1", "pos": [832, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "apartment1", "pos": [896, 48], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "apartment1", "pos": [944, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree1", "pos": [736, 112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree1", "pos": [816, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree1", "pos": [912, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree1", "pos": [992, 112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [752, 112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [784, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [848, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [896, 112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [960, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [928, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "tree3", "pos": [864, 128], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_column", "pos": [812, 1794], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [768, 2192], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [912, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [928, 2048], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [976, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1024, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1088, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1104, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1216, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1248, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1168, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1296, 2416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1328, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1376, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1440, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1504, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1008, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1056, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1136, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1280, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1344, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1408, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1296, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1120, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [1248, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [1072, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [1040, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [1184, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "vane", "pos": [528, 2016], "sprite_tilt": 1.0, "height": 60, "ysort": "ground", "layer": 0 },
+            { "name": "vane", "pos": [512, 2416], "sprite_tilt": 1.0, "height": 66, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [464, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [496, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [608, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [656, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [816, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [848, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [912, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [496, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [464, 2224], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [368, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [16, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [320, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [256, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [208, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [96, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [400, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [176, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [144, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [48, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [288, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [224, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [336, 2432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [32, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [96, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [272, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [432, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [496, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [656, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [768, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [864, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [976, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1008, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [848, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [624, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [512, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [304, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [160, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [48, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [224, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [64, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [144, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [256, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [320, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [464, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [592, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [704, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [800, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [832, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1040, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1104, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1168, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1296, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1424, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower1", "pos": [1488, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1456, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1264, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1376, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1488, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1344, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1200, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1264, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [1440, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1072, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1040, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [1072, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [896, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [864, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [672, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [784, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [624, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [544, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [384, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [336, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [400, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [192, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [64, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower2", "pos": [192, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [16, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [128, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [256, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [368, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [112, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [224, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [592, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [720, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [752, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [832, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [960, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1104, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1248, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1408, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1520, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1520, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1328, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [1136, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [928, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower3", "pos": [288, 1600], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [560, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [912, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "flower4", "pos": [1312, 1536], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "vane", "pos": [754, 1916], "sprite_tilt": 1.0, "height": 190, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [704, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [896, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "bush1", "pos": [752, 2256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "wateringcan2", "pos": [753, 1942], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "pole1", "pos": [480, 2080], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_stair1", "pos": [551, 1933], "sprite_tilt": 1.0, "height": 51, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_column", "pos": [812, 1878], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "jjangpu2_column", "pos": [812, 1837], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "merge-fence1-1", "pos": [768, 1744], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_3d": true },
+            { "name": "merge-fence1-1", "pos": [768, 2240], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "wall_3d": true },
+            { "name": "signpost01", "pos": [880, 2304], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "interact": { "enabled": true, "range": 36.0, "bindings": [ { "event_id": "ev_baseball_demo", "priority": 100 }
+                    ]
+                }
+            },
             {
-                "name": "go to the jjangpu",
-                "rect": [608, 928, 532, 102],
-                "trigger": "contact_player",
-                "conditions": {},
-                "event_id": "ev_town_gotothejjangpu"
+                "name": "signpost02",
+                "pos": [752, 2304],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0
+            },
+            {
+                "name": "merge-fence1-1",
+                "pos": [944, 1864],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "wall_angle": 90.0,
+                "wall_3d": true
+            },
+            {
+                "name": "signpost04",
+                "pos": [816, 2304],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0
             }
         ],
-        "objects": [
-            { "name": "jjangpu2_house", "pos": [516, 398], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_house2", "pos": [470, 275], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_stair", "pos": [418, 409], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_houseroof", "pos": [468, 397], "sprite_tilt": 0.0, "height": 189, "ysort": "ground", "layer": 0 },
-            { "name": "faucet", "pos": [602, 418], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench1-1", "pos": [380, 630], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench1-1", "pos": [380, 586], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": -1 },
-            { "name": "jjangpu2_bench1-2", "pos": [380, 631], "sprite_tilt": 0.0, "height": 11, "ysort": "visual", "layer": -1 },
-            { "name": "jjangpu2_bench1-3", "pos": [372, 631], "sprite_tilt": 0.0, "height": 22, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench1-4", "pos": [372, 604], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench2-1", "pos": [370, 498], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench2-1", "pos": [370, 466], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench2-2", "pos": [370, 498], "sprite_tilt": 0.0, "height": 45, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench2-3", "pos": [370, 497], "sprite_tilt": 0.0, "height": 10, "ysort": "ground", "layer": -1 },
-            { "name": "jjangpu2_bench2-4", "pos": [354, 482], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench3-1", "pos": [348, 908], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench3-1", "pos": [348, 866], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench3-2", "pos": [328, 887], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench3-3", "pos": [348, 908], "sprite_tilt": 0.0, "height": 55, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_bench3-4", "pos": [348, 907], "sprite_tilt": 0.0, "height": 20, "ysort": "visual", "layer": -1 },
-            { "name": "vehicle1", "pos": [706, 722], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "vehicle2", "pos": [706, 786], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "vehicle2-1", "pos": [706, 866], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "vehicle3", "pos": [706, 930], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "vehicle1shadow", "pos": [716, 721], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "vehicle2shadow", "pos": [716, 785], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "vehicle2shadow", "pos": [716, 865], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "vehicle3shadow", "pos": [716, 929], "sprite_tilt": 0.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "jjangpu2_column", "pos": [670, 382], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+        "bg_zones": [
+            { "name": "jjangpubgbox", "rect": [-48, -800, 1648, 2072], "layer": -50, "draw_only_when_tilt": true, "update_policy": "none", "sort_policy": "cached", "cull_margin_px": 160 }
         ],
         "npcs": []
     },
@@ -939,6 +1243,9 @@
         "mask_img": "bg_baseball1_mask.png",
         "start_pos": [152, 512],
         "field": {
+            "music": "demo_bgm",
+            "music_loop": true,
+            "music_volume": 0.8,
             "tilt_on": false,
             "shear_on": false
         },
@@ -973,8 +1280,8 @@
             { "name": "nachos_a", "pos": [544, 432], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "nachos_a@528_400" },
             { "name": "broccoli_a", "pos": [944, 256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "broccoli_a@784_256" },
             { "name": "carrot_a", "pos": [944, 624], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "carrot_a@880_592" },
-            { "name": "babydino", "pos": [768, 576], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "babydino@672_496" },
-            { "name": "boy1_k", "pos": [752, 320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "boy1_k@816_400" }
+            { "name": "redtilefish_a", "pos": [768, 576], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "babydino@672_496" },
+            { "name": "firefly_a", "pos": [752, 320], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "boy1_k@816_400" }
         ],
         "baseball": {
             "swings": 5,
@@ -1047,7 +1354,10 @@
         "start_pos": [160, 440],
         "field": {
             "tilt_on": false,
-            "shear_on": false
+            "shear_on": false,
+            "music": "cheongyo_10",
+            "music_loop": true,
+            "music_volume": 0.8
         },
         "event_zones": [],
         "objects": [
@@ -1082,7 +1392,9 @@
             { "name": "bigflower_p", "pos": [208, 160], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "bigflower_p", "pos": [192, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "bigflower_p", "pos": [112, 80], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "bigflower_p", "pos": [288, 80], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+            { "name": "bigflower_p", "pos": [288, 80], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "sky_clean", "pos": [352, 32], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "sky_clean", "pos": [416, -80], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
         ],
         "npcs": [],
         "bullfrog": {
@@ -1119,7 +1431,7 @@
             {
                 "name": "DOOR 짱짱으로",
                 "rect": [0, 48, 16, 32],
-                "trigger": "contact_confirm",
+                "trigger": "contact_player",
                 "conditions": {},
                 "event_id": "ev_gotothejjangpu3"
             }
@@ -1132,14 +1444,19 @@
             { "name": "flower2", "pos": [272, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "flower3", "pos": [240, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "flower4", "pos": [288, 112], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "bush1", "pos": [0, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+            { "name": "bush1", "pos": [0, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "signpost05", "pos": [16, 48], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "signpost05", "pos": [16, 96], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
         ],
         "npcs": [],
         "field": {
+            "music": "demo_bgm",
+            "music_loop": true,
+            "music_volume": 0.8,
             "tilt_on": false,
             "shear_on": false,
             "wave_tiles": {
-                "on": true,
+                "on": false,
                 "fill_map": false,
                 "polygon": [
                     [
@@ -1379,22 +1696,119 @@
             { "name": "bigflower_p", "pos": [528, 352], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "bigflower_p", "pos": [688, 384], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
             { "name": "bigflower_p", "pos": [768, 368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
-            { "name": "bigflower_p", "pos": [848, 256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
+            { "name": "bigflower_p", "pos": [848, 256], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "sky_clean", "pos": [416, 0], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 },
+            { "name": "light01", "pos": [1024, 368], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0 }
         ],
         "npcs": [
-            { "name": "frog01", "pos": [64, 416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "frog01_1", "spawn_state": { "dir": "right", "entity_fx": { "zoom": 1.5 }
+            { "name": "frog01", "pos": [64, 416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "frog01_1", "interact": { "enabled": true, "face_player_on_talk": true, "bindings": [ { "event_id": "ev_char_frog01_1", "priority": 100 }
+                    ]
+                },
+                "spawn_state": {
+                    "dir": "right",
+                    "entity_fx": {
+                        "mode": "off",
+                        "zoom": 1.5
+                    }
                 }
             },
-            { "name": "frog01", "pos": [528, 80], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "frog01_2", "spawn_state": { "entity_fx": { "zoom": 1.5 }
+            {
+                "name": "frog01",
+                "pos": [528, 80],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "frog01_2",
+                "interact": {
+                    "enabled": true,
+                    "face_player_on_talk": true,
+                    "bindings": [
+                        {
+                            "event_id": "ev_char_frog01_2",
+                            "priority": 100
+                        }
+                    ]
+                },
+                "spawn_state": {
+                    "entity_fx": {
+                        "mode": "pulse",
+                        "zoom": 1.5
+                    }
                 }
             },
-            { "name": "frog01", "pos": [624, 416], "sprite_tilt": 1.0, "height": 0, "ysort": "ground", "layer": 0, "instance_id": "frog01_3", "spawn_state": { "entity_fx": { "zoom": 1.5 }
+            {
+                "name": "frog01",
+                "pos": [624, 416],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "frog01_3",
+                "spawn_state": {
+                    "entity_fx": {
+                        "zoom": 1.5
+                    }
                 }
+            },
+            {
+                "name": "tadpole01",
+                "pos": [1024, 304],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "tadpole01_2"
+            },
+            {
+                "name": "tadpole01",
+                "pos": [992, 320],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "tadpole01_1"
+            },
+            {
+                "name": "tadpole01",
+                "pos": [1024, 336],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "tadpole01_3"
+            },
+            {
+                "name": "tadpole01",
+                "pos": [1056, 320],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "tadpole01_5"
+            },
+            {
+                "name": "tadpole01",
+                "pos": [1056, 288],
+                "sprite_tilt": 1.0,
+                "height": 0,
+                "ysort": "ground",
+                "layer": 0,
+                "instance_id": "tadpole01_4"
             }
         ],
         "field": {
             "tilt_on": false,
-            "shear_on": false
+            "shear_on": false,
+            "screen_fx": {
+                "rain": {
+                    "speed": 1.0,
+                    "angle": 10.0
+                }
+            },
+            "music": "cheongyo_01_mr",
+            "music_loop": true,
+            "music_volume": 0.8
         },
         "lotus_cross": {
             "tile_size": 32,

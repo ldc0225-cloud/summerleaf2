@@ -176,6 +176,79 @@ def build_eval_ctx(save_data: dict, session_vars=None) -> dict:
     return ctx
 
 
+def eval_session_vars(flow, extra=None) -> dict:
+    """
+    조건식·존·interact 에 넘기는 세션 딕셔너리.
+    gamestart(부팅 단계) + RESULT session:true 로 쓴 값.
+    세이브 파일에는 안 들어감 — 프로세스 재시작 시 비어 있음.
+    """
+    out = {}
+    if flow is not None:
+        try:
+            out["gamestart"] = getattr(flow, "boot_phase", None)
+        except Exception:
+            pass
+        sp = getattr(flow, "session_progress", None)
+        if isinstance(sp, dict):
+            out.update(sp)
+    if extra:
+        out.update(extra)
+    return out
+
+
+def _zone_cond_values_equal(lhs, rhs) -> bool:
+    """존 conditions 값 비교 — 숫자 1 과 \"1\" 을 같게 봄."""
+    if lhs == rhs:
+        return True
+    try:
+        if float(lhs) == float(rhs):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(lhs) == str(rhs)
+
+
+def zone_conditions_ok(zone: dict, save_data: dict, session_vars=None) -> bool:
+    """
+    event_zones / presence_zones 의 conditions 가 현재 진행과 맞는지.
+    세션 변수가 같은 키의 세이브 값을 덮어쓴다 (RESULT session:true).
+    지원:
+      mainprogress, min_laugh_point
+      when/condition/expr — 전체 조건식
+      그 외 키 — ctx[key] == value (progress_flower1_ground: 1 등)
+    """
+    if not isinstance(zone, dict):
+        return True
+    cond = zone.get("conditions")
+    if not cond:
+        return True
+    if not isinstance(cond, dict):
+        return True
+    ctx = build_eval_ctx(save_data, session_vars)
+    mp = cond.get("mainprogress")
+    if mp not in (None, ""):
+        if str(mp) != str(ctx.get("mainprogress", "") or ""):
+            return False
+    if "min_laugh_point" in cond:
+        try:
+            if int(ctx.get("laugh_point", 0) or 0) < int(cond.get("min_laugh_point") or 0):
+                return False
+        except (TypeError, ValueError):
+            return False
+    expr = cond.get("when") or cond.get("condition") or cond.get("expr")
+    if expr not in (None, "") and not evaluate_global_condition(expr, ctx):
+        return False
+    for k, v in cond.items():
+        if k in ("mainprogress", "min_laugh_point", "when", "condition", "expr"):
+            continue
+        lhs = ctx.get(k)
+        if lhs is None and str(k).startswith("progress_"):
+            lhs = 0
+        if not _zone_cond_values_equal(lhs, v):
+            return False
+    return True
+
+
 def pick_sync_events(
     event_data: dict,
     save_data: dict,
@@ -242,30 +315,116 @@ def normalize_condition_expr(condition_expr) -> str:
     return s.strip()
 
 
-def evaluate_global_condition(condition_expr, eval_ctx: dict) -> bool:
-    """
-    eval_ctx 기준 조건식. 예: mainprogress == "010100"
-    gamestart 는 세이브가 아니라 main에서 넘기는 세션 변수(session_vars)로만 쓰는 것을 권장.
-    비어 있으면 True.
-    """
-    if condition_expr is None:
-        return True
-    s = normalize_condition_expr(condition_expr)
+def _split_condition_logic_clauses(expr: str, word: str) -> list:
+    """조건식 and/or (또는 && / ||) 분리. 따옴표 안은 쪼개지 않음."""
+    s = str(expr or "")
+    if not s.strip():
+        return []
+    word = str(word or "").strip().lower()
+    if word not in ("and", "or"):
+        return [s.strip()]
+    out = []
+    buf = []
+    i = 0
+    n = len(s)
+    quote = None
+    while i < n:
+        ch = s[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if word == "and" and s.startswith("&&", i):
+            piece = "".join(buf).strip()
+            if piece:
+                out.append(piece)
+            buf = []
+            i += 2
+            continue
+        if word == "or" and s.startswith("||", i):
+            piece = "".join(buf).strip()
+            if piece:
+                out.append(piece)
+            buf = []
+            i += 2
+            continue
+        m = re.match(rf"(?i)\s+{re.escape(word)}\s+", s[i:])
+        if m:
+            piece = "".join(buf).strip()
+            if piece:
+                out.append(piece)
+            buf = []
+            i += m.end()
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out or [s.strip()]
+
+
+def _parse_condition_list(raw: str, save_data: dict) -> list:
+    """in/notin 우변: 1005,1006 또는 (1005, 1006)."""
+    s = str(raw or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "()[]":
+        s = s[1:-1].strip()
+    parts = []
+    buf = []
+    quote = None
+    for ch in s:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch == ",":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            continue
+        buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return [_parse_condition_rhs(p, save_data) for p in parts]
+
+
+def _eval_condition_atom(expr: str, eval_ctx: dict) -> bool:
+    """단일 비교. in/notin 은 콤마 목록 멤버십."""
+    s = str(expr or "").strip()
     if not s:
         return True
+    s = re.sub(r"(?i)\s+not\s+in\s+", " notin ", s)
     m = re.match(
-        r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(==|!=|>=|<=|>|<)\s*(.+)\s*$",
+        r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(==|!=|>=|<=|>|<|notin|in)\s*(.+)\s*$",
         s,
+        re.I,
     )
     if not m:
         return False
-    key, op, rhs_raw = m.group(1), m.group(2), m.group(3).strip()
+    key, op, rhs_raw = m.group(1), m.group(2).lower(), m.group(3).strip()
     lhs = eval_ctx.get(key)
     if lhs is None and str(key).startswith("progress_"):
         lhs = 0
-    rhs = _parse_condition_rhs(rhs_raw, eval_ctx)
-
     try:
+        if op in ("in", "notin"):
+            items = _parse_condition_list(rhs_raw, eval_ctx)
+            hit = any(lhs == it for it in items)
+            return (not hit) if op == "notin" else hit
+        rhs = _parse_condition_rhs(rhs_raw, eval_ctx)
         if op == "==":
             return lhs == rhs
         if op == "!=":
@@ -283,12 +442,77 @@ def evaluate_global_condition(condition_expr, eval_ctx: dict) -> bool:
     return False
 
 
+def evaluate_global_condition(condition_expr, eval_ctx: dict) -> bool:
+    """
+    eval_ctx 기준 조건식. 비어 있으면 True.
+    예:
+      mainprogress == "010100"
+      progress_flower1_1 notin 1005,1006
+      progress_x != 1 and progress_x != 2
+      flag == 1 or progress_x == 1001
+    gamestart 는 세이브가 아니라 session_vars 로만 쓰는 것을 권장.
+    and 가 or 보다 먼저 묶임 (a or b and c → a or (b and c)).
+    """
+    if condition_expr is None:
+        return True
+    s = normalize_condition_expr(condition_expr)
+    if not s:
+        return True
+    s = re.sub(r"(?i)\s+not\s+in\s+", " notin ", s)
+    or_parts = _split_condition_logic_clauses(s, "or")
+    if not or_parts:
+        return True
+    for or_clause in or_parts:
+        and_parts = _split_condition_logic_clauses(or_clause, "and")
+        if and_parts and all(_eval_condition_atom(p, eval_ctx) for p in and_parts):
+            return True
+    return False
+
+
+def condition_step_chain_mode(step) -> str:
+    """
+    CONDITION 분기 방식. 기본 if.
+
+    [작성 원칙]
+      if   — 독립 if. 앞에서 맞았어도 다음 조건도 평가한다.
+             물뿌리개처럼 앞 RESULT 가 다음 조건을 열어 주는 연쇄에 쓴다.
+      elif — 같은 체인에서 앞 if/elif 가 이미 맞으면 이 블록은 건너뛴다.
+             대화 디스패처처럼 '맞는 것 하나만' 탈 때 2번째부터 elif.
+      else — 앞이 전부 거짓일 때만 본문. 조건식은 비워도 됨.
+
+    [공통]
+      각 본문은 CONDITION_SKIP 으로 닫는다.
+      분기 뒤에 공통 스텝(RESULT 등)이 있으면 마지막 SKIP 다음에 둔다.
+      CALL_EVENT 는 서브루틴 — 끝나면 부모의 다음 스텝(보통 SKIP)으로 돌아온다.
+
+    JSON: { "elif": true } / { "else": true }  또는  "chain": "elif"|"else"
+    """
+    if not isinstance(step, dict):
+        return "if"
+    raw_else = step.get("else")
+    if raw_else is True or raw_else == 1:
+        return "else"
+    if isinstance(raw_else, str) and raw_else.strip().lower() in ("1", "true", "yes", "on"):
+        return "else"
+    raw_elif = step.get("elif")
+    if raw_elif is True or raw_elif == 1:
+        return "elif"
+    if isinstance(raw_elif, str) and raw_elif.strip().lower() in ("1", "true", "yes", "on"):
+        return "elif"
+    chain = str(step.get("chain") or step.get("cond_chain") or "").strip().lower()
+    if chain in ("elif", "elseif", "else_if"):
+        return "elif"
+    if chain == "else":
+        return "else"
+    return "if"
+
+
 def evaluate_event_step_condition(step: dict, eval_ctx: dict) -> bool:
     """
     이벤트 스텝 CONDITION 용.
     - condition(또는 expr): 전체 식 — progress_wateringcan == 1002
     - var + op: 축약 — var=progress_wateringcan, op=>=100 또는 ==1002
-    둘 다 비어 있으면 True(통과).
+    둘 다 비어 있으면 True(통과). else 분기는 조건 없이 이 경로를 탄다.
     """
     if not isinstance(step, dict):
         return True
@@ -298,7 +522,7 @@ def evaluate_event_step_condition(step: dict, eval_ctx: dict) -> bool:
     if full:
         return evaluate_global_condition(full, eval_ctx)
     if var and op_part:
-        if re.match(r"^(==|!=|>=|<=|>|<)", op_part):
+        if re.match(r"(?i)^(==|!=|>=|<=|>|<|notin|in)", op_part.strip()):
             return evaluate_global_condition(f"{var} {op_part}", eval_ctx)
     return True
 
@@ -349,11 +573,11 @@ def evaluate_zone_block_condition(block, eval_ctx: dict) -> bool:
     if not var or not op:
         return False
     # op 가 "==" 만 있고 val 별도 → "!= 1" 형태로 합침
-    if re.match(r"^(==|!=|>=|<=|>|<)$", op):
+    if re.match(r"(?i)^(==|!=|>=|<=|>|<|notin|in)$", op):
         if val is None:
             return False
         op_part = f"{op} {val}"
-    elif re.match(r"^(==|!=|>=|<=|>|<)", op):
+    elif re.match(r"(?i)^(==|!=|>=|<=|>|<|notin|in)", op):
         # 이미 "!= 1" 형태
         op_part = op if val is None else (op if re.search(r"\d|\"|'", op) else f"{op} {val}")
     else:
@@ -580,6 +804,33 @@ def pick_global_auto_event(event_data: dict, save_data: dict, events_catalog: di
     return eid, global_sec[eid]
 
 
+def normalize_interact_spec(spec) -> dict:
+    """
+    interact dict 정리.
+    작성 편의: 최상위 event_id(+condition/when) 만 있으면 bindings 한 줄로 펼친다.
+    대화·FX·분기는 events.json 스텝에서 편집하는 것이 권장 모델.
+    """
+    if not isinstance(spec, dict):
+        return {}
+    out = dict(spec)
+    binds = out.get("bindings")
+    if isinstance(binds, list) and binds:
+        return out
+    eid = str(out.get("event_id") or "").strip()
+    if not eid:
+        return out
+    cond = str(out.get("condition") or out.get("when") or "").strip()
+    try:
+        pri = int(out.get("priority", 100))
+    except (TypeError, ValueError):
+        pri = 100
+    row = {"event_id": eid, "priority": pri}
+    if cond:
+        row["condition"] = cond
+    out["bindings"] = [row]
+    return out
+
+
 def merge_interact_spec(type_asset: dict, world_entry: dict = None) -> dict:
     """
     object_defs / char_defs 의 interact 와 world_data 인스턴스 interact 를 병합합니다.
@@ -593,8 +844,10 @@ def merge_interact_spec(type_asset: dict, world_entry: dict = None) -> dict:
     entry = world_entry if isinstance(world_entry, dict) else {}
     inst = entry.get("interact")
     if isinstance(inst, dict) and inst:
-        return _deep_merge(base, inst)
-    return copy.deepcopy(base)
+        merged = _deep_merge(base, inst)
+    else:
+        merged = copy.deepcopy(base)
+    return normalize_interact_spec(merged)
 
 
 def build_obj_def(name: str, world_entry=None) -> dict:
@@ -738,10 +991,10 @@ def entity_interact_spec(entity) -> dict:
         return {}
     spec = getattr(entity, "interact_spec", None)
     if isinstance(spec, dict):
-        return spec
+        return normalize_interact_spec(spec)
     cdef = getattr(entity, "char_def", None)
     if isinstance(cdef, dict):
-        return dict(cdef.get("interact") or {})
+        return normalize_interact_spec(dict(cdef.get("interact") or {}))
     return {}
 
 
@@ -755,8 +1008,27 @@ def interact_spec_enabled(spec) -> bool:
     return spec.get("enabled") is True
 
 
+def entity_is_interact_visible(entity) -> bool:
+    """
+    화면에 보이는 엔티티만 상호작용(클릭·대화·안내 아이콘) 후보.
+    TUNE visible / spawn visible / PLACE remove / 페이드 퇴장(alpha=0) 으로
+    숨긴 NPC·오브젝트는 발 위치에 서도 푸쉬버튼이 뜨지 않고 동작도 안 한다.
+    """
+    if entity is None:
+        return False
+    if not bool(getattr(entity, "is_visible", True)):
+        return False
+    try:
+        a = int(getattr(entity, "alpha", 255))
+    except (TypeError, ValueError):
+        a = 255
+    return a > 0
+
+
 def entity_interact_enabled(entity) -> bool:
     """enabled 가 명시적 true 이고 bindings(이벤트 또는 인라인 state/after)가 있으면 상호작용 후보."""
+    if not entity_is_interact_visible(entity):
+        return False
     spec = entity_interact_spec(entity)
     if not interact_spec_enabled(spec):
         return False
@@ -894,6 +1166,40 @@ def collect_progress_variables(event_data, obj_assets=None, char_assets=None, wo
 
     out = sorted(names, key=lambda v: (0 if v == "mainprogress" else 1, v))
     return out
+
+
+def iter_save_progress_vars(save_data, session_progress=None):
+    """
+    세이브에 들어 있는 mainprogress / progress_* (이름 정렬, mainprogress 먼저).
+    session_progress 가 있으면 같은 키는 세션 값으로 덮어 표시하고 (session) 을 붙인다.
+    O키 HUD 오버레이에서 현재 값을 나열할 때 사용.
+    """
+    sd = save_data if isinstance(save_data, dict) else {}
+    sp = session_progress if isinstance(session_progress, dict) else {}
+    keys = []
+    for k in sd:
+        ks = str(k)
+        if ks == "mainprogress" or ks.startswith("progress_"):
+            keys.append(ks)
+    for k in sp:
+        ks = str(k)
+        if ks == "mainprogress" or ks.startswith("progress_"):
+            if ks not in keys:
+                keys.append(ks)
+    keys.sort(key=lambda v: (0 if v == "mainprogress" else 1, v.lower()))
+    rows = []
+    for k in keys:
+        if k in sp:
+            v = sp.get(k)
+            if v is None:
+                v = ""
+            rows.append(f"{k}: {v} (session)")
+        else:
+            v = sd.get(k)
+            if v is None:
+                v = ""
+            rows.append(f"{k}: {v}")
+    return rows
 
 
 def _flow_sort_stage_values(values):
@@ -1921,6 +2227,8 @@ def entity_carry_click_allowed(entity) -> bool:
     holdable = bool(info.get("is_holdable") or getattr(entity, "is_holdable", False))
     if not holdable or getattr(entity, "is_held", False):
         return False
+    if not entity_is_interact_visible(entity):
+        return False
     spec = entity_interact_spec(entity)
     if not interact_spec_enabled(spec):
         return False
@@ -2007,20 +2315,24 @@ def entity_interact_prompt_available(
     spec = entity_interact_spec(entity)
     if not interact_spec_enabled(spec):
         return False
+    if not entity_is_interact_visible(entity):
+        return False
     if spec.get("prompt_enabled") is False:
         return False
     ctx = build_eval_ctx(flow.save_data if flow else {}, session_vars)
     ctx["map_id"] = str(map_id or "")
     ctx["npc_name"] = str(getattr(entity, "name", "") or "")
-    if getattr(entity, "char_def", None):
-        from char_behavior import npc_interact_enabled, pick_talk_line
-
-        if npc_interact_enabled(entity):
-            if pick_talk_line(entity, flow, map_id, player_pos, session_vars=session_vars):
-                return True
+    # 이벤트 bindings 우선 (대화·분기·FX 는 events.json)
     if entity_interact_enabled(entity):
         if pick_interact_binding(spec.get("bindings"), ctx, events_catalog):
             return True
+    if getattr(entity, "char_def", None):
+        from char_behavior import npc_interact_enabled, pick_talk_line
+
+        # 구형 talk.lines — bindings 가 없을 때만 안내 아이콘
+        if npc_interact_enabled(entity) and not (spec.get("bindings") or []):
+            if pick_talk_line(entity, flow, map_id, player_pos, session_vars=session_vars):
+                return True
     if entity_carry_click_allowed(entity):
         return True
     return False
@@ -2263,6 +2575,7 @@ def start_system_event(
 #   ]
 #   · persist 없는 PLACE: 기존처럼 런타임 전용(맵 리로드 시 소멸)
 #   · PLACE action:remove: 씬에서 제거 + placed 목록에서도 삭제
+#   · CHANGE persist:true: placed.name 을 to 키로 바꿈 (안 바꾸면 재시작 시 옛 외형으로 복구)
 # ---------------------------------------------------------------------------
 
 
@@ -2364,6 +2677,57 @@ def find_placed_entry(save_data, name: str):
         if isinstance(e, dict) and str(e.get("name") or "").strip() == nm:
             return e
     return None
+
+
+def mark_entity_placed_persist(ent, save_name=None) -> None:
+    """PLACE/CHANGE persist 공통 — 세이브 키를 엔티티에 붙인다.
+
+    _placed_save_name 은 CHANGE 가 persist 없이 외형(.name)만 바꿔도
+    snapshot_placed_from_live 가 같은 엔티티를 찾게 한다.
+    """
+    if ent is None:
+        return
+    nm = str(save_name or getattr(ent, "name", "") or "").strip()
+    try:
+        ent._placed_persist = True
+        if nm:
+            ent._placed_save_name = nm
+    except Exception:
+        pass
+
+
+def clear_entity_placed_persist(ent) -> None:
+    if ent is None:
+        return
+    try:
+        ent._placed_persist = False
+        ent._placed_save_name = ""
+    except Exception:
+        pass
+
+
+def rename_placed_entity(save_data, old_name: str, new_name: str) -> dict:
+    """CHANGE persist: placed 항목 이름을 to 키로 맞춤.
+
+    old 만 있으면 그 항목의 name 을 바꾸고, new 가 이미 있으면 old 를 지워
+    재시작 시 옛·새 외형이 둘 다 스폰되지 않게 한다.
+    둘 다 없으면 {} (호출부에서 upsert).
+    """
+    old_nm = str(old_name or "").strip()
+    new_nm = str(new_name or "").strip()
+    if not new_nm or new_nm.lower() == "player":
+        return {}
+    old = find_placed_entry(save_data, old_nm) if old_nm else None
+    new = find_placed_entry(save_data, new_nm)
+    if old is not None and (new is None or new is old):
+        old["name"] = new_nm
+        return old
+    if old is not None and new is not None and old is not new:
+        remove_placed_entity(save_data, old_nm)
+        return new
+    if new is not None:
+        return new
+    return {}
 
 
 def _clear_placed_follow_meta(entry: dict) -> None:
@@ -2623,7 +2987,7 @@ def persist_active_followers_to_save(
                 from char_behavior import set_npc_behavior
 
                 set_npc_behavior(ent, "follow")
-                ent._placed_persist = True
+                mark_entity_placed_persist(ent)
             except Exception:
                 pass
 
@@ -2793,7 +3157,7 @@ def restore_event_followers_from_placed(
             continue
         try:
             set_npc_behavior(ent, "follow")
-            ent._placed_persist = True
+            mark_entity_placed_persist(ent)
         except Exception:
             pass
 
@@ -2879,6 +3243,15 @@ def _snapshot_placed_visual_from_entity(ent, entry: dict) -> None:
         entry["entity_fx"] = ser_fx
     else:
         entry.pop("entity_fx", None)
+    # ACTION_ANIM persist
+    if bool(getattr(ent, "_action_anim_persist", False)):
+        aa = getattr(ent, "_persisted_action_anim", None)
+        if isinstance(aa, dict) and (aa.get("anim") or aa.get("name")):
+            entry["action_anim"] = dict(aa)
+        else:
+            entry.pop("action_anim", None)
+    else:
+        entry.pop("action_anim", None)
 
 
 def snapshot_placed_from_live(save_data, map_id, objs, npcs, *, event_followers=None) -> None:
@@ -2894,6 +3267,10 @@ def snapshot_placed_from_live(save_data, map_id, objs, npcs, *, event_followers=
         nm = str(getattr(ent, "name", "") or "").strip()
         if nm:
             live[nm] = ent
+        # CHANGE persist 없이 외형만 바뀐 경우 — 세이브 키로도 찾는다
+        save_nm = str(getattr(ent, "_placed_save_name", "") or "").strip()
+        if save_nm:
+            live[save_nm] = ent
     fol_keep = set()
     if event_followers is not None:
         fol_keep = {
@@ -3114,6 +3491,8 @@ def _spawn_one_placed_entity(entry: dict, objs: list, npcs: list, save_data=None
             ysort_mode=ys,
             layer=ly,
             zoom=entry.get("zoom", None),
+            wall_angle=entry.get("wall_angle", 0.0),
+            wall_3d=entry.get("wall_3d", False),
         )
         objs.append(ent)
     else:
@@ -3210,10 +3589,27 @@ def _spawn_one_placed_entity(entry: dict, objs: list, npcs: list, save_data=None
             ent._entity_fx_event_persist = True
         except Exception:
             pass
-    try:
-        ent._placed_persist = True
-    except Exception:
-        pass
+    aa = entry.get("action_anim")
+    if isinstance(aa, dict) and (aa.get("anim") or aa.get("name")):
+        try:
+            from engine import apply_persisted_action_anim
+
+            apply_persisted_action_anim(ent, aa, objs=objs, npcs=npcs)
+        except Exception as e:
+            print(f"[placed action_anim restore] {e}")
+    mark_entity_placed_persist(ent, str(entry.get("name") or "").strip() or nm_res)
+    # PLACE persist 복원 = 맵에 다시 등장. world_data 인스턴스가 spawn_state 로
+    # 먼저 숨겨진 뒤 placed 가 같은 이름을 덮을 때도 보이게 한다.
+    if hasattr(ent, "is_visible"):
+        try:
+            ent.is_visible = True
+        except Exception:
+            pass
+    if hasattr(ent, "alpha"):
+        try:
+            ent.alpha = 255
+        except Exception:
+            pass
     return ent
 
 
@@ -3297,6 +3693,18 @@ def merge_save_defaults(save_data: dict, config) -> dict:
             if k not in save_data:
                 save_data[k] = v
     save_data.pop("gamestart", None)
+    # 구 세이브: here01 표시 중 progress_flower1_1==1002 를 파일에 남김.
+    # 1002 는 세션 전용(휘발 마커). 심기 전(1003 미만)이면 1001 로 되돌려
+    # 재시작 후 ev_flower1_1 을 다시 탈 수 있게 한다.
+    try:
+        p1 = save_data.get("progress_flower1_1")
+        if p1 == 1002 or str(p1) == "1002":
+            save_data["progress_flower1_1"] = 1001
+            g = save_data.get("progress_flower1_ground")
+            if g == 1 or str(g) == "1":
+                save_data["progress_flower1_ground"] = 0
+    except Exception:
+        pass
     # player_char_selected:
     #   - 선택 UI 완료 시에만 True
     #   - 구 세이브에 키 없음: mainprogress 가 010100 이면 미선택, 그 외(본편 진행)면 완료로 간주
@@ -3512,6 +3920,33 @@ def append_baseball_record(entry: dict, config=None) -> list:
         reverse=True,
     )
     return ranked[:10]
+
+
+def racing_record_bests(config=None) -> list:
+    """맵·랩수별 최고 기록 목록 (레이스 메뉴 '기록 보기'). 맵 id → 랩 수 순."""
+    maps = load_minigame_records(config).get("racing", {}).get("maps") or {}
+    rows = []
+    if not isinstance(maps, dict):
+        return rows
+    for mid, mrow in maps.items():
+        if not isinstance(mrow, dict):
+            continue
+        by_laps = mrow.get("by_laps") or {}
+        if not isinstance(by_laps, dict):
+            continue
+        for _lk, brow in by_laps.items():
+            if isinstance(brow, dict):
+                rows.append(dict(brow))
+
+    def _sort_key(r):
+        try:
+            laps_i = int(r.get("laps") or 0)
+        except (TypeError, ValueError):
+            laps_i = 0
+        return (str(r.get("map_id") or ""), laps_i)
+
+    rows.sort(key=_sort_key)
+    return rows
 
 
 def racing_best_for_map(map_id: str, laps: int, config=None):
@@ -3744,6 +4179,8 @@ class GameFlow:
         self._pre_event_save_snapshot = None
         # contact_player: 존 안에 머무는 동안 매 프레임 재발동 방지 (진입 엣지에서만)
         self._zone_player_inside = {}
+        # RESULT session:true — 이번 실행만. 세이브에 안 씀 (here01 같은 휘발 마커).
+        self.session_progress = {}
         if "mainprogress" not in self.save_data:
             _sp = list(self.config.get("NEW_GAME_SPAWN_POS") or [100, 100])
             self.save_data = merge_save_defaults(
@@ -3756,6 +4193,15 @@ class GameFlow:
                 },
                 self.config,
             )
+
+    def eval_session_vars(self, extra=None) -> dict:
+        out = {"gamestart": getattr(self, "boot_phase", None)}
+        sp = getattr(self, "session_progress", None)
+        if isinstance(sp, dict):
+            out.update(sp)
+        if extra:
+            out.update(extra)
+        return out
 
     def reset_zone_contact_state(self, map_id=None):
         """맵 전환 등: contact_player 엣지 추적 초기화."""
@@ -3774,10 +4220,12 @@ class GameFlow:
         npcs=None,
         *,
         zone_click_world=None,
+        session_vars=None,
     ):
         m = self.world_data.get(map_id, {})
         zones = m.get("event_zones", [])
         save = self.save_data
+        kwargs_session = session_vars if session_vars is not None else eval_session_vars(self)
         px, py = player_pos
         mid = str(map_id)
         prev_inside = self._zone_player_inside.get(mid, set())
@@ -3794,17 +4242,9 @@ class GameFlow:
             if zi not in now_inside:
                 continue
 
-            # 2. 조건 체크
-            cond = z.get("conditions", {})
-            
-            # 메인 진행도 체크 (get을 써서 안전하게 비교)
-            if cond.get("mainprogress") and cond["mainprogress"] != save.get("mainprogress"):
+            # 2. 조건 체크 (세션 RESULT 포함 — here01 점유 등)
+            if not zone_conditions_ok(z, save, session_vars=kwargs_session):
                 continue
-                
-            # 웃음 포인트 체크
-            if "min_laugh_point" in cond:
-                if save.get("laugh_point", 0) < cond["min_laugh_point"]:
-                    continue
 
             # 3. 트리거 체크 (json에 쓴 "contact_player" 대응)
             t_type = z.get("trigger", "contact")
@@ -3892,6 +4332,13 @@ class GameFlow:
                         row["wall_angle"] = round(float(wa), 2)
             except Exception:
                 pass
+            try:
+                from engine import field_wall_3d_flag
+
+                if field_wall_3d_flag(getattr(o, "wall_3d", False)):
+                    row["wall_3d"] = True
+            except Exception:
+                pass
             inst = getattr(o, "interact_instance", None)
             if isinstance(inst, dict) and inst:
                 row["interact"] = inst
@@ -3973,9 +4420,14 @@ class GameFlow:
     def load_save_data(self):
         if os.path.exists(self.save_path):
             try:
-                with open(self.save_path, "r") as f:
+                # 기록은 항상 UTF-8(ensure_ascii=False). Windows 기본 cp949 로 읽으면
+                # progress_status 등 한글이 들어간 뒤 UnicodeDecodeError → 빈 세이브로
+                # 떨어져 캐릭터 선택/010100 초기화처럼 보인다.
+                with open(self.save_path, "r", encoding="utf-8-sig") as f:
                     return json.load(f)
-            except: return None
+            except Exception as e:
+                print(f"[save] load failed ({self.save_path}): {e}")
+                return None
         return None
 
     def sync_runtime_location(self, map_id, player_pos):
@@ -3997,12 +4449,13 @@ class GameFlow:
         """
         이벤트 시작 직전 상태를 디스크에 고정.
         이벤트 중 종료·크래시 시 이벤트용 맵이 세이브에 남지 않게 한다.
-        본편(boot_phase>=2)에서만 동작.
+        본편(boot_phase==2)에서만 동작. (캐릭터선택 15 등은 온보딩 세이브 오염 방지)
         """
         try:
-            if int(getattr(self, "boot_phase", 0) or 0) < 2:
-                return
+            bp = int(getattr(self, "boot_phase", 0) or 0)
         except (TypeError, ValueError):
+            return
+        if bp != 2:
             return
         if not isinstance(self.save_data, dict):
             self.save_data = {}
@@ -4160,6 +4613,7 @@ class GameFlow:
                 ysort_mode=o.get("ysort", "ground"),
                 layer=o.get("layer", None),
                 wall_angle=o.get("wall_angle", 0.0),
+                wall_3d=o.get("wall_3d", False),
                 zoom=o.get("zoom", None),
             )
             # Optional: auto scroll (e.g. fog/cloud background layers)
@@ -4227,7 +4681,9 @@ class GameFlow:
         sd = dict(self.save_data or {})
         if save_data:
             sd.update(save_data)
-        objs, npcs = apply_map_progress_states(objs, npcs, sd)
+        objs, npcs = apply_map_progress_states(
+            objs, npcs, sd, session_vars=eval_session_vars(self)
+        )
 
         # PLACE persist — travel/follow 동행 좌표 갱신 후 현재 맵 placed 스폰
         # (world_data 정적 배치 + progress 적용 뒤, 동일 이름이면 pos/behavior 만 덮어씀)
@@ -4245,6 +4701,11 @@ class GameFlow:
                     mask=mask,
                 )
                 # travel 로 바뀐 map_id/pos 를 self.save_data 에 유지 (위에서 self.save_data 를 넘김)
+                # placed 로 새로 스폰된 엔티티에도 progress_apply 적용
+                # (_placed_persist 는 spawn_state 숨김을 건너뜀)
+                objs, npcs = apply_map_progress_states(
+                    objs, npcs, sd, session_vars=eval_session_vars(self)
+                )
             except Exception as e:
                 print(f"[load_map] placed restore failed: {e}")
 
@@ -4516,21 +4977,8 @@ def _find_entity_by_name(name, player, objs, npcs):
     return None
 
 
-def presence_zone_conditions_ok(zone: dict, save_data: dict) -> bool:
-    cond = zone.get("conditions") or {}
-    if not isinstance(cond, dict):
-        cond = {}
-    save = save_data or {}
-    mp = cond.get("mainprogress")
-    if mp and str(mp) != str(save.get("mainprogress", "")):
-        return False
-    if "min_laugh_point" in cond:
-        try:
-            if int(save.get("laugh_point", 0) or 0) < int(cond["min_laugh_point"]):
-                return False
-        except (TypeError, ValueError):
-            return False
-    return True
+def presence_zone_conditions_ok(zone: dict, save_data: dict, session_vars=None) -> bool:
+    return zone_conditions_ok(zone, save_data, session_vars=session_vars)
 
 
 def pick_presence_zone_index(zones, map_id, player_pos, save_data) -> int:

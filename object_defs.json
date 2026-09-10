@@ -35,14 +35,9 @@
     "match_id": "TOY",
     "category": "들 수 있는 물건",
     "interact": {
-      "enabled": true,
+      "enabled": false,
       "range": 16.0,
-      "bindings": [
-        {
-          "condition": "progress_wateringcan == 1001",
-          "event_id": "ev_wateringcan_pickup",
-          "priority": 100
-        }
+      "bindings": [        
       ]
     }
   },
@@ -69,12 +64,43 @@
       "range": 16.0,
       "bindings": [
         {
-          "condition": "progress_flower1_1 == 1001",
+          "condition": "progress_flower1_1==1001",
           "event_id": "ev_flower1_1",
-          "priority": 10
+          "priority": 100
         }
       ]
     }
+    
+  },
+  "flower_fairy1_1": {
+    "path": "images/object/flower_fairy1_1",
+    "is_holdable": false,
+    "collision": false,
+    "name": "시들시들 f1",
+    "match_id": "TOY",
+    "category": "들 수 있는 물건",
+    "interact": {
+      "enabled": false,
+      "range": 16.0,
+      "bindings": [        
+      ]
+    }
+    
+  },
+  "flower_fairy1_2": {
+    "path": "images/object/flower_fairy1_2",
+    "is_holdable": false,
+    "collision": false,
+    "name": "시들시들 f1",
+    "match_id": "TOY",
+    "category": "들 수 있는 물건",
+    "interact": {
+      "enabled": false,
+      "range": 16.0,
+      "bindings": [        
+      ]
+    }
+    
   },
   "here01": {
     "path": "images/fx/here01",
@@ -88,18 +114,19 @@
         0.0,
         -32.0
       ],
-      "bindings": [
-        {
-          "condition": "progress_flower1_1 == 1002",
-          "event_id": "ev_flower1_2",
-          "priority": 10
-        }
-      ]
+      "bindings": []
     }
   },
   "pot": {
     "path": "images/object/pot.png",
     "is_holdable": true,
+    "collision": true,
+    "match_id": "TOY",
+    "category": "들 수 있는 물건"
+  },
+  "flowerinpot01": {
+    "path": "images/object/flowerinpot01.png",
+    "is_holdable": false,
     "collision": true,
     "match_id": "TOY",
     "category": "들 수 있는 물건"
@@ -292,6 +319,46 @@
     "path": "images/object/jjangpu/jjangpu2_bench3-4.png",
     "is_holdable": false,
     "collision": false,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu_inside_wall01": {
+    "path": "images/object/jjangpu/jjangpu_inside_wall01.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu_inside_window": {
+    "path": "images/object/jjangpu/jjangpu_inside_window.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu_inside_furniture1": {
+    "path": "images/object/jjangpu/jjangpu_inside_furniture1.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu_inside_furniture2": {
+    "path": "images/object/jjangpu/jjangpu_inside_furniture2.png",
+    "is_holdable": false,
+    "collision": true,
+    "can_hide_player": false,
+    "layer": 0,
+    "category": "건축물류"
+  },
+  "jjangpu_inside_furniture3": {
+    "path": "images/object/jjangpu/jjangpu_inside_furniture3.png",
+    "is_holdable": false,
+    "collision": true,
     "can_hide_player": false,
     "layer": 0,
     "category": "건축물류"
@@ -744,14 +811,9 @@
     "collision": true,
     "category": "타일류",
     "interact": {
-      "enabled": true,
+      "enabled": false,
       "range": 16.0,
-      "bindings": [
-        {
-          "condition": "progress_wateringcan >= 1002",
-          "event_id": "ev_wateringcan_putdown",
-          "priority": 100
-        }
+      "bindings": [        
       ]
     }
   },

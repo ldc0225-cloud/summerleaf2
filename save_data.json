@@ -1,25 +1,158 @@
 {
-    "mainprogress": "010100",
+    "mainprogress": "010200",
     "laugh_point": 0,
     "subprogress": {},
     "player_pos": [
-        653,
-        1360
+        576,
+        58
     ],
-    "current_map": "bg_jjangpu",
-    "player_char": "dani_k",
+    "current_map": "bg_pond02",
+    "player_char": "summer_k",
     "jump_shadow_mode": "ground",
     "flags": {},
     "affinity": {},
-    "placed": [],
-    "field_boot_ready": 0,
+    "placed": [
+        {
+            "name": "dani_k",
+            "map_id": "bg_pond02",
+            "pos": [
+                112.0,
+                432.0
+            ],
+            "behavior": {
+                "mode": "follow"
+            },
+            "travel": true,
+            "follow_leader": "player",
+            "follow_dist": 40.0,
+            "follow_speed": 1.0
+        },
+        {
+            "name": "igyeong_k",
+            "map_id": "bg_pond02",
+            "pos": [
+                112.0,
+                432.0
+            ],
+            "behavior": {
+                "mode": "follow"
+            },
+            "travel": true,
+            "follow_leader": "player",
+            "follow_dist": 40.0,
+            "follow_speed": 1.0
+        },
+        {
+            "name": "yuha_k",
+            "map_id": "bg_pond02",
+            "pos": [
+                112.0,
+                432.0
+            ],
+            "behavior": {
+                "mode": "follow"
+            },
+            "travel": true,
+            "follow_leader": "player",
+            "follow_dist": 40.0,
+            "follow_speed": 1.0
+        },
+        {
+            "name": "hyeon_k",
+            "map_id": "bg_pond02",
+            "pos": [
+                112.0,
+                432.0
+            ],
+            "behavior": {
+                "mode": "follow"
+            },
+            "travel": true,
+            "follow_leader": "player",
+            "follow_dist": 40.0,
+            "follow_speed": 1.0
+        },
+        {
+            "name": "rockie_k",
+            "map_id": "bg_pond02",
+            "pos": [
+                112.0,
+                432.0
+            ],
+            "behavior": {
+                "mode": "follow"
+            },
+            "travel": true,
+            "follow_leader": "player",
+            "follow_dist": 40.0,
+            "follow_speed": 1.0
+        },
+        {
+            "name": "fairy1",
+            "map_id": "bg_pond02",
+            "pos": [
+                112.0,
+                432.0
+            ],
+            "behavior": {
+                "mode": "follow"
+            },
+            "travel": true,
+            "follow_leader": "player",
+            "follow_dist": 40.0,
+            "follow_speed": 1.0
+        }
+    ],
+    "field_boot_ready": 1,
     "progress_wateringcan": 1001,
+    "progress_status": "황소개구리는 어디에 있을까요?",
+    "progress_flower1_1": 1006,
+    "progress_flower1_ground": 0,
     "progress_frog_minigame_win": 0,
     "progress_frog_seed": 0,
     "progress_frog_minigame_tried": 0,
     "progress_bullfrog_win": 0,
     "progress_fishing_win": 0,
     "player_char_selected": true,
-    "parent_char": "jjanga_a",
-    "event_followers": []
+    "parent_char": "carrot_a",
+    "event_followers": [
+        {
+            "follower": "dani_k",
+            "leader": "player",
+            "dist": 40.0,
+            "speed": 1.0
+        },
+        {
+            "follower": "igyeong_k",
+            "leader": "player",
+            "dist": 40.0,
+            "speed": 1.0
+        },
+        {
+            "follower": "yuha_k",
+            "leader": "player",
+            "dist": 40.0,
+            "speed": 1.0
+        },
+        {
+            "follower": "hyeon_k",
+            "leader": "player",
+            "dist": 40.0,
+            "speed": 1.0
+        },
+        {
+            "follower": "rockie_k",
+            "leader": "player",
+            "dist": 40.0,
+            "speed": 1.0
+        },
+        {
+            "follower": "fairy1",
+            "leader": "player",
+            "dist": 40.0,
+            "speed": 1.0
+        }
+    ],
+    "block02": 1,
+    "progress_talkto": 0
 }

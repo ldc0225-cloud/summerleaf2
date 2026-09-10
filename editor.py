@@ -8,7 +8,7 @@ import json
 import re
 
 import pygame
-from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES
+from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES, music_track_ids
 from entity_defs import (
     FLOW_EVENT_LINKED_HEADER,
     build_editor_flow_catalog_rows,
@@ -30,6 +30,7 @@ from flow import (
     _flow_zone_entry,
     build_entity_flow_diagram,
     build_zone_flow_diagram,
+    condition_step_chain_mode,
     merge_event_catalog,
     progress_value_key,
 )
@@ -41,6 +42,8 @@ from engine import (
     draw_object_text_label,
     _clamp_wall_angle_deg,
     field_wall_angle_active,
+    field_item_is_wall,
+    field_wall_3d_flag,
     field_wall_dir_xy,
     field_wall_world_aabb,
     field_wall_editor_hit,
@@ -57,6 +60,8 @@ from render_align import (
 import editor_baseball as bb_ed
 import editor_racing as rc_ed
 import editor_font as font_ed
+import editor_dialog as dlg_ed
+import editor_text as ed_txt
 from entity_defs import reload_entity_defs
 
 # events.json 섹션 (에디터 목록·저장 공통)
@@ -91,7 +96,7 @@ def _editor_map_tab_content_width(n_maps):
 def _editor_map_tab_bar_layout(sidebar_w, merge_btn_x, n_maps, scroll_x):
     """
     상단 맵 선택 스트립 레이아웃.
-    MERGE/FONT/PNG 왼쪽까지를 탭 영역으로 쓰고, 넘치면 ◀▶ + 클립 스크롤.
+    MERGE/DIALOG/FONT/PNG 왼쪽까지를 탭 영역으로 쓰고, 넘치면 ◀▶ + 클립 스크롤.
 
     Returns:
       dict: left_arrow, right_arrow, clip, scroll_x, max_scroll, need_scroll, strip_rect
@@ -208,7 +213,7 @@ def _editor_entity_world_rect(o):
         wa = float(getattr(o, "wall_angle", 0.0) or 0.0)
     except (TypeError, ValueError):
         wa = 0.0
-    if isinstance(o, FieldItem) and field_wall_angle_active(wa):
+    if isinstance(o, FieldItem) and field_item_is_wall(o):
         try:
             h_off = float(getattr(o, "height", 0) or 0)
         except (TypeError, ValueError):
@@ -239,7 +244,7 @@ def _editor_entity_alpha_hit(o, wx, wy, *, alpha_min=None):
         ez = float(getattr(o, "entity_def_zoom", 1.0) or 1.0)
     except Exception:
         ez = 1.0
-    if isinstance(o, FieldItem) and field_wall_angle_active(wa):
+    if isinstance(o, FieldItem) and field_item_is_wall(o):
         iw, ih = img.get_size()
         if abs(ez - 1.0) > 1e-4:
             iw = max(1, int(round(iw * ez)))
@@ -364,7 +369,7 @@ def _editor_entity_alpha_hit_rect(o, sel_rect, *, alpha_min=None):
         wa = float(getattr(o, "wall_angle", 0.0) or 0.0)
     except (TypeError, ValueError):
         wa = 0.0
-    if isinstance(o, FieldItem) and field_wall_angle_active(wa):
+    if isinstance(o, FieldItem) and field_item_is_wall(o):
         return True
     if alpha_min is None:
         alpha_min = _editor_pick_alpha_min()
@@ -662,7 +667,7 @@ def _editor_event_preview_map(edata, map_list):
 
 def _parse_editor_json_kv_blob(text: str):
     """
-    에디터 Result Opt / Zone cond_opt 등: 객체 1개를 dict 로 파싱.
+    에디터 Result Opt 등: 객체 1개를 dict 로 파싱.
     - 권장(따옴표 없이): progress_x: 1001  또는  progress_x = 1001
     - 허용: "progress_x": 1001  /  { "progress_x": 1001 }
     실패 시 None.
@@ -814,8 +819,13 @@ def _result_to_res_fields(edata):
         "res_op": "=",
         "res_val": "",
         "res_opt": "",
+        "res_session": "false",
     }
-    rest = {k: v for k, v in res.items() if k != "mainprogress"}
+    rest = {
+        k: v
+        for k, v in res.items()
+        if k not in ("mainprogress", "session", "persist", "type")
+    }
     if "add_laugh_point" in rest:
         fields["res_add_laugh"] = str(rest.pop("add_laugh_point"))
     # +=key 형태
@@ -861,8 +871,9 @@ def _editor_split_condition_expr(expr: str):
     if not s:
         return "", "", ""
     m = re.match(
-        r'^["\']?([A-Za-z_][\w]*)["\']?\s*(==|!=|>=|<=|>|<)\s*(.+)$',
+        r'^["\']?([A-Za-z_][\w]*)["\']?\s*(==|!=|>=|<=|>|<|notin|in)\s*(.+)$',
         s,
+        re.I,
     )
     if not m:
         return "", "", ""
@@ -1260,6 +1271,20 @@ def _editor_parse_rgb_triplet(s):
         return (int(parts[0]), int(parts[1]), int(parts[2]))
     except Exception:
         return None
+
+
+def _editor_opt_bool_text(val) -> str:
+    """JSON bool → 에디터 드롭다운. False 를 `or ''` 로 지우면 show_name 이 비어 저장 시 키가 사라짐."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    s = str(val).strip().lower()
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return "true"
+    if s in ("0", "false", "f", "no", "n", "off"):
+        return "false"
+    return ""
 
 
 def _editor_color_palette_entries():
@@ -1919,20 +1944,34 @@ ZONE_TRIGGER_OPTS = [
     "time",
 ]
 ZONE_BLOCK_BOOL_OPTS = ["false", "true"]
-ZONE_BLOCK_OP_OPTS = ["==", "!=", ">=", "<=", ">", "<"]
+ZONE_BLOCK_OP_OPTS = ["==", "!=", "notin", "in", ">=", "<=", ">", "<"]
+ZONE_COND_OP_OPTS = ["==", "!=", "notin", "in", ">=", "<=", ">", "<"]
+_ZONE_COND_SKIP_KEYS = ("mainprogress", "min_laugh_point", "when", "condition", "expr")
 
 
-def _editor_zone_fields_from_zone_dict(z):
-    """event_zones 항목 → 이벤트 박스 모달 필드."""
-    z = z if isinstance(z, dict) else {}
-    fields = {
-        "name": str(z.get("name", "") or ""),
-        "event_id": str(z.get("event_id", "") or ""),
-        "target": str(z.get("target", "") or ""),
-        "trigger": str(z.get("trigger", "contact_player") or "contact_player"),
-        "cond_mainprogress": str((z.get("conditions", {}) or {}).get("mainprogress", "") or ""),
-        "cond_min_laugh_point": str((z.get("conditions", {}) or {}).get("min_laugh_point", "") or ""),
-        "cond_opt": "",
+def _editor_expr_is_compound(expr: str) -> bool:
+    """and/or 가 있으면 단일 var/op/val 칸에 넣지 않고 전체식으로 둔다."""
+    s = str(expr or "")
+    if "&&" in s or "||" in s:
+        return True
+    if re.search(r"(?i)\s+and\s+", s) or re.search(r"(?i)\s+or\s+", s):
+        return True
+    return False
+
+
+def _editor_zone_blank_fields():
+    """이벤트 박스 모달 빈 필드."""
+    return {
+        "name": "",
+        "event_id": "",
+        "target": "",
+        "trigger": "contact_player",
+        "cond_mainprogress": "",
+        "cond_min_laugh_point": "",
+        "cond_var": "",
+        "cond_op": "==",
+        "cond_val": "",
+        "cond_when": "",
         "block_on": "false",
         "block_var": "",
         "block_op": "!=",
@@ -1940,21 +1979,62 @@ def _editor_zone_fields_from_zone_dict(z):
         "block_when": "",
         "block_say": "",
         "block_who": "player",
-        "rect": list(z.get("rect")) if isinstance(z.get("rect"), (list, tuple)) else None,
+        "rect": None,
     }
-    try:
-        cond = dict(z.get("conditions", {}) or {})
-        cond.pop("mainprogress", None)
-        cond.pop("min_laugh_point", None)
-        if cond:
-            fields["cond_opt"] = ", ".join(
-                [
-                    json.dumps(k, ensure_ascii=False) + ": " + json.dumps(v, ensure_ascii=False)
-                    for k, v in cond.items()
-                ]
-            )
-    except Exception:
-        pass
+
+
+def _editor_zone_fields_from_zone_dict(z):
+    """event_zones 항목 → 이벤트 박스 모달 필드."""
+    z = z if isinstance(z, dict) else {}
+    fields = _editor_zone_blank_fields()
+    fields["name"] = str(z.get("name", "") or "")
+    fields["event_id"] = str(z.get("event_id", "") or "")
+    fields["target"] = str(z.get("target", "") or "")
+    fields["trigger"] = str(z.get("trigger", "contact_player") or "contact_player")
+    fields["rect"] = list(z.get("rect")) if isinstance(z.get("rect"), (list, tuple)) else None
+    cond = z.get("conditions") if isinstance(z.get("conditions"), dict) else {}
+    fields["cond_mainprogress"] = str(cond.get("mainprogress", "") or "")
+    fields["cond_min_laugh_point"] = str(cond.get("min_laugh_point", "") or "")
+    expr = str(cond.get("when") or cond.get("condition") or cond.get("expr") or "").strip()
+    extras = []
+    for k, v in cond.items():
+        if str(k) in _ZONE_COND_SKIP_KEYS:
+            continue
+        extras.append((str(k), v))
+    if expr:
+        if not _editor_expr_is_compound(expr):
+            cv, co, cval = _editor_split_condition_expr(expr)
+            if cv:
+                fields["cond_var"] = cv
+                co_l = str(co or "==").strip().lower()
+                fields["cond_op"] = co_l if co_l in ZONE_COND_OP_OPTS else "=="
+                fields["cond_val"] = cval
+            else:
+                fields["cond_when"] = expr
+        else:
+            fields["cond_when"] = expr
+    if extras:
+        if not fields["cond_var"] and not fields["cond_when"] and len(extras) == 1:
+            k0, v0 = extras[0]
+            fields["cond_var"] = k0
+            fields["cond_op"] = "=="
+            fields["cond_val"] = "" if v0 is None else str(v0)
+        else:
+            parts = []
+            if fields["cond_when"]:
+                parts.append(fields["cond_when"])
+            elif fields["cond_var"]:
+                joined0 = _editor_join_condition_parts(
+                    fields["cond_var"], fields.get("cond_op") or "==", fields.get("cond_val")
+                )
+                if joined0:
+                    parts.append(joined0)
+                fields["cond_var"] = ""
+                fields["cond_val"] = ""
+                fields["cond_op"] = "=="
+            for k0, v0 in extras:
+                parts.append(_editor_join_condition_parts(k0, "==", "" if v0 is None else str(v0)))
+            fields["cond_when"] = " and ".join(p for p in parts if p)
     block = z.get("block")
     if block is True or block == 1:
         fields["block_on"] = "true"
@@ -1970,14 +2050,13 @@ def _editor_zone_fields_from_zone_dict(z):
         fields["block_var"] = str(block.get("var") or block.get("key") or "")
         op = str(block.get("op") or block.get("operator") or "!=").strip() or "!="
         # op 가 "!= 1" 형태면 분리
-        m = re.match(r"^(==|!=|>=|<=|>|<)\s*(.*)$", op)
+        m = re.match(r"^(==|!=|>=|<=|>|<|notin|in)\s*(.*)$", op, re.I)
         if m:
-            fields["block_op"] = m.group(1)
+            op1 = str(m.group(1) or "").strip().lower()
+            fields["block_op"] = op1 if op1 in ZONE_BLOCK_OP_OPTS else "!="
             rest = (m.group(2) or "").strip()
             if rest and block.get("val") is None and block.get("value") is None:
                 fields["block_val"] = rest
-            else:
-                fields["block_op"] = m.group(1)
         else:
             fields["block_op"] = op if op in ZONE_BLOCK_OP_OPTS else "!="
         if "val" in block and block.get("val") is not None:
@@ -2030,6 +2109,37 @@ def _editor_zone_block_from_fields(fields):
         if isinstance(out, dict):
             out["say"] = say
             out["who"] = who
+    return out
+
+
+def _editor_zone_conditions_from_fields(fields) -> dict:
+    """존 모달 필드 → world_data conditions. 비어 있으면 {}."""
+    out = {}
+    mp = str(fields.get("cond_mainprogress") or "").strip()
+    if mp:
+        out["mainprogress"] = mp
+    mlp = str(fields.get("cond_min_laugh_point") or "").strip()
+    if mlp:
+        try:
+            out["min_laugh_point"] = int(float(mlp))
+        except (TypeError, ValueError):
+            pass
+    when = str(fields.get("cond_when") or "").strip()
+    var = str(fields.get("cond_var") or "").strip()
+    op = str(fields.get("cond_op") or "==").strip() or "=="
+    val_s = str(fields.get("cond_val") or "").strip()
+    if when:
+        out["when"] = when
+        return out
+    joined = _editor_join_condition_parts(var, op, val_s)
+    if not joined:
+        return out
+    # == 만 옛 형식(키:값)으로 저장. != / notin 등은 전체식 when.
+    if op == "==":
+        coerced = _editor_coerce_result_value(val_s)
+        out[var] = val_s if coerced is None else coerced
+    else:
+        out["when"] = joined
     return out
 
 
@@ -2227,6 +2337,8 @@ _EDITOR_RESULT_META_SKIP = frozenset(
         "patch",
         "add_laugh_point",
         "gamestart",
+        "session",
+        "persist",
     }
 )
 
@@ -2407,16 +2519,24 @@ def _zone_modal_rows():
         ("Event ID (BLOCK만 쓸 땐 비워도 됨)", "event_id", "events"),
         ("Target (contact_object)", "target", "text_pick"),
         ("Trigger", "trigger", "dropdown", ZONE_TRIGGER_OPTS),
+        (
+            "※ 실행 조건 — 맞을 때만 이벤트 발동. BLOCK처럼 변수/연산자/값으로 입력",
+            "_hint_zone_cond",
+            "hint",
+        ),
         ("Cond mainprogress", "cond_mainprogress", "text"),
         ("Cond min_laugh_point", "cond_min_laugh_point", "text"),
-        ('Cond opt — 추가 조건 예: progress_x: 1001 (따옴표 없이)', "cond_opt", "text"),
+        ("실행 변수", "cond_var", "progress_vars"),
+        ("실행 연산자", "cond_op", "dropdown", ZONE_COND_OP_OPTS),
+        ("실행 값 — notin/in 은 콤마 목록 예: 1005,1006", "cond_val", "text"),
+        ("실행 전체식(선택, 있으면 변수/연산자/값 무시). and/or 가능", "cond_when", "text"),
         (
             "※ BLOCK — 조건이 맞으면 캐릭터가 못 지나감 (이벤트 클리어 전 봉인 등)",
             "_hint_zone_block",
             "hint",
         ),
         ("BLOCK 사용", "block_on", "dropdown", ZONE_BLOCK_BOOL_OPTS),
-        ("BLOCK 변수", "block_var", "text"),
+        ("BLOCK 변수", "block_var", "progress_vars"),
         ("BLOCK 연산자", "block_op", "dropdown", ZONE_BLOCK_OP_OPTS),
         ("BLOCK 값", "block_val", "text"),
         ("BLOCK 전체식(선택, 있으면 var/op/val 무시)", "block_when", "text"),
@@ -2797,9 +2917,10 @@ def _editor_paint_sidebar_scrollbar(screen, panel_x, panel_w, view_top, view_bot
 
 
 def _editor_paint_modal_overlay(
-    screen, title_font, font, title, panel_rect, rows, scroll_px, store, active_key, *, area_theme="zone", section_bar_h=0
+    screen, title_font, font, title, panel_rect, rows, scroll_px, store, active_key, *, area_theme="zone", section_bar_h=0, edit_session=None
 ):
-    """통합 설정 모달 본문 + 우측 스크롤바. 드롭다운은 호출측에서 별도로 그림."""
+    """통합 설정 모달 본문 + 우측 스크롤바. 드롭다운은 호출측에서 별도로 그림.
+    edit_session: editor_text.EditSession — 활성 칸 커서/선택 표시."""
     pygame.draw.rect(screen, (40, 40, 40), panel_rect)
     pygame.draw.rect(screen, (200, 200, 200), panel_rect, 2)
     screen.blit(title_font.render(title, True, (255, 255, 255)), (panel_rect.x + 16, panel_rect.y + 12))
@@ -2816,8 +2937,13 @@ def _editor_paint_modal_overlay(
     fw, lw = 220, 52
     tw = 168
 
-    def _blit_trunc(val_rect, val, limit=28):
+    def _blit_field(val_rect, val, limit=28, *, is_active=False):
         s = str(val or "")
+        if edit_session is not None and is_active:
+            edit_session.blit(
+                screen, font, s, val_rect, color=(250, 250, 252), active=True, trunc_limit=None
+            )
+            return
         dv = s if len(s) <= limit else s[: max(0, limit - 3)] + "..."
         screen.blit(font.render(dv, True, (250, 250, 252)), (val_rect.x + 5, val_rect.y + 5))
         if len(s) > limit:
@@ -2871,7 +2997,7 @@ def _editor_paint_modal_overlay(
             val_rect = pygame.Rect(fx0, ry + 4, fw, row_h - 8)
             pygame.draw.rect(screen, (20, 20, 20), val_rect)
             pygame.draw.rect(screen, c, val_rect, 1)
-            _blit_trunc(val_rect, val, 28)
+            _blit_field(val_rect, val, 28, is_active=(active_key == rk))
             lb = pygame.Rect(fx0 + fw + 4, ry + 4, lw, row_h - 8)
             pygame.draw.rect(screen, (50, 70, 90), lb)
             pygame.draw.rect(screen, (120, 160, 200), lb, 1)
@@ -2882,7 +3008,7 @@ def _editor_paint_modal_overlay(
             val_rect = pygame.Rect(fx0, ry + 4, fw, row_h - 8)
             pygame.draw.rect(screen, (20, 20, 20), val_rect)
             pygame.draw.rect(screen, c, val_rect, 1)
-            _blit_trunc(val_rect, val, 28)
+            _blit_field(val_rect, val, 28, is_active=(active_key == rk))
             lb = pygame.Rect(fx0 + fw + 4, ry + 4, lw, row_h - 8)
             pygame.draw.rect(screen, (50, 70, 90), lb)
             pygame.draw.rect(screen, (120, 160, 200), lb, 1)
@@ -2893,14 +3019,14 @@ def _editor_paint_modal_overlay(
             pygame.draw.rect(screen, (20, 20, 20), val_rect)
             pygame.draw.rect(screen, c, val_rect, 1)
             val = str(store.get(rk, "") or "")
-            _blit_trunc(val_rect, val, 36)
+            _blit_field(val_rect, val, 36, is_active=(active_key == rk))
         elif kind == "events":
             c = _col()
             val_rect = pygame.Rect(fx0, ry + 4, fw, row_h - 8)
             pygame.draw.rect(screen, (20, 20, 20), val_rect)
             pygame.draw.rect(screen, c, val_rect, 1)
             val = str(store.get(rk, "") or "")
-            _blit_trunc(val_rect, val, 28)
+            _blit_field(val_rect, val, 28, is_active=(active_key == rk))
             lb = pygame.Rect(fx0 + fw + 4, ry + 4, lw, row_h - 8)
             pygame.draw.rect(screen, (50, 70, 90), lb)
             pygame.draw.rect(screen, (120, 160, 200), lb, 1)
@@ -2911,7 +3037,7 @@ def _editor_paint_modal_overlay(
             pygame.draw.rect(screen, (20, 20, 20), val_rect)
             pygame.draw.rect(screen, c, val_rect, 1)
             val = str(store.get(rk, "") or "")
-            _blit_trunc(val_rect, val, 28)
+            _blit_field(val_rect, val, 28, is_active=(active_key == rk))
             lb = pygame.Rect(fx0 + fw + 4, ry + 4, lw, row_h - 8)
             pygame.draw.rect(screen, (50, 70, 90), lb)
             pygame.draw.rect(screen, (120, 160, 200), lb, 1)
@@ -2921,13 +3047,14 @@ def _editor_paint_modal_overlay(
             val_rect = pygame.Rect(fx0, ry + 4, tw, row_h - 8)
             pal_btn = pygame.Rect(val_rect.right + 4, ry + 4, lw, row_h - 8)
             _editor_paint_color_field_row(screen, font, val_rect, pal_btn, store.get(rk, ""), c)
+            # 색 코드 중간수정은 입력 로직만 지원(스와치+텍스트 복합 그리기)
         elif kind == "text_pick":
             c = _col()
             val_rect = pygame.Rect(fx0, ry + 4, tw, row_h - 8)
             pygame.draw.rect(screen, (20, 20, 20), val_rect)
             pygame.draw.rect(screen, c, val_rect, 1)
             val = str(store.get(rk, "") or "")
-            _blit_trunc(val_rect, val, 22)
+            _blit_field(val_rect, val, 22, is_active=(active_key == rk))
             lb = pygame.Rect(val_rect.right + 4, ry + 4, lw, row_h - 8)
             pygame.draw.rect(screen, (50, 70, 90), lb)
             pygame.draw.rect(screen, (120, 160, 200), lb, 1)
@@ -3015,6 +3142,7 @@ STEP_TYPE_KO = {
     "BEHAVIOR": "행동 AI (BEHAVIOR)",
     "MAP": "맵 이동 (MAP)",
     "SAY": "대사 (SAY)",
+    "NOTICE": "안내창 (NOTICE)",
     "EMOTE": "말풍선 (EMOTE)",
     "ACTION_ANIM": "동작 애니 (ACTION_ANIM)",
     "WAIT": "대기 (WAIT)",
@@ -3036,6 +3164,7 @@ STEP_TYPE_KO = {
     "CURSOR_VISIBLE": "커서 표시 (CURSOR_VISIBLE)",
     "GAME_EXIT_BUTTON": "종료 버튼 (GAME_EXIT_BUTTON)",
     "GAME_DEBUG_BUTTON": "디버그 버튼 (GAME_DEBUG_BUTTON)",
+    "GAME_OPTIONS_BUTTON": "설정 버튼 (GAME_OPTIONS_BUTTON)",
     "FOLLOW_START": "따라가기 시작 (FOLLOW_START)",
     "FOLLOW_STOP": "따라가기 종료 (FOLLOW_STOP)",
     "CONDITION": "조건 분기 (CONDITION)",
@@ -3059,7 +3188,7 @@ STEP_TYPE_KO = {
 }
 
 STEP_EXECUTION_HINT_LINES = [
-    "※ 직렬(한 줄씩): WAIT·SAY·MOVE(경로) 등은 끝날 때까지 아래 스텝 대기.",
+    "※ 직렬(한 줄씩): WAIT·SAY·NOTICE·MOVE(경로) 등은 끝날 때까지 아래 스텝 대기.",
     "※ 논블로킹(즉시 다음): FADEIN/OUT·OVERLAY_UI·MUSIC_PLAY·SCREEN_FX 등.",
     "※ OVERLAY: overlay_id 같으면 같은 줄에서 순서, 다르면 동시(병렬). persist=true면 이벤트 끝 후에도 유지.",
 ]
@@ -3077,7 +3206,22 @@ def _step_config_type_row_y(panel_rect):
 
 def _step_config_type_rect(panel_rect):
     y = _step_config_type_row_y(panel_rect)
-    return pygame.Rect(panel_rect.x + 180, y - 5, 280, 30)
+    return pygame.Rect(panel_rect.x + 180, y - 5, 236, 30)
+
+
+def _step_config_type_sort_rect(panel_rect):
+    """스텝 종류 드롭다운 옆 — 가나다 / 분류순 토글."""
+    tr = _step_config_type_rect(panel_rect)
+    return pygame.Rect(tr.right + 6, tr.y, 78, tr.height)
+
+
+def _editor_step_types_view(cycle, mode):
+    """스텝 종류 드롭다운 표시 순서. alpha=한글 라벨 가나다, group=기능 묶음(정의 순)."""
+    raw = list(cycle or [])
+    m = str(mode or "alpha").strip().lower()
+    if m == "group":
+        return raw
+    return sorted(raw, key=lambda t: (_ko_step_type(t), str(t)))
 
 
 def _step_field_rows(step_type, step_fields=None):
@@ -3166,6 +3310,7 @@ def _step_field_rows(step_type, step_fields=None):
             ("hold_last (true/false, falldown 기본 true=1회 재생 후 마지막 프레임 고정)", "hold_last"),
             ("frame_sec (프레임별 초, falldown 기본 data.falldown_frame_sec)", "frame_sec"),
             ("jump 팁: once=1회 hop / hold+loop=착지마다 반복", "_hint_jump_hop"),
+            ("이벤트 종료·세이브 유지 (persist) — placed action_anim", "persist"),
         ]
     if t == "SAY":
         return [
@@ -3180,6 +3325,14 @@ def _step_field_rows(step_type, step_fields=None):
                 "bubble",
             ),
             ("말풍선 대상(여러명: a,b / all_npcs, 비우면 who)", "bubble_target"),
+        ]
+    if t == "NOTICE":
+        return [
+            ("안내창 (NOTICE): 화면을 어둡게 하고 중앙에 설명글. 직렬(클릭/A로 닫기)", "_hint_notice"),
+            ("제목 name (비우면 제목 없음)", "name"),
+            ("Text — \"ally5\"/{ally5} 이름치환, 줄바꿈 \\n", "text"),
+            ("Auto(true=시간 후 자동 닫기)", "auto"),
+            ("Val(sec) auto일 때 타자 완료 후 대기", "val"),
         ]
     if t == "EMOTE":
         return [
@@ -3224,7 +3377,7 @@ def _step_field_rows(step_type, step_fields=None):
             ("Follower (여러명: a,b / all_npcs)", "follower"),
             ("Leader(name)", "leader"),
             ("Dist(px)", "dist"),
-            ("Speed mul", "speed"),
+            ("Speed mul (리더 대비, 1=동기화)", "speed"),
             ("이벤트 종료 후 유지 (persist) — ambient follow·세이브·맵동행", "persist"),
         ]
     if t == "FOLLOW_STOP":
@@ -3250,12 +3403,14 @@ def _step_field_rows(step_type, step_fields=None):
         ]
     if t == "ANIM_ONCE":
         return [
-            ("ANIM_ONCE: object_defs name + 좌표, 1회 재생(끝날 때까지 대기)", "_hint_anim_once"),
+            ("ANIM_ONCE: object_defs name + 좌표. pos 여러 개면 동시에 재생", "_hint_anim_once"),
             ("Name (object_defs 키)", "name"),
             ("Pos X", "pos_x"),
             ("Pos Y", "pos_y"),
+            ("추가 좌표(;구분) — 같은 애니를 여러 위치에 동시 재생", "waypoints"),
             ("frame_ms (프레임 간격 ms, 비우면 object_defs 기본)", "frame_ms"),
             ("speed (재생 배율, 2=2배 빠름 — frame_ms와 함께 쓰면 배율 적용)", "speed"),
+            ("wait (끝날 때까지 대기, 기본 true. false면 즉시 다음)", "wait"),
         ]
     if t == "CARRY":
         return [
@@ -3269,10 +3424,12 @@ def _step_field_rows(step_type, step_fields=None):
         ]
     if t == "CHANGE":
         return [
-            ("CHANGE: FieldItem/캐릭터 외형 교체 (들고 있는 중 OK)", "_hint_change"),
+            ("CHANGE: 외형 교체. 오브젝트↔캐릭터도 가능 (flower_fairy1_2 → fairy1)", "_hint_change"),
             ("Target (held / 여러명: a,b / all_npcs)", "target"),
-            ("To (FieldItem=object_defs / 캐릭터=char_defs 키)", "to"),
-            ("Fade (초, 디졸브 — 사라졌다 나타남. 0/빈칸=즉시)", "fade"),
+            ("To (object_defs 또는 char_defs 키 — 교차 교체 가능)", "to"),
+            ("Speed (초, 변신 — 옛·새 스프라이트 겹침. 비우면 Fade)", "speed"),
+            ("Fade (초, 페이드 — Speed 비우면 이 값으로 변신. 둘 다 0=즉시)", "fade"),
+            ("세이브 유지 (persist) — placed 이름을 To 키로 바꿈. 끄면 재시작 시 옛 외형", "persist"),
         ]
     if t == "SCREEN":
         return [
@@ -3284,7 +3441,7 @@ def _step_field_rows(step_type, step_fields=None):
             ("Text delay sec", "text_delay_sec"),
             ("Auto(true=시간 후 자동)", "auto"),
             ("Force(true=클릭 스킵 불가)", "force"),
-            ("Hi-res 640x480 (true/false)", "hi_res"),
+            ("이미지는 현재 논리 화면(320)에 맞춤. 640 전환 없음", "_hint_screen_no_640"),
             ("Hold sec (val)", "val"),
             ("Action(remove)", "action"),
         ]
@@ -3296,7 +3453,7 @@ def _step_field_rows(step_type, step_fields=None):
             ("오버레이 트랙 ID (overlay_id) — 같으면 순서, 다르면 동시", "overlay_id"),
             ("같은 트랙·이전 연출 후 대기(초) (delay)", "delay"),
             ("content (text/image)", "content"),
-            ("text (줄바꿈 \\n)", "text"),
+            ("text — {progress_status} 등 세이브 변수·{player_name} 치환. 빈 결과면 show 스킵", "text"),
             ("font (레지스트리 키)", "font"),
             ("size (px)", "size"),
             ("color R,G,B", "color"),
@@ -3315,19 +3472,33 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "MUSIC_PLAY":
         return [
             ("MUSIC_PLAY: BGM 재생(기본은 현재 곡 끝나고 큐)", "_hint_music_play"),
-            ("Track (드롭다운/직접입력)", "music"),
+            ("Track (MUSIC_ASSETS 키)", "music"),
             ("fade_in(sec)", "fade_in"),
             ("loop(true/false)", "loop"),
             ("queue(true/false)", "queue"),
             ("volume(0~1)", "volume"),
+            (
+                "이벤트 종료 후 유지 (persist) — true=이 곡 유지, false/비움=맵 field.music 복귀",
+                "persist",
+            ),
         ]
     if t == "MUSIC_STOP":
         return [
             ("MUSIC_STOP: 페이드아웃 후 정지", "_hint_music_stop"),
             ("fade_out(sec)", "fade_out"),
+            (
+                "이벤트 종료 후 유지 (persist) — true=무음 유지, false/비움=맵 field.music 복귀",
+                "persist",
+            ),
         ]
     if t == "MUSIC_END":
-        return [("MUSIC_END: 즉시 정지", "_hint_music_end")]
+        return [
+            ("MUSIC_END: 즉시 정지", "_hint_music_end"),
+            (
+                "이벤트 종료 후 유지 (persist) — true=무음 유지, false/비움=맵 field.music 복귀",
+                "persist",
+            ),
+        ]
     if t == "MUSIC_PAUSE":
         return [("MUSIC_PAUSE: 일시정지", "_hint_music_pause")]
     if t == "MUSIC_RESUME":
@@ -3335,7 +3506,10 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "PLAYER_VISIBLE":
         return [("Val(true/false)", "val")]
     if t == "CURSOR_VISIBLE":
-        return [("Val(true/false)", "val")]
+        return [
+            ("Val(true/false)", "val"),
+            ("이벤트 종료 후 유지 (persist) — 끄면 시작 직전 상태로 복구", "persist"),
+        ]
     if t == "GAME_EXIT_BUTTON":
         return [
             ("표시 (val: true/false)", "val"),
@@ -3346,21 +3520,27 @@ def _step_field_rows(step_type, step_fields=None):
             ("표시 (val: true/false)", "val"),
             ("이벤트 종료 후 유지 (persist)", "persist"),
         ]
+    if t == "GAME_OPTIONS_BUTTON":
+        return [
+            ("표시 (val: true/false)", "val"),
+            ("이벤트 종료 후 유지 (persist)", "persist"),
+        ]
     if t == "CONDITION":
         return [
             (
-                "CONDITION: false면 다음 CONDITION_SKIP 직전까지 스텝 건너뜀",
+                "CONDITION: false면 다음 CONDITION_SKIP 직전까지 건너뜀. 공통 스텝은 마지막 SKIP 다음",
                 "_hint_condition",
             ),
+            ("분기 방식 — if=순서대로 전부 / elif=앞에서 맞으면 스킵 / else=나머지", "cond_chain"),
             ("변수 이름 (목록 또는 직접입력)", "var"),
-            ("연산자", "cond_op"),
-            ("값 (따옴표 없이)", "cond_val"),
-            ("또는 전체 조건식 (있으면 우선)", "condition"),
+            ("연산자 (== != in notin …)", "cond_op"),
+            ("값 — notin/in 은 콤마 목록 예: 1005,1006", "cond_val"),
+            ("또는 전체 조건식 (있으면 우선). and/or 가능", "condition"),
         ]
     if t == "CONDITION_SKIP":
         return [
             (
-                "CONDITION_SKIP: 블록 끝 (false면 여기로 점프, 맨 끝이면 이벤트 종료)",
+                "CONDITION_SKIP: 이 if/elif/else 본문 끝. 공통 스텝은 이 뒤에. 없으면 이벤트 끝까지 스킵",
                 "_hint_condition_skip",
             ),
         ]
@@ -3374,6 +3554,7 @@ def _step_field_rows(step_type, step_fields=None):
             ("변수 이름 (목록 또는 직접입력)", "res_key"),
             ("연산자 (= 대입 / += 가산)", "res_op"),
             ("값 (따옴표 없이 숫자/문자)", "res_val"),
+            ("세션만 (true=세이브 안 함, 재시작 시 소멸)", "res_session"),
             ("add_laugh_point (가산 포인트, 선택)", "res_add_laugh"),
             ("추가키(선택) progress_x: 1001", "res_opt"),
         ]
@@ -3408,6 +3589,8 @@ def _step_field_rows(step_type, step_fields=None):
             ("on (true/false)", "tilt_on"),
             ("strength (0~1)", "tilt_strength"),
             ("duration_sec (0=즉시)", "tilt_duration_sec"),
+            # 비우면 맵 field.reverse_tilt 유지. true=위→왼쪽, false=위→오른쪽 강제
+            ("reverse_tilt (빈칸=맵기본 / true=반대방향)", "tilt_reverse"),
         ]
     if t == "SHEAR":
         return [
@@ -3487,7 +3670,7 @@ def _step_field_rows(step_type, step_fields=None):
     if t == "DEV_CMD":
         return [
             ("DEV_CMD: 필드 즉시 동작 (field_runtime.apply_dev_runtime_command)", "_hint_dev_cmd"),
-            ("cmd (예: toggle_show_mask, cycle_zoom_debug)", "dev_cmd"),
+            ("cmd (return_from_* 는 정리만. 복귀 맵/좌표는 퇴장 이벤트의 MAP)", "dev_cmd"),
         ]
     if t == "CAMERA":
         return [
@@ -3578,15 +3761,19 @@ def _dev_cmd_dropdown_options():
         "camera_follow_player",
         "start_swing_ride",
         "stop_fishing",
+        "return_from_fishing",
         "start_fishing",
         "start_activity_fishing",
         "stop_baseball",
+        "return_from_baseball",
         "start_baseball",
         "start_activity_baseball",
         "stop_racing",
+        "return_from_racing",
         "start_racing",
         "start_activity_racing",
         "stop_bullfrog",
+        "return_from_bullfrog",
         "start_bullfrog",
         "start_activity_bullfrog",
         "stop_lotus_cross",
@@ -3673,8 +3860,12 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
     fk = (field_key or "").strip()
     if fk == "res_op" and t == "RESULT":
         return ["=", "+="]
+    if fk == "res_session" and t == "RESULT":
+        return ["false", "true"]
+    if fk == "cond_chain" and t == "CONDITION":
+        return ["if", "elif", "else"]
     if fk == "cond_op" and t == "CONDITION":
-        return ["==", "!=", ">=", "<=", ">", "<"]
+        return ["==", "!=", "notin", "in", ">=", "<=", ">", "<"]
     if fk in ("res_key", "var") and t in ("RESULT", "CONDITION"):
         return _editor_collect_progress_var_options(
             all_events,
@@ -3712,7 +3903,7 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["", "true", "false"]
     if fk == "show_name" and t == "SAY":
         return ["", "true", "false"]
-    if fk in ("auto",) and t == "SAY":
+    if fk in ("auto",) and t in ("SAY", "NOTICE"):
         return ["", "true", "false"]
     if fk == "bubble" and t in ("SAY", "EMOTE"):
         try:
@@ -3739,12 +3930,19 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["", "true", "false"]
     if fk == "loop" and t in ("EFFECT", "ACTION_ANIM"):
         return ["", "true", "false"]
-    if fk == "wait" and t == "ACTION_ANIM":
+    if fk == "wait" and t in ("ACTION_ANIM", "ANIM_ONCE"):
         return ["", "true", "false"]
     if fk == "loop" and t == "MUSIC_PLAY":
         return ["true", "false"]
     if fk == "queue" and t == "MUSIC_PLAY":
         return ["true", "false"]
+    if fk == "persist" and t in ("MUSIC_PLAY", "MUSIC_STOP", "MUSIC_END"):
+        return ["", "true", "false"]
+    if fk == "music" and t in ("SCREEN", "MUSIC_PLAY"):
+        try:
+            return list(music_track_ids() or [])
+        except Exception:
+            return None
     if fk == "mode" and t == "ACTION_ANIM":
         return ["once", "hold"]
     if fk == "release" and t == "ACTION_ANIM":
@@ -3766,12 +3964,13 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["fade", "dissolve", "wipe"]
     if fk == "action" and t == "SCREEN":
         return ["", "remove"]
-    if fk == "hi_res" and t == "SCREEN":
-        return ["false", "true"]
     if fk in ("auto", "force") and t == "SCREEN":
         return ["true", "false"]
     if fk in ("tilt_on", "zoom_on") and t in ("TILT", "ZOOM"):
         return ["true", "false"]
+    if fk == "tilt_reverse" and t == "TILT":
+        # 빈칸=맵 기본, true=반대(위→왼쪽), false=정상 강제
+        return ["", "true", "false"]
     if fk in ("shear_on",) and t == "SHEAR":
         return ["true", "false"]
     if fk in ("rotate3d_on",) and t == "3D_ROTATE":
@@ -3788,7 +3987,15 @@ def _step_dropdown_field_options(step_type, field_key, *, map_list, steps_ref, b
         return ["start", "stop"]
     if fk in ("efx_persist", "zoom_persist") and t in ("ENTITY_FX", "ZOOM"):
         return ["false", "true"]
-    if fk in ("persist", "travel") and t in ("PLACE", "BEHAVIOR", "FOLLOW_START", "FOLLOW_STOP"):
+    if fk in ("persist", "travel") and t in (
+        "PLACE",
+        "BEHAVIOR",
+        "FOLLOW_START",
+        "FOLLOW_STOP",
+        "ACTION_ANIM",
+        "CURSOR_VISIBLE",
+        "CHANGE",
+    ):
         return ["", "true", "false"]
     if fk == "fx_dir" and t == "SCREEN_FX":
         return ["SE", "SW", "NE", "NW", "RANDOM"]
@@ -3838,6 +4045,16 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["val"] = "1"
         if empt("persist"):
             step_fields["persist"] = "false"
+    elif t == "GAME_OPTIONS_BUTTON":
+        if empt("val"):
+            step_fields["val"] = "1"
+        if empt("persist"):
+            step_fields["persist"] = "false"
+    elif t == "CURSOR_VISIBLE":
+        if empt("val"):
+            step_fields["val"] = "1"
+        if empt("persist"):
+            step_fields["persist"] = "false"
     elif t == "ZOOM":
         if empt("zoom_on"):
             step_fields["zoom_on"] = "true"
@@ -3853,6 +4070,8 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
     elif t == "CONDITION":
         if empt("cond_op"):
             step_fields["cond_op"] = "=="
+        if empt("cond_chain"):
+            step_fields["cond_chain"] = "if"
     elif t == "TILT":
         if empt("tilt_on"):
             step_fields["tilt_on"] = "true"
@@ -3860,6 +4079,7 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["tilt_strength"] = "1.0"
         if empt("tilt_duration_sec"):
             step_fields["tilt_duration_sec"] = "1.0"
+        # tilt_reverse 기본은 빈칸(맵 기본 방향 유지)
     elif t == "SHEAR":
         if empt("shear_on"):
             step_fields["shear_on"] = "true"
@@ -3894,6 +4114,8 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["val"] = "1.0"
         if empt("anim"):
             step_fields["anim"] = "idle"
+        if empt("persist"):
+            step_fields["persist"] = "false"
     elif t == "BEHAVIOR":
         if empt("behavior"):
             step_fields["behavior"] = "randomplay"
@@ -3907,6 +4129,8 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
     elif t == "CHANGE":
         if empt("target"):
             step_fields["target"] = "held"
+        if empt("persist"):
+            step_fields["persist"] = "false"
     elif t == "MUSIC_PLAY":
         if empt("fade_in"):
             step_fields["fade_in"] = "0.5"
@@ -3916,13 +4140,21 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
             step_fields["queue"] = "true"
         if empt("volume"):
             step_fields["volume"] = "1.0"
-    elif t == "MUSIC_STOP" and empt("fade_out"):
-        step_fields["fade_out"] = "0.5"
+        if empt("persist"):
+            step_fields["persist"] = "false"
+    elif t == "MUSIC_STOP":
+        if empt("fade_out"):
+            step_fields["fade_out"] = "0.5"
+        if empt("persist"):
+            step_fields["persist"] = "false"
+    elif t == "MUSIC_END" and empt("persist"):
+        step_fields["persist"] = "false"
+    elif t == "NOTICE":
+        if empt("auto"):
+            step_fields["auto"] = "false"
     elif t == "SCREEN":
         if empt("val"):
             step_fields["val"] = "3.0"
-        if empt("hi_res"):
-            step_fields["hi_res"] = "false"
         if empt("transition_sec"):
             step_fields["transition_sec"] = "1.0"
         if empt("auto"):
@@ -4056,19 +4288,11 @@ def _apply_default_step_fields_on_type_change(step_fields, new_type):
 
 
 def _music_track_options():
-    """assets/musics 폴더의 음악 파일명을 드롭다운 옵션으로 제공(확장자 제거)."""
-    base_dir = os.path.join("assets", "musics")
-    out = []
+    """MUSIC_ASSETS 등록 키(+ 미등록 파일명). 이벤트 music 필드용."""
     try:
-        if not os.path.isdir(base_dir):
-            return out
-        for fn in sorted(os.listdir(base_dir)):
-            low = (fn or "").lower()
-            if low.endswith(".mp3") or low.endswith(".ogg") or low.endswith(".wav"):
-                out.append(os.path.splitext(fn)[0])
+        return list(music_track_ids() or [])
     except Exception:
-        return out
-    return out
+        return []
 
 
 def _export_map_png(map_id: str, bg, objs, npcs, export_dir: str = "exports"):
@@ -4371,6 +4595,8 @@ def _editor_wants_text_input(
     baseball_zone_field_active=False,
     racing_settings_active=False,
     font_settings_active=False,
+    dialog_mgr_active=False,
+    obj_merge_active=False,
 ):
     return bool(
         (show_event_config and active_field)
@@ -4391,6 +4617,8 @@ def _editor_wants_text_input(
         or baseball_zone_field_active
         or racing_settings_active
         or font_settings_active
+        or dialog_mgr_active
+        or obj_merge_active
     )
 
 
@@ -4407,8 +4635,8 @@ def _editor_sync_text_input(wants: bool):
 
 def _editor_map_obj_inspector_layout(screen_w, screen_h, sidebar_w):
     """
-    맵 편집: 단일 선택 시 높이·줌·틸트·벽각도 (왼쪽 정렬).
-    반환: bar, height_rect, zoom_rect, tilt_rect, wall_slider_rect, ysort_rect 등.
+    맵 편집: 단일 선택 시 높이·줌·틸트·벽각도·wall_3d (왼쪽 정렬).
+    반환: bar, height_rect, zoom_rect, tilt_rect, wall_slider_rect, wall_3d_rect, ysort_rect 등.
 
     우측 끝( right-210~ )은 타입/인스턴스 버튼 전용.
     ysort·layer 는 그 왼쪽에 두어 클릭이 버튼에 먹히지 않게 한다.
@@ -4430,16 +4658,18 @@ def _editor_map_obj_inspector_layout(screen_w, screen_h, sidebar_w):
     # 우측: 타입/인스턴스 버튼 (겹침 금지)
     btn_type = pygame.Rect(bar.right - 210, bar.y + 6, 96, 22)
     btn_inst = pygame.Rect(bar.right - 108, bar.y + 6, 96, 22)
-    # 벽 각도 슬라이더: 라벨 뒤 ~ 우측 버튼·정렬 앞
+    # 벽 각도 슬라이더: 라벨 뒤 ~ 우측 버튼·정렬 앞 (3D벽 체크 자리 확보)
     wall_label_w = 72
-    wall_right_limit = min(btn_type.x, bar.right - 410) - 8
+    wall_3d_w = 88
+    wall_right_limit = min(btn_type.x, bar.right - 410) - 8 - wall_3d_w - 8
     wall_track = pygame.Rect(
         ix + wall_label_w,
         row_w + 4,
-        min(320, max(160, wall_right_limit - (ix + wall_label_w))),
+        min(280, max(140, wall_right_limit - (ix + wall_label_w))),
         14,
     )
     wall_val = pygame.Rect(wall_track.right + 8, row_w, 56, 22)
+    wall_3d = pygame.Rect(wall_val.right + 8, row_w, wall_3d_w, 22)
     # 정렬/layer: 타입 버튼 왼쪽 (예전 bar.right-200 은 버튼과 완전 겹침)
     yr = pygame.Rect(bar.right - 410, row_h, 188, 22)
     lr = pygame.Rect(bar.right - 410, row_t, 188, 22)
@@ -4450,6 +4680,7 @@ def _editor_map_obj_inspector_layout(screen_w, screen_h, sidebar_w):
         "tilt_rect": tr,
         "wall_slider_rect": wall_track,
         "wall_val_rect": wall_val,
+        "wall_3d_rect": wall_3d,
         "ysort_rect": yr,
         "layer_rect": lr,
         "type_btn_rect": btn_type,
@@ -4486,12 +4717,13 @@ def _editor_blit_field_wall_on_map(
     sh_bg,
     zoom_level,
     height=0.0,
+    force=False,
 ):
-    """에디터 플랫 맵에 벽 컬럼 blit (런타임과 동일 각도 규칙)."""
+    """에디터 플랫 맵에 벽 컬럼 blit (런타임과 동일 각도 규칙). force=wall_3d."""
     if img is None or map_surf is None:
         return None
     ang = _clamp_wall_angle_deg(wall_angle_deg)
-    if not field_wall_angle_active(ang):
+    if not field_wall_angle_active(ang, force=bool(force)):
         return None
     try:
         w0 = int(img.get_width())
@@ -5227,6 +5459,7 @@ def _editor_step_list_summary(index, step):
         else:
             parts.append(who)
         _tip("who", who)
+        _tip("show_name", step.get("show_name"))
         _tip("bubble_target", step.get("bubble_target"))
         _tip("bubble", step.get("bubble"))
         full = str(step.get("text") or "").replace("\r", "").strip()
@@ -5242,6 +5475,23 @@ def _editor_step_list_summary(index, step):
                 parts.append("bubble")
             else:
                 parts.append(f"bubble:{bbv}")
+    elif st == "NOTICE":
+        preview = _editor_step_preview_text(step)
+        nm = str(step.get("name") or "").strip()
+        if nm:
+            parts.append(nm)
+        if preview:
+            parts.append(preview)
+        _tip("name", nm)
+        full = str(step.get("text") or "").replace("\r", "").strip()
+        if full:
+            tip.append("text:")
+            wrapped = _editor_tooltip_wrap_lines(full, max_chars=52)
+            tip.extend(wrapped[:12])
+            if len(wrapped) > 12:
+                tip.append("…")
+        _tip("auto", step.get("auto"))
+        _tip("val", step.get("val"))
     elif st == "CARRY":
         act = (step.get("action") or "pick").strip()
         parts.append(act)
@@ -5261,8 +5511,24 @@ def _editor_step_list_summary(index, step):
         parts.append(tg or "held")
         if to_k:
             parts.append(f"→{to_k}")
+        sp = step.get("speed", step.get("speed_sec"))
+        fd = step.get("fade", step.get("fade_sec"))
+        if sp not in (None, ""):
+            parts.append(f"spd{sp}")
+        if fd not in (None, ""):
+            parts.append(f"fade{fd}")
+        if step.get("persist") is True or str(step.get("persist") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            parts.append("persist")
         _tip("target", tg or "held")
         _tip("to", to_k)
+        _tip("speed", sp)
+        _tip("fade", fd)
+        _tip("persist", step.get("persist"))
     elif st == "ACTION_ANIM":
         t = tg or "player"
         an = (step.get("anim") or step.get("name") or step.get("state") or "").strip()
@@ -5409,11 +5675,17 @@ def _editor_step_list_summary(index, step):
         _tip("persist", step.get("persist"))
         _tip("action", step.get("action"))
     elif st == "CONDITION":
+        chain = condition_step_chain_mode(step)
+        if chain != "if":
+            parts.append(chain)
         c = (step.get("condition") or step.get("expr") or "").strip()
         if not c and step.get("var"):
             c = f"{step.get('var')} {step.get('op', '')}".strip()
-        if c:
+        if chain == "else" and not c:
+            parts.append("else")
+        elif c:
             parts.append(c[:28] + ("…" if len(c) > 28 else ""))
+        _tip("chain", chain)
         _tip("condition", c)
     elif st == "CONDITION_SKIP":
         parts.append("skip-end")
@@ -5430,6 +5702,14 @@ def _editor_step_list_summary(index, step):
         if step.get("add_laugh_point") not in (None, ""):
             parts.append(f"+laugh={step.get('add_laugh_point')}")
             _tip("add_laugh_point", step.get("add_laugh_point"))
+        if step.get("session") is True or str(step.get("session") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            parts.append("session")
+            _tip("session", True)
         for rk, rv in step.items():
             if rk in (
                 "type",
@@ -5443,6 +5723,7 @@ def _editor_step_list_summary(index, step):
                 "options",
                 "extra",
                 "patch",
+                "session",
             ):
                 continue
             if rv in (None, ""):
@@ -5486,7 +5767,9 @@ def _editor_step_list_summary(index, step):
         _tip("cmd", cmd)
     elif st.startswith("MUSIC"):
         parts.append((step.get("music") or step.get("name") or "").strip() or st.lower())
-        for k in ("music", "name", "volume", "fade_in", "fade_out", "queue"):
+        if step.get("persist") is True:
+            parts.append("persist")
+        for k in ("music", "name", "volume", "fade_in", "fade_out", "queue", "persist"):
             _tip(k, step.get(k))
     elif st in ("FOLLOW_START", "FOLLOW_STOP"):
         parts.append(tg or "player")
@@ -5712,6 +5995,7 @@ def editor_main():
     baseball_ed = bb_ed.new_state()
     racing_ed = rc_ed.new_state()
     font_ed_state = font_ed.new_state()
+    dlg_ed_state = dlg_ed.new_state()
     bb_placed_pick_node = None
     bb_placed_pick_ms = 0
     reload_entity_defs()
@@ -5791,27 +6075,32 @@ def editor_main():
     config_target_id = None        # 수정 중인 경우 해당 ID (생성이면 None)
     input_fields = _editor_default_event_input_fields()
     active_field = None            # 현재 타이핑 중인 칸 (eid, title 등)
+    # 이벤트/존/스텝/인스펙터 공통 커서 세션 (한 칸만 활성)
+    text_edit = ed_txt.EditSession()
+
+    def _te_focus_store(store, key, *, click_x=None, field_rect=None):
+        cur = str((store or {}).get(key, "") or "")
+        if click_x is not None and field_rect is not None:
+            try:
+                text_edit.focus_click(cur, font, float(click_x) - float(field_rect.x))
+                return
+            except Exception:
+                pass
+        text_edit.focus(cur)
+
+    def _te_type_store(store, key, chunk):
+        store[key] = text_edit.insert(str(store.get(key, "") or ""), chunk or "")
+
+    def _te_key_store(store, key, event) -> bool:
+        nt, handled = text_edit.keydown(str(store.get(key, "") or ""), event)
+        if handled:
+            store[key] = nt
+        return handled
 
     # --- MAP: 이벤트 박스(event_zones) 추가 모달 ---
     show_zone_config = False
     zone_edit_idx = None  # 현재는 추가 위주(추후 수정 확장용)
-    zone_fields = {
-        "name": "",
-        "event_id": "",
-        "target": "",  # contact_object일 때 접촉 대상(오브젝트/NPC name)
-        "trigger": "contact_player",
-        "cond_mainprogress": "",
-        "cond_min_laugh_point": "",
-        "cond_opt": "",
-        "block_on": "false",
-        "block_var": "",
-        "block_op": "!=",
-        "block_val": "",
-        "block_when": "",
-        "block_say": "",
-        "block_who": "player",
-        "rect": None,  # [x,y,w,h]
-    }
+    zone_fields = _editor_zone_blank_fields()
     active_zone_field = None
     is_selecting_zone_rect = False
     zone_drag_start = None
@@ -5883,6 +6172,52 @@ def editor_main():
         flow.save_editor_data(map_id, objs, npcs)
         _flow_refresh_entity_list()
 
+    def _open_interact_event_in_editor(eid: str):
+        """NPC 상호작용 전용 이벤트 → EVENT 모드로 전환해 오른쪽 스텝 목록만 표시."""
+        nonlocal edit_mode, current_event_id, current_event_type
+        nonlocal show_step_config, show_event_config
+        nonlocal step_edit_index, step_insert_index, selected_step_idx
+        nonlocal step_type_dropdown_open, step_target_dropdown_open, editor_color_picker
+        nonlocal scroll_y_steps, active_step_field
+        eid = str(eid or "").strip()
+        if not eid:
+            return
+        found_cat = None
+        for cat in EDITOR_EVENT_SECTIONS:
+            if eid in (all_events.get(cat) or {}):
+                found_cat = cat
+                break
+        if found_cat is None:
+            all_events.setdefault("LOCAL", {})[eid] = {
+                "title": eid,
+                "steps": [],
+                "result": {},
+                "map_id": map_id,
+            }
+            found_cat = "LOCAL"
+            try:
+                flow.save_events(all_events)
+            except Exception:
+                pass
+            try:
+                _flow_refresh_entity_list()
+            except Exception:
+                pass
+        edit_mode = "EVENT"
+        current_event_type = found_cat
+        current_event_id = eid
+        # 스텝 편집 모달·이벤트 설정창은 열지 않음 — 우측 스텝 리스트만
+        show_event_config = False
+        show_step_config = False
+        step_edit_index = None
+        step_insert_index = None
+        selected_step_idx = -1
+        active_step_field = None
+        step_type_dropdown_open = False
+        step_target_dropdown_open = False
+        editor_color_picker = None
+        scroll_y_steps = 0
+
     def _editor_char_modal_ctx():
         ent_names = set()
         for n in npcs:
@@ -5893,11 +6228,13 @@ def editor_main():
             "screen_w": SCREEN_W,
             "screen_h": SCREEN_H,
             "mouse": (mx, my),
+            "font": font,
             "modal_body_drag": modal_body_drag,
             "modal_dropdown_drag": modal_dropdown_drag,
             "on_char_def_saved": _on_char_def_saved,
             "on_obj_def_saved": _on_obj_def_saved,
             "on_inst_saved": _on_inst_saved_flow,
+            "on_open_interact_event": _open_interact_event_in_editor,
             "event_ids": _editor_collect_event_id_options(all_events, map_id),
             "map_id": map_id,
             "map_entity_names": sorted(ent_names),
@@ -5924,12 +6261,22 @@ def editor_main():
         _flow_refresh_entity_list()
 
     def _on_map_field_defaults_saved(field_dict):
-        """world_data[map].field 저장. 빈 dict 면 field 키 제거(CONFIG 기본)."""
+        """world_data[map].field 저장. 빈 dict 면 field 키 제거(CONFIG 기본).
+        모달이 안 다루는 wave_tiles 등은 기존 field 에서 유지.
+        """
         row = flow.world_data.setdefault(map_id, {})
+        prev = row.get("field") if isinstance(row.get("field"), dict) else {}
         if isinstance(field_dict, dict) and field_dict:
-            row["field"] = dict(field_dict)
+            merged = dict(field_dict)
+            if "wave_tiles" not in merged and isinstance(prev.get("wave_tiles"), dict):
+                merged["wave_tiles"] = dict(prev["wave_tiles"])
+            row["field"] = merged
         else:
-            row.pop("field", None)
+            # 틸트·FX·BGM 을 전부 비웠을 때 — wave_tiles 만 남으면 field 유지
+            if isinstance(prev.get("wave_tiles"), dict):
+                row["field"] = {"wave_tiles": dict(prev["wave_tiles"])}
+            else:
+                row.pop("field", None)
         flow.save_editor_data(map_id, objs, npcs)
 
     # --- STEP 설정(추가/삽입/수정) 모달 ---
@@ -5945,6 +6292,7 @@ def editor_main():
         "BEHAVIOR",
         "MAP",
         "SAY",
+        "NOTICE",
         "EMOTE",
         "ACTION_ANIM",
         "WAIT",
@@ -5966,6 +6314,7 @@ def editor_main():
         "CURSOR_VISIBLE",
         "GAME_EXIT_BUTTON",
         "GAME_DEBUG_BUTTON",
+        "GAME_OPTIONS_BUTTON",
         "FOLLOW_START",
         "FOLLOW_STOP",
         "CONDITION",
@@ -5988,6 +6337,8 @@ def editor_main():
         "END_ROUTE_A",
         "END_ROUTE_B",
     ]
+    _raw_sts = str(editor_ui_state.get("step_type_sort") or "alpha").strip().lower()
+    step_type_sort = _raw_sts if _raw_sts in ("alpha", "group") else "alpha"
     escape_mode_cycle = ["none", "click", "key", "condition"]
     escape_action_cycle = ["end", "break_loop"]
     step_type_dropdown_open = False
@@ -6378,6 +6729,10 @@ def editor_main():
     baseball_bb_ui = {}
     racing_rc_ui = {}
     font_ui = {}
+    dlg_ui = {}
+
+    def _dlg_save_events():
+        flow.save_events(all_events)
     while running:
         mx, my = pygame.mouse.get_pos()
         right_panel_w = 0 if edit_mode == "FLOW" else right_sidebar_w
@@ -6385,7 +6740,8 @@ def editor_main():
         sidebar_list_tooltip = None
         export_map_btn = pygame.Rect(int(sidebar_w + map_area_w - 80), 10, 72, 38)
         font_settings_btn = pygame.Rect(export_map_btn.x - 84, 10, 76, 38)
-        merge_obj_btn = pygame.Rect(font_settings_btn.x - 84, 10, 76, 38)
+        dialog_mgr_btn = pygame.Rect(font_settings_btn.x - 98, 10, 90, 38)
+        merge_obj_btn = pygame.Rect(dialog_mgr_btn.x - 84, 10, 76, 38)
         map_tab_bar_ui = _editor_map_tab_bar_layout(
             sidebar_w, merge_obj_btn.x, len(map_list), map_tab_scroll_x
         )
@@ -6422,6 +6778,13 @@ def editor_main():
                 ),
                 font_settings_active=bool(
                     font_ed_state.get("show") and font_ed_state.get("_edit_field")
+                ),
+                dialog_mgr_active=bool(
+                    dlg_ed_state.get("show") and dlg_ed_state.get("edit")
+                ),
+                obj_merge_active=bool(
+                    show_obj_merge_modal
+                    and obj_merge_active_field in ("name", "category", "type", "layer")
                 ),
             )
         )
@@ -6535,6 +6898,11 @@ def editor_main():
                 except Exception:
                     debug_last_key = str(getattr(event, "key", ""))
                 debug_last_key_t = pygame.time.get_ticks()
+
+            if dlg_ed.handle_event(
+                dlg_ed_state, event, SCREEN_W, SCREEN_H, mx, my, font, _dlg_save_events
+            ):
+                continue
 
             if font_ed.handle_keydown(font_ed_state, event):
                 continue
@@ -6828,15 +7196,14 @@ def editor_main():
                             show_obj_merge_modal = False
                         continue
                     if obj_merge_active_field in ("name", "category", "type", "layer"):
-                        cur = str(obj_merge_fields.get(obj_merge_active_field) or "")
-                        if event.key == pygame.K_BACKSPACE:
-                            obj_merge_fields[obj_merge_active_field] = cur[:-1]
-                        elif event.key == pygame.K_DELETE:
-                            obj_merge_fields[obj_merge_active_field] = ""
+                        if _te_key_store(obj_merge_fields, obj_merge_active_field, event):
+                            pass
                         else:
                             ch = getattr(event, "unicode", "")
-                            if ch and ch.isprintable():
-                                obj_merge_fields[obj_merge_active_field] = cur + ch
+                            if ch and ch.isprintable() and not (pygame.key.get_mods() & pygame.KMOD_CTRL):
+                                obj_merge_fields[obj_merge_active_field] = text_edit.insert(
+                                    str(obj_merge_fields.get(obj_merge_active_field) or ""), ch
+                                )
                         continue
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if save_btn.collidepoint(event.pos):
@@ -6879,6 +7246,7 @@ def editor_main():
                         )
                     elif hit_field:
                         obj_merge_active_field = hit_field
+                        text_edit.focus(str(obj_merge_fields.get(hit_field, "") or ""))
                     continue
                 if event.type in (pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.MOUSEWHEEL):
                     continue
@@ -6932,10 +7300,22 @@ def editor_main():
                     _ysort_r = _ins.get("ysort_rect")
                     _layer_r = _ins.get("layer_rect")
                     _wall_sl = _ins.get("wall_slider_rect")
+                    _wall_3d = _ins.get("wall_3d_rect")
                     _type_btn = _ins.get("type_btn_rect")
                     _inst_btn = _ins.get("inst_btn_rect")
                 else:
                     _wall_sl = None
+                    _wall_3d = None
+                if _wall_3d and _wall_3d.collidepoint(event.pos) and selected_nodes:
+                    n0w = selected_nodes[0]
+                    if isinstance(n0w, FieldItem):
+                        n0w.wall_3d = not field_wall_3d_flag(getattr(n0w, "wall_3d", False))
+                        obj_wall_angle_dragging = False
+                        obj_sprite_tilt_active = False
+                        obj_height_active = False
+                        obj_zoom_active = False
+                        obj_layer_active = False
+                        continue
                 if _wall_sl and _wall_sl.collidepoint(event.pos) and selected_nodes:
                     n0w = selected_nodes[0]
                     if isinstance(n0w, FieldItem):
@@ -6970,6 +7350,7 @@ def editor_main():
                     obj_layer_active = False
                     obj_wall_angle_dragging = False
                     obj_height_buf = str(int(round(float(getattr(selected_nodes[0], "height", 0) or 0))))
+                    text_edit.focus(obj_height_buf)
                     continue
                 if _zoom_r and _zoom_r.collidepoint(event.pos):
                     obj_zoom_active = True
@@ -6982,6 +7363,7 @@ def editor_main():
                     except Exception:
                         z0 = 1.0
                     obj_zoom_buf = str(round(z0, 4))
+                    text_edit.focus(obj_zoom_buf)
                     continue
                 if _tilt_r and _tilt_r.collidepoint(event.pos):
                     obj_sprite_tilt_active = True
@@ -6990,6 +7372,7 @@ def editor_main():
                     obj_layer_active = False
                     obj_wall_angle_dragging = False
                     obj_sprite_tilt_buf = str(getattr(selected_nodes[0], "sprite_tilt", 1.0))
+                    text_edit.focus(obj_sprite_tilt_buf)
                     continue
                 if _ysort_r and _ysort_r.collidepoint(event.pos):
                     # y-sorting 기준 토글: ground <-> visual
@@ -7011,6 +7394,7 @@ def editor_main():
                     obj_zoom_active = False
                     obj_wall_angle_dragging = False
                     obj_layer_buf = str(int(getattr(selected_nodes[0], "layer", 0) or 0))
+                    text_edit.focus(obj_layer_buf)
                     continue
                 if edit_mode == "EVENT" and event_preview_sel:
                     _ins_ev = _editor_map_obj_inspector_layout(SCREEN_W, SCREEN_H, sidebar_w)
@@ -7039,60 +7423,81 @@ def editor_main():
                     obj_layer_active = False
 
             if event.type == pygame.TEXTINPUT:
+                if show_obj_merge_modal and obj_merge_active_field in (
+                    "name",
+                    "category",
+                    "type",
+                    "layer",
+                ):
+                    _te_type_store(obj_merge_fields, obj_merge_active_field, event.text)
+                    continue
                 if obj_height_active:
-                    obj_height_buf = (obj_height_buf or "") + (event.text or "")
+                    obj_height_buf = text_edit.insert(obj_height_buf or "", event.text or "")
                     continue
                 if obj_zoom_active:
-                    obj_zoom_buf = (obj_zoom_buf or "") + (event.text or "")
+                    obj_zoom_buf = text_edit.insert(obj_zoom_buf or "", event.text or "")
                     continue
                 if obj_sprite_tilt_active:
-                    obj_sprite_tilt_buf = (obj_sprite_tilt_buf or "") + (event.text or "")
+                    obj_sprite_tilt_buf = text_edit.insert(obj_sprite_tilt_buf or "", event.text or "")
                     continue
                 if obj_layer_active:
-                    obj_layer_buf = (obj_layer_buf or "") + (event.text or "")
+                    obj_layer_buf = text_edit.insert(obj_layer_buf or "", event.text or "")
                     continue
                 if show_step_config and active_step_field:
-                    step_fields[active_step_field] = (step_fields.get(active_step_field, "") or "") + (
-                        event.text or ""
-                    )
+                    _te_type_store(step_fields, active_step_field, event.text)
                     continue
                 if show_zone_config and active_zone_field:
-                    zone_fields[active_zone_field] = (zone_fields.get(active_zone_field, "") or "") + (
-                        event.text or ""
-                    )
+                    _te_type_store(zone_fields, active_zone_field, event.text)
                     continue
                 if show_bgzone_config and active_bgzone_field:
-                    bgzone_fields[active_bgzone_field] = (bgzone_fields.get(active_bgzone_field, "") or "") + (
-                        event.text or ""
-                    )
+                    _te_type_store(bgzone_fields, active_bgzone_field, event.text)
                     continue
                 if presence_zone_modal.show and presence_zone_modal.active_field:
                     presence_zone_modal.fields[presence_zone_modal.active_field] = (
-                        presence_zone_modal.fields.get(presence_zone_modal.active_field, "") or ""
-                    ) + (event.text or "")
+                        presence_zone_modal.text_edit.insert(
+                            presence_zone_modal.fields.get(presence_zone_modal.active_field, "")
+                            or "",
+                            event.text or "",
+                        )
+                    )
                     continue
                 if map_field_defaults_modal.show and map_field_defaults_modal.active_field:
                     map_field_defaults_modal.fields[map_field_defaults_modal.active_field] = (
-                        map_field_defaults_modal.fields.get(map_field_defaults_modal.active_field, "") or ""
-                    ) + (event.text or "")
+                        map_field_defaults_modal.text_edit.insert(
+                            map_field_defaults_modal.fields.get(
+                                map_field_defaults_modal.active_field, ""
+                            )
+                            or "",
+                            event.text or "",
+                        )
+                    )
                     continue
                 if show_event_config and active_field:
-                    input_fields[active_field] = (input_fields.get(active_field, "") or "") + (
-                        event.text or ""
-                    )
+                    _te_type_store(input_fields, active_field, event.text)
                     continue
 
             if event.type == pygame.KEYDOWN and (obj_sprite_tilt_active or obj_height_active or obj_layer_active or obj_zoom_active):
-                if event.key == pygame.K_BACKSPACE:
+                if event.key not in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     if obj_height_active:
-                        obj_height_buf = (obj_height_buf or "")[:-1]
+                        nt, handled = text_edit.keydown(obj_height_buf or "", event)
+                        if handled:
+                            obj_height_buf = nt
+                            continue
                     elif obj_zoom_active:
-                        obj_zoom_buf = (obj_zoom_buf or "")[:-1]
+                        nt, handled = text_edit.keydown(obj_zoom_buf or "", event)
+                        if handled:
+                            obj_zoom_buf = nt
+                            continue
                     elif obj_sprite_tilt_active:
-                        obj_sprite_tilt_buf = (obj_sprite_tilt_buf or "")[:-1]
-                    else:
-                        obj_layer_buf = (obj_layer_buf or "")[:-1]
-                    continue
+                        nt, handled = text_edit.keydown(obj_sprite_tilt_buf or "", event)
+                        if handled:
+                            obj_sprite_tilt_buf = nt
+                            continue
+                    elif obj_layer_active:
+                        nt, handled = text_edit.keydown(obj_layer_buf or "", event)
+                        if handled:
+                            obj_layer_buf = nt
+                            continue
                 if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     if obj_height_active:
                         try:
@@ -7265,6 +7670,7 @@ def editor_main():
                                 continue
                             if val_rect.collidepoint(event.pos):
                                 active_field = rk
+                                _te_focus_store(input_fields, rk, click_x=event.pos[0], field_rect=val_rect)
                                 continue
                         elif kind == "text":
                             val_rect = pygame.Rect(
@@ -7272,6 +7678,7 @@ def editor_main():
                             )
                             if val_rect.collidepoint(event.pos):
                                 active_field = rk
+                                _te_focus_store(input_fields, rk, click_x=event.pos[0], field_rect=val_rect)
                                 continue
 
                     # 하단 버튼
@@ -7365,10 +7772,10 @@ def editor_main():
                         else:
                             show_event_config = False
                     elif active_field:
-                        if event.key == pygame.K_BACKSPACE:
-                            input_fields[active_field] = input_fields[active_field][:-1]
-                        elif event.key == pygame.K_RETURN:
+                        if event.key == pygame.K_RETURN:
                             active_field = None
+                        elif _te_key_store(input_fields, active_field, event):
+                            pass
                 continue # 설정창 열려있으면 맵 클릭 방지
 
             if char_def_modal.show:
@@ -7407,6 +7814,7 @@ def editor_main():
                 fld_txt_w_zn = 168
                 ev_ids_zn = _editor_collect_event_id_options(all_events, map_id)
                 ent_opts_zn = _editor_collect_entity_name_options(objs, npcs)
+                prog_opts_zn = _editor_collect_progress_var_options(all_events, flow=flow)
 
                 if _editor_is_wheel_event(event):
                     px, py = _editor_pointer_xy(event, mx, my)
@@ -7503,6 +7911,7 @@ def editor_main():
                             )
                             if val_rect.collidepoint(event.pos):
                                 active_zone_field = rk
+                                text_edit.focus(str(zone_fields.get(rk, "") or ""))
                                 continue
                         elif kind == "events":
                             list_btn = pygame.Rect(field_x_zn + field_w_zn + 4, ry + 3, list_w_zn, row_h_zn - 6)
@@ -7520,6 +7929,25 @@ def editor_main():
                                 continue
                             if val_rect.collidepoint(event.pos):
                                 active_zone_field = rk
+                                text_edit.focus(str(zone_fields.get(rk, "") or ""))
+                                continue
+                        elif kind == "progress_vars":
+                            list_btn = pygame.Rect(field_x_zn + field_w_zn + 4, ry + 3, list_w_zn, row_h_zn - 6)
+                            val_rect = pygame.Rect(field_x_zn, ry + 3, field_w_zn, row_h_zn - 6)
+                            if list_btn.collidepoint(event.pos):
+                                zone_modal_dd_key = rk
+                                zone_modal_dd_options = list(prog_opts_zn)
+                                zone_modal_dd_scroll = 0
+                                n_opt = len(zone_modal_dd_options)
+                                dd_h = min(220, max(dd_item_h_zn, n_opt * dd_item_h_zn))
+                                zone_modal_dd_rect = pygame.Rect(
+                                    field_x_zn, ry + row_h_zn + 2, field_w_zn + list_w_zn + 4, dd_h
+                                )
+                                zone_modal_dd_open = True
+                                continue
+                            if val_rect.collidepoint(event.pos):
+                                active_zone_field = rk
+                                text_edit.focus(str(zone_fields.get(rk, "") or ""))
                                 continue
                         elif kind == "text_pick":
                             val_rect = pygame.Rect(field_x_zn, ry + 3, fld_txt_w_zn, row_h_zn - 6)
@@ -7544,6 +7972,7 @@ def editor_main():
                                 continue
                             if val_rect.collidepoint(event.pos):
                                 active_zone_field = rk
+                                text_edit.focus(str(zone_fields.get(rk, "") or ""))
                                 continue
                         elif kind == "dropdown":
                             opts = row[3]
@@ -7562,6 +7991,7 @@ def editor_main():
                                 continue
                             if val_rect.collidepoint(event.pos):
                                 active_zone_field = rk
+                                text_edit.focus(str(zone_fields.get(rk, "") or ""))
                                 continue
                         elif kind == "area":
                             area_btn_r = pygame.Rect(field_x_zn, ry + 3, 140, row_h_zn - 6)
@@ -7596,25 +8026,7 @@ def editor_main():
                                 if tgt:
                                     z["target"] = tgt
 
-                            mp = (zone_fields.get("cond_mainprogress") or "").strip()
-                            if mp:
-                                z["conditions"]["mainprogress"] = mp
-                            mlp = (zone_fields.get("cond_min_laugh_point") or "").strip()
-                            if mlp:
-                                try:
-                                    z["conditions"]["min_laugh_point"] = int(float(mlp))
-                                except:
-                                    pass
-                            opt = (zone_fields.get("cond_opt") or "").strip()
-                            if opt:
-                                extra = _parse_editor_json_kv_blob(opt)
-                                if extra is None:
-                                        print(
-                                            "Zone cond_opt 오류 — 예: progress_x: 1001 "
-                                            "(따옴표 없이, 중괄호는 있어도 없어도 됨)"
-                                        )
-                                else:
-                                    z["conditions"].update(extra)
+                            z["conditions"] = _editor_zone_conditions_from_fields(zone_fields)
 
                             if block_spec is not None:
                                 z["block"] = block_spec
@@ -7647,10 +8059,10 @@ def editor_main():
                         else:
                             show_zone_config = False
                     elif active_zone_field:
-                        if event.key == pygame.K_BACKSPACE:
-                            zone_fields[active_zone_field] = (zone_fields.get(active_zone_field, "")[:-1])
-                        elif event.key == pygame.K_RETURN:
+                        if event.key == pygame.K_RETURN:
                             active_zone_field = None
+                        elif _te_key_store(zone_fields, active_zone_field, event):
+                            pass
                 continue
 
             if show_bgzone_config:
@@ -7762,6 +8174,7 @@ def editor_main():
                             )
                             if val_rect.collidepoint(event.pos):
                                 active_bgzone_field = rk
+                                text_edit.focus(str(bgzone_fields.get(rk, "") or ""))
                                 continue
                         elif kind == "dropdown":
                             opts = row[3]
@@ -7780,6 +8193,7 @@ def editor_main():
                                 continue
                             if val_rect.collidepoint(event.pos):
                                 active_bgzone_field = rk
+                                text_edit.focus(str(bgzone_fields.get(rk, "") or ""))
                                 continue
                         elif kind == "area":
                             area_btn_r = pygame.Rect(field_x_bg, ry + 3, 140, row_h_bg - 6)
@@ -7847,10 +8261,10 @@ def editor_main():
                         else:
                             show_bgzone_config = False
                     elif active_bgzone_field:
-                        if event.key == pygame.K_BACKSPACE:
-                            bgzone_fields[active_bgzone_field] = (bgzone_fields.get(active_bgzone_field, "")[:-1])
-                        elif event.key == pygame.K_RETURN:
+                        if event.key == pygame.K_RETURN:
                             active_bgzone_field = None
+                        elif _te_key_store(bgzone_fields, active_bgzone_field, event):
+                            pass
                 continue
 
             if show_step_config:
@@ -7890,9 +8304,10 @@ def editor_main():
                         dropdown_item_h = 22
                         type_rect = _step_config_type_rect(panel_rect)
                         max_h = 260
-                        vis_h = min(max_h, dropdown_item_h * len(step_type_cycle))
+                        _st_view = _editor_step_types_view(step_type_cycle, step_type_sort)
+                        vis_h = min(max_h, dropdown_item_h * len(_st_view))
                         dropdown_rect = pygame.Rect(type_rect.x, type_rect.bottom, type_rect.width, vis_h)
-                        total_h = len(step_type_cycle) * dropdown_item_h
+                        total_h = len(_st_view) * dropdown_item_h
                         max_sc = max(0, total_h - vis_h)
                         if max_sc > 0 and _editor_rects_contain_point(px, py, dropdown_rect):
                             step_type_scroll = max(0, min(max_sc, step_type_scroll + delta))
@@ -7958,11 +8373,20 @@ def editor_main():
                     active_step_field = None
 
                     type_rect = _step_config_type_rect(panel_rect)
+                    type_sort_rect = _step_config_type_sort_rect(panel_rect)
                     # 드롭다운: 타입 클릭 → 열기/닫기, 옵션 클릭 → 선택
                     dropdown_item_h = 22
                     max_h = 260
-                    vis_h = min(max_h, dropdown_item_h * len(step_type_cycle))
+                    _st_view = _editor_step_types_view(step_type_cycle, step_type_sort)
+                    vis_h = min(max_h, dropdown_item_h * len(_st_view))
                     dropdown_rect = pygame.Rect(type_rect.x, type_rect.bottom, type_rect.width, vis_h)
+
+                    if type_sort_rect.collidepoint(event.pos):
+                        step_type_sort = "group" if step_type_sort == "alpha" else "alpha"
+                        editor_ui_state["step_type_sort"] = step_type_sort
+                        _save_editor_ui_state(editor_ui_state)
+                        step_type_scroll = 0
+                        continue
 
                     if step_type_dropdown_open:
                         # 바깥 클릭하면 닫기 (옵션 클릭 포함 처리)
@@ -7979,8 +8403,8 @@ def editor_main():
                                     continue
                             rel_y = event.pos[1] - dropdown_rect.y + step_type_scroll
                             pick = int(rel_y // dropdown_item_h)
-                            if 0 <= pick < len(step_type_cycle):
-                                step_fields["type"] = step_type_cycle[pick]
+                            if 0 <= pick < len(_st_view):
+                                step_fields["type"] = _st_view[pick]
                                 _apply_default_step_fields_on_type_change(step_fields, step_fields["type"])
                                 step_body_scroll = 0
                             step_type_dropdown_open = False
@@ -8095,6 +8519,7 @@ def editor_main():
                                 break
                             if r.collidepoint(event.pos):
                                 active_step_field = key
+                                text_edit.focus_click(str(step_fields.get(key, "") or ""), font, float(event.pos[0]) - float(r.x))
                         elif key == "music" and t_cur in ("SCREEN", "MUSIC_PLAY"):
                             r = pygame.Rect(panel_rect.x + 180, row_top - 5, 220, 30)
                             list_btn = pygame.Rect(panel_rect.x + 180 + 225, row_top - 5, 52, 30)
@@ -8115,6 +8540,7 @@ def editor_main():
                                 break
                             if r.collidepoint(event.pos):
                                 active_step_field = "music"
+                                text_edit.focus_click(str(step_fields.get("music", "") or ""), font, float(event.pos[0]) - float(r.x))
                         elif key == "anim" and t_cur == "ACTION_ANIM":
                             r = pygame.Rect(panel_rect.x + 180, row_top - 5, 220, 30)
                             list_btn = pygame.Rect(panel_rect.x + 180 + 225, row_top - 5, 52, 30)
@@ -8135,6 +8561,7 @@ def editor_main():
                                 break
                             if r.collidepoint(event.pos):
                                 active_step_field = "anim"
+                                text_edit.focus_click(str(step_fields.get("anim", "") or ""), font, float(event.pos[0]) - float(r.x))
                         elif _step_row_color_palette(t_cur, key):
                             r = pygame.Rect(panel_rect.x + 180, row_top - 5, 168, 30)
                             pal_btn = pygame.Rect(panel_rect.x + 180 + 172, row_top - 5, 58, 30)
@@ -8150,6 +8577,7 @@ def editor_main():
                                 break
                             if r.collidepoint(event.pos):
                                 active_step_field = key
+                                text_edit.focus_click(str(step_fields.get(key, "") or ""), font, float(event.pos[0]) - float(r.x))
                                 step_field_click_done = True
                                 break
                         elif _step_row_entity_pick(t_cur, key) and current_event_id and current_event_type:
@@ -8185,12 +8613,16 @@ def editor_main():
                                 break
                             if r.collidepoint(event.pos):
                                 active_step_field = key
+                                text_edit.focus_click(str(step_fields.get(key, "") or ""), font, float(event.pos[0]) - float(r.x))
                         else:
                             r = pygame.Rect(panel_rect.x + 180, row_top - 5, 280, 30)
                             if r.collidepoint(event.pos):
                                 active_step_field = key
+                                text_edit.focus_click(str(step_fields.get(key, "") or ""), font, float(event.pos[0]) - float(r.x))
                         cy += STEP_BODY_ROW_H
                     if step_field_click_done:
+                        if active_step_field:
+                            text_edit.focus(str(step_fields.get(active_step_field, "") or ""))
                         continue
 
                     # 좌표 찍기 (모든 월드 좌표 쌍 — X·Y 행 모두 Pick)
@@ -8377,6 +8809,8 @@ def editor_main():
                                 hj = parse_float(step_fields.get("height"), None)
                                 if hj is not None:
                                     new_step["height"] = max(0.0, min(4000.0, float(hj)))
+                                if parse_bool(step_fields.get("persist")) is True:
+                                    new_step["persist"] = True
                             elif t == "BEHAVIOR":
                                 tg = (step_fields.get("target") or "").strip()
                                 if tg:
@@ -8460,6 +8894,17 @@ def editor_main():
                                 bbt = (step_fields.get("bubble_target") or "").strip()
                                 if bbt:
                                     new_step["bubble_target"] = bbt
+                            elif t == "NOTICE":
+                                nm = (step_fields.get("name") or "").strip()
+                                if nm:
+                                    new_step["name"] = nm
+                                new_step["text"] = step_fields.get("text", "")
+                                b = parse_bool(step_fields.get("auto"))
+                                if b is not None:
+                                    new_step["auto"] = b
+                                v = parse_float(step_fields.get("val"), None)
+                                if v is not None:
+                                    new_step["val"] = v
                             elif t == "EMOTE":
                                 act = (step_fields.get("action") or "show").strip().lower()
                                 if act in ("clear", "remove", "hide", "off"):
@@ -8499,9 +8944,14 @@ def editor_main():
                                 col = (step_fields.get("color") or "").strip()
                                 if col:
                                     new_step["color"] = col
-                            elif t in ("PLAYER_VISIBLE", "CURSOR_VISIBLE"):
+                            elif t == "PLAYER_VISIBLE":
                                 v = parse_float(step_fields.get("val"), 0)
                                 new_step["val"] = v
+                            elif t == "CURSOR_VISIBLE":
+                                v = parse_float(step_fields.get("val"), 0)
+                                new_step["val"] = v
+                                if parse_bool(step_fields.get("persist")) is True:
+                                    new_step["persist"] = True
                             elif t == "GAME_EXIT_BUTTON":
                                 v_raw = (step_fields.get("val") or "").strip()
                                 if v_raw != "":
@@ -8510,6 +8960,13 @@ def editor_main():
                                 if p_raw:
                                     new_step["persist"] = p_raw
                             elif t == "GAME_DEBUG_BUTTON":
+                                v_raw = (step_fields.get("val") or "").strip()
+                                if v_raw != "":
+                                    new_step["val"] = v_raw
+                                p_raw = (step_fields.get("persist") or "").strip()
+                                if p_raw:
+                                    new_step["persist"] = p_raw
+                            elif t == "GAME_OPTIONS_BUTTON":
                                 v_raw = (step_fields.get("val") or "").strip()
                                 if v_raw != "":
                                     new_step["val"] = v_raw
@@ -8538,15 +8995,29 @@ def editor_main():
                             elif t == "ANIM_ONCE":
                                 if step_fields.get("name"):
                                     new_step["name"] = step_fields.get("name")
+                                extras = _parse_waypoints_semicolon(step_fields.get("waypoints"))
                                 p = pos_pair()
                                 if p is not None:
-                                    new_step["pos"] = p
+                                    pts = [[int(p[0]), int(p[1])]] + [
+                                        [int(round(ax)), int(round(ay))] for ax, ay in extras
+                                    ]
+                                elif extras:
+                                    pts = [[int(round(ax)), int(round(ay))] for ax, ay in extras]
+                                else:
+                                    pts = []
+                                if len(pts) == 1:
+                                    new_step["pos"] = pts[0]
+                                elif len(pts) > 1:
+                                    new_step["pos"] = pts
                                 fm = parse_float(step_fields.get("frame_ms"), None)
                                 if fm is not None:
                                     new_step["frame_ms"] = max(16, int(round(fm)))
                                 sp = parse_float(step_fields.get("speed"), None)
                                 if sp is not None and sp > 0.0:
                                     new_step["speed"] = sp
+                                bw = parse_bool(step_fields.get("wait"))
+                                if bw is not None:
+                                    new_step["wait"] = bw
                             elif t == "CARRY":
                                 act = (step_fields.get("action") or "pick").strip().lower()
                                 if act:
@@ -8570,6 +9041,14 @@ def editor_main():
                                 to_k = (step_fields.get("to") or "").strip()
                                 if to_k:
                                     new_step["to"] = to_k
+                                sp = (step_fields.get("speed") or "").strip()
+                                if sp:
+                                    try:
+                                        sv = float(sp)
+                                        if sv > 0:
+                                            new_step["speed"] = sv
+                                    except ValueError:
+                                        pass
                                 fd = (step_fields.get("fade") or "").strip()
                                 if fd:
                                     try:
@@ -8578,7 +9057,14 @@ def editor_main():
                                             new_step["fade"] = fv
                                     except ValueError:
                                         pass
+                                if parse_bool(step_fields.get("persist")) is True:
+                                    new_step["persist"] = True
                             elif t == "CONDITION":
+                                chain = str(step_fields.get("cond_chain") or "if").strip().lower()
+                                if chain == "elif":
+                                    new_step["elif"] = True
+                                elif chain == "else":
+                                    new_step["else"] = True
                                 cond = (step_fields.get("condition") or "").strip()
                                 if not cond:
                                     cond = _editor_join_condition_parts(
@@ -8601,6 +9087,9 @@ def editor_main():
                                 patch = _editor_build_result_patch_from_fields(step_fields)
                                 for pk, pv in patch.items():
                                     new_step[pk] = pv
+                                rs = str(step_fields.get("res_session") or "").strip().lower()
+                                if rs in ("1", "true", "yes", "on"):
+                                    new_step["session"] = True
                             elif t == "SCREEN":
                                 if step_fields.get("picture"):
                                     new_step["picture"] = step_fields.get("picture")
@@ -8633,11 +9122,27 @@ def editor_main():
                                 vol = parse_float(step_fields.get("volume"), None)
                                 if vol is not None:
                                     new_step["volume"] = vol
+                                bp = parse_bool(step_fields.get("persist"))
+                                if bp is True:
+                                    new_step["persist"] = True
+                                elif bp is False and str(step_fields.get("persist") or "").strip():
+                                    new_step["persist"] = False
                             elif t == "MUSIC_STOP":
                                 fo = parse_float(step_fields.get("fade_out"), None)
                                 if fo is not None:
                                     new_step["fade_out"] = fo
-                            elif t in ("MUSIC_END", "MUSIC_PAUSE", "MUSIC_RESUME"):
+                                bp = parse_bool(step_fields.get("persist"))
+                                if bp is True:
+                                    new_step["persist"] = True
+                                elif bp is False and str(step_fields.get("persist") or "").strip():
+                                    new_step["persist"] = False
+                            elif t == "MUSIC_END":
+                                bp = parse_bool(step_fields.get("persist"))
+                                if bp is True:
+                                    new_step["persist"] = True
+                                elif bp is False and str(step_fields.get("persist") or "").strip():
+                                    new_step["persist"] = False
+                            elif t in ("MUSIC_PAUSE", "MUSIC_RESUME"):
                                 pass
                             elif t == "TILT":
                                 built = build_step_from_editor_fields(step_fields, t)
@@ -8953,10 +9458,10 @@ def editor_main():
                             step_target_dropdown_open = False
                             editor_color_picker = None
                     elif active_step_field:
-                        if event.key == pygame.K_BACKSPACE:
-                            step_fields[active_step_field] = (step_fields.get(active_step_field, "")[:-1])
-                        elif event.key == pygame.K_RETURN:
+                        if event.key == pygame.K_RETURN:
                             active_step_field = None
+                        elif _te_key_store(step_fields, active_step_field, event):
+                            pass
                 continue
 
 
@@ -9257,6 +9762,13 @@ def editor_main():
                     if font_settings_btn.collidepoint(mx, my):
                         font_ed.open_modal(font_ed_state)
                         continue
+                    if dialog_mgr_btn.collidepoint(mx, my):
+                        if font_ed_state.get("show"):
+                            font_ed_state["show"] = False
+                        show_step_config = False
+                        active_step_field = None
+                        dlg_ed.open_modal(dlg_ed_state, all_events)
+                        continue
                     if merge_obj_btn.collidepoint(mx, my):
                         only_objs = [o for o in selected_nodes if o in objs]
                         if edit_mode == "MAP" and map_tool == "OBJECTS" and only_objs and len(only_objs) == len(selected_nodes):
@@ -9457,23 +9969,7 @@ def editor_main():
                             zone_modal_dd_open = False
                             zone_edit_idx = None
                             active_zone_field = None
-                            zone_fields = {
-                                "name": "",
-                                "event_id": "",
-                                "target": "",
-                                "trigger": "contact_player",
-                                "cond_mainprogress": "",
-                                "cond_min_laugh_point": "",
-                                "cond_opt": "",
-                                "block_on": "false",
-                                "block_var": "",
-                                "block_op": "!=",
-                                "block_val": "",
-                                "block_when": "",
-                                "block_say": "",
-                                "block_who": "player",
-                                "rect": None,
-                            }
+                            zone_fields = _editor_zone_blank_fields()
                             continue
 
                         # MAP 모드: Add BG Box 버튼 클릭
@@ -9789,7 +10285,7 @@ def editor_main():
                                 step_edit_index = None
                                 step_insert_index = None
                                 active_step_field = None
-                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "tilt_reverse": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                             else:
                                 head_ins_rect = pygame.Rect(
                                     base_x + 10,
@@ -9803,7 +10299,7 @@ def editor_main():
                                     step_edit_index = None
                                     step_insert_index = 0
                                     active_step_field = None
-                                    step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                    step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "tilt_reverse": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                                 else:
                                     # 각 스텝 행 + View 버튼 + 삽입(+) 버튼
                                     for i, step in enumerate(steps):
@@ -9818,7 +10314,7 @@ def editor_main():
                                             step_edit_index = None
                                             step_insert_index = i
                                             active_step_field = None
-                                            step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
+                                            step_fields = {"type": "MOVE", "target": "", "pos_x": "", "pos_y": "", "waypoints": "", "dir": "left", "instant": "", "force": "", "speed": "", "wait": "", "move_sync": "", "appear": "", "who": "", "text": "", "voice": "", "auto": "", "val": "", "name": "", "anchor": "", "loop": "", "action": "", "picture": "", "music": "", "transition": "", "fade_in": "", "fade_out": "", "queue": "", "volume": "", "tilt_on": "", "tilt_strength": "", "tilt_duration_sec": "", "tilt_reverse": "", "shear_on": "", "shear_strength": "", "shear_duration_sec": "", "shear_px": "", "zoom_on": "", "zoom_strength": "", "zoom_duration_sec": "", "fx_kind": "", "fx_on": "", "fx_dir": "", "fx_speed": "", "fx_freq": "", "fx_grid_cell": "", "fx_grid_jitter": "", "fx_grid_max": "", "sfx_kind": "", "sfx_mode": "", "sfx_color": "", "sfx_alpha": "", "sfx_cycle_sec": "", "sfx_amp": "", "sfx_freq": "", "sfx_rain_density": "", "sfx_rain_speed": "", "sfx_rain_angle": "", "sfx_rain_len": "", "sfx_rain_alpha": "", "sfx_rain_color": "", "sfx_vignette_strength": "", "sfx_vignette_size": "", "sfx_vignette_softness": "", "sfx_vignette_color": "", "sfx_tone_preset": "", "sfx_tone_strength": "", "sfx_tone_color": "", "efx_mode": "", "efx_action": "", "efx_color": "", "efx_alpha": "", "efx_cycle_sec": "", "dev_cmd": "", "cam_mode": "", "cam_slot": "", "cam_target": "", "cam_x": "", "cam_y": "", "cam_smooth": "", "cam_lerp": "", "sprite_tilt": "", "height": "", "ysort": "", "layer": "", "visible": "", "alpha": "", "behavior": "", "radius": "", "interval_ms": "", "move_anim": "", "anim": "", "mode": "once", "release": "idle", "bubble": "", "bubble_target": "", "emotion": "", "frame_ms": "", "hold_last_sec": "", "advance": "continue"}
                                             break
 
                                         if view_rect.collidepoint(mx, my):
@@ -9892,9 +10388,10 @@ def editor_main():
                                                 step_fields["pos_x"] = ""
                                                 step_fields["pos_y"] = ""
                                             step_fields["who"] = str(step.get("who", "") or "")
+                                            step_fields["show_name"] = _editor_opt_bool_text(step.get("show_name"))
                                             step_fields["text"] = str(step.get("text", "") or "")
                                             step_fields["voice"] = str(step.get("voice", "") or "")
-                                            step_fields["auto"] = str(step.get("auto", "") or "")
+                                            step_fields["auto"] = _editor_opt_bool_text(step.get("auto"))
                                             step_fields["bubble"] = str(step.get("bubble", "") or "")
                                             step_fields["bubble_target"] = str(step.get("bubble_target", "") or "")
                                             step_fields["emotion"] = str(step.get("emotion", "") or "")
@@ -9924,6 +10421,7 @@ def editor_main():
                                             step_fields["fade_out"] = str(step.get("fade_out", "") or "")
                                             step_fields["queue"] = str(step.get("queue", "") or "")
                                             step_fields["volume"] = str(step.get("volume", "") or "")
+                                            step_fields["persist"] = _editor_opt_bool_text(step.get("persist"))
                                             step_fields["speed"] = str(step.get("speed", "") or "")
                                             step_fields["wait"] = str(step.get("wait", "") or "")
                                             step_fields["move_sync"] = str(step.get("move_sync") or step.get("sync") or "")
@@ -10073,6 +10571,12 @@ def editor_main():
                                             elif t == "GAME_DEBUG_BUTTON":
                                                 step_fields["val"] = str(step.get("val", "") or "")
                                                 step_fields["persist"] = "true" if step.get("persist") else ""
+                                            elif t == "GAME_OPTIONS_BUTTON":
+                                                step_fields["val"] = str(step.get("val", "") or "")
+                                                step_fields["persist"] = "true" if step.get("persist") else ""
+                                            elif t == "CURSOR_VISIBLE":
+                                                step_fields["val"] = str(step.get("val", "") or "")
+                                                step_fields["persist"] = "true" if step.get("persist") else ""
                                             elif t == "CAMERA":
                                                 fill_editor_fields_from_step(step_fields, step, t)
                                             elif t in ("FOLLOW_START", "FOLLOW_STOP"):
@@ -10083,6 +10587,7 @@ def editor_main():
                                                 )
                                                 step_fields["mode"] = str(step.get("mode") or "once")
                                                 step_fields["release"] = str(step.get("release") or "idle")
+                                                step_fields["persist"] = "true" if step.get("persist") else ""
                                             elif t == "CARRY":
                                                 step_fields["action"] = str(step.get("action") or "pick")
                                                 step_fields["holder"] = str(step.get("holder") or "player")
@@ -10109,9 +10614,15 @@ def editor_main():
                                                 step_fields["to"] = str(
                                                     step.get("to") or step.get("new_name") or ""
                                                 )
+                                                _sp = step.get("speed", step.get("speed_sec"))
+                                                step_fields["speed"] = "" if _sp in (None, "") else str(_sp)
                                                 _fd = step.get("fade", step.get("fade_sec"))
                                                 step_fields["fade"] = "" if _fd in (None, "") else str(_fd)
+                                                step_fields["persist"] = (
+                                                    "true" if step.get("persist") else "false"
+                                                )
                                             elif t == "CONDITION":
+                                                step_fields["cond_chain"] = condition_step_chain_mode(step)
                                                 cond_full = str(
                                                     step.get("condition") or step.get("expr") or ""
                                                 )
@@ -10127,8 +10638,9 @@ def editor_main():
                                                     # 구형 op 가 "==1002" 형태일 수 있음
                                                     old_op = str(step.get("op") or "")
                                                     m_op = re.match(
-                                                        r'^(==|!=|>=|<=|>|<)\s*(.*)$',
+                                                        r'^(==|!=|>=|<=|>|<|notin|in)\s*(.*)$',
                                                         old_op.strip(),
+                                                        re.I,
                                                     )
                                                     if m_op:
                                                         step_fields["cond_op"] = m_op.group(1)
@@ -10161,6 +10673,16 @@ def editor_main():
                                                 }
                                                 rf = _result_to_res_fields(fake)
                                                 step_fields.update(rf)
+                                                sv = step.get("session")
+                                                if sv is True or str(sv or "").strip().lower() in (
+                                                    "1",
+                                                    "true",
+                                                    "yes",
+                                                    "on",
+                                                ):
+                                                    step_fields["res_session"] = "true"
+                                                else:
+                                                    step_fields["res_session"] = "false"
                                             step_fields["move_anim"] = str(
                                                 step.get("move_anim") or step.get("path_anim") or ""
                                             )
@@ -11195,7 +11717,7 @@ def editor_main():
                     wall_ang = float(getattr(o, "wall_angle", 0.0) or 0.0)
                 except (TypeError, ValueError):
                     wall_ang = 0.0
-                wall_mode = isinstance(o, FieldItem) and field_wall_angle_active(wall_ang)
+                wall_mode = isinstance(o, FieldItem) and field_item_is_wall(o)
                 # 월드→맵: 배경과 동일 (ow,oh)→(sw_bg,sh_bg) 비율. wx*줌 반올림과 달리 배경 텍스처 열과 일치
                 foot_px_x, foot_px_y = world_to_map_surface_xy(
                     bg_blit_x,
@@ -11307,10 +11829,11 @@ def editor_main():
                                 sh_bg=sh_bg,
                                 zoom_level=zoom_level,
                                 height=h_draw,
+                                force=field_wall_3d_flag(getattr(o, "wall_3d", False)),
                             )
                             if wall_rect is not None:
                                 spr_rect = wall_rect
-                            if o in selected_nodes or field_wall_angle_active(wall_ang):
+                            if o in selected_nodes or field_item_is_wall(o):
                                 _editor_draw_wall_base_line(
                                     map_surf,
                                     float(o.pos[0]),
@@ -11995,6 +12518,10 @@ def editor_main():
         pygame.draw.rect(screen, font_btn_bg, font_settings_btn, border_radius=5)
         pygame.draw.rect(screen, (200, 170, 230), font_settings_btn, 2, border_radius=5)
         screen.blit(font.render("FONT", True, (245, 240, 255)), (font_settings_btn.x + 14, font_settings_btn.y + 10))
+        dlg_btn_bg = (45, 80, 70) if dlg_ed_state.get("show") else (40, 62, 56)
+        pygame.draw.rect(screen, dlg_btn_bg, dialog_mgr_btn, border_radius=5)
+        pygame.draw.rect(screen, (140, 210, 180), dialog_mgr_btn, 2, border_radius=5)
+        screen.blit(font.render("DIALOG", True, (230, 255, 240)), (dialog_mgr_btn.x + 8, dialog_mgr_btn.y + 10))
         pygame.draw.rect(screen, (55, 75, 95), export_map_btn, border_radius=5)
         pygame.draw.rect(screen, (140, 170, 210), export_map_btn, 2, border_radius=5)
         screen.blit(font.render("PNG", True, (240, 248, 255)), (export_map_btn.x + 18, export_map_btn.y + 10))
@@ -12719,6 +13246,7 @@ def editor_main():
             lr = L.get("layer_rect")
             wr = L.get("wall_slider_rect")
             wv = L.get("wall_val_rect")
+            w3 = L.get("wall_3d_rect")
             ix, row_h, row_t = L["ix"], L["row_h"], L["row_t"]
             row_w = L.get("row_w", row_t + 26)
             n0 = selected_nodes[0]
@@ -12729,7 +13257,9 @@ def editor_main():
             hdisp = obj_height_buf if obj_height_active else str(
                 int(round(float(getattr(n0, "height", 0) or 0)))
             )
-            screen.blit(font.render(hdisp, True, (235, 240, 250)), (hr.x + 4, hr.y + 3))
+            ed_txt.blit_field_value(
+                screen, font, hdisp, hr, active=obj_height_active, session=text_edit, color=(235, 240, 250)
+            )
             if zr is not None:
                 screen.blit(font.render("zoom", True, (195, 205, 225)), (hr.right + 8, row_h + 3))
                 pygame.draw.rect(screen, (14, 14, 18), zr)
@@ -12742,7 +13272,9 @@ def editor_main():
                         zdisp = str(round(float(getattr(n0, "entity_def_zoom", 1.0) or 1.0), 4))
                     except Exception:
                         zdisp = "1"
-                screen.blit(font.render(zdisp, True, (235, 240, 250)), (zr.x + 4, zr.y + 3))
+                ed_txt.blit_field_value(
+                    screen, font, zdisp, zr, active=obj_zoom_active, session=text_edit, color=(235, 240, 250)
+                )
             screen.blit(font.render("틸트(0~1)", True, (195, 205, 225)), (ix, row_t + 3))
             pygame.draw.rect(screen, (14, 14, 18), tr)
             c = (220, 235, 255) if obj_sprite_tilt_active else (110, 120, 140)
@@ -12750,7 +13282,9 @@ def editor_main():
             disp = obj_sprite_tilt_buf if obj_sprite_tilt_active else str(
                 round(float(getattr(n0, "sprite_tilt", 1.0)), 4)
             )
-            screen.blit(font.render(disp, True, (235, 240, 250)), (tr.x + 4, tr.y + 3))
+            ed_txt.blit_field_value(
+                screen, font, disp, tr, active=obj_sprite_tilt_active, session=text_edit, color=(235, 240, 250)
+            )
             # 벽 각도 슬라이더 (FieldItem만)
             if isinstance(n0, FieldItem) and wr is not None:
                 screen.blit(font.render("벽°", True, (195, 205, 225)), (ix, row_w + 3))
@@ -12780,6 +13314,23 @@ def editor_main():
                         font.render(f"{wa:.0f}", True, (235, 240, 250)),
                         (wv.x + 6, wv.y + 3),
                     )
+                if w3 is not None:
+                    on3 = field_wall_3d_flag(getattr(n0, "wall_3d", False))
+                    pygame.draw.rect(screen, (18, 36, 42) if on3 else (14, 14, 18), w3)
+                    pygame.draw.rect(
+                        screen,
+                        (100, 220, 255) if on3 else (110, 120, 140),
+                        w3,
+                        1,
+                    )
+                    screen.blit(
+                        font.render(
+                            "3D벽 ON" if on3 else "3D벽 off",
+                            True,
+                            (180, 245, 255) if on3 else (150, 155, 165),
+                        ),
+                        (w3.x + 6, w3.y + 3),
+                    )
             if yr:
                 cur_m = str(getattr(n0, "ysort_mode", "ground") or "ground").strip().lower()
                 label = "정렬: 땅" if cur_m != "visual" else "정렬: 이미지"
@@ -12791,7 +13342,12 @@ def editor_main():
                 lc = (220, 235, 255) if obj_layer_active else (110, 120, 140)
                 pygame.draw.rect(screen, lc, lr, 1)
                 ldisp = obj_layer_buf if obj_layer_active else str(int(getattr(n0, "layer", 0) or 0))
-                screen.blit(font.render(f"layer: {ldisp}", True, (235, 240, 250)), (lr.x + 8, lr.y + 3))
+                if obj_layer_active:
+                    ed_txt.blit_field_value(
+                        screen, font, ldisp, lr, active=True, session=text_edit, color=(235, 240, 250)
+                    )
+                else:
+                    screen.blit(font.render(f"layer: {ldisp}", True, (235, 240, 250)), (lr.x + 8, lr.y + 3))
             if n0 in npcs:
                 btn_type = L.get("type_btn_rect") or pygame.Rect(L["bar"].right - 210, L["bar"].y + 6, 96, 22)
                 btn_inst = L.get("inst_btn_rect") or pygame.Rect(L["bar"].right - 108, L["bar"].y + 6, 96, 22)
@@ -12810,7 +13366,7 @@ def editor_main():
                 pygame.draw.rect(screen, (48, 42, 70), btn_oi)
                 pygame.draw.rect(screen, (150, 140, 200), btn_oi, 1)
                 screen.blit(font.render("맵 이벤트", True, (230, 225, 255)), (btn_oi.x + 10, btn_oi.y + 4))
-            hint = "벽각도: 0=+X 90=+Y · [C]spawn [D]progress [A]bindings · 숨김=청색 고스트"
+            hint = "3D벽 ON: 0°여도 열원근 · 벽° 0=+X 90=+Y · [C]spawn [D]progress [A]bindings · 숨김=청색 고스트"
             screen.blit(font.render(hint, True, (120, 135, 160)), (ix, L["bar"].bottom - 16))
 
         # [하단 상태바] - 레이어 최상단에 배치하여 가림 방지
@@ -12904,7 +13460,15 @@ def editor_main():
                 c = (245, 220, 140) if obj_merge_active_field == key else (105, 110, 125)
                 pygame.draw.rect(screen, c, r, 1)
                 val = str(obj_merge_fields.get(key) or "")
-                screen.blit(font.render(val, True, (245, 245, 245)), (r.x + 6, r.y + 6))
+                ed_txt.blit_field_value(
+                    screen,
+                    font,
+                    val,
+                    r,
+                    active=(obj_merge_active_field == key),
+                    session=text_edit,
+                    color=(245, 245, 245),
+                )
                 if key != "layer":
                     screen.blit(font.render(hint, True, (115, 120, 135)), (r.right + 8, r.y + 6))
             rep_on = str(obj_merge_fields.get("replace") or "").lower() in ("1", "true", "yes", "on")
@@ -12964,6 +13528,7 @@ def editor_main():
                 event_modal_scroll,
                 input_fields,
                 active_field,
+                edit_session=text_edit,
             )
             save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
             canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
@@ -13031,6 +13596,10 @@ def editor_main():
             font_ui["settings"] = font_ed.draw_settings_modal(
                 screen, font, font_ed_state, SCREEN_W, SCREEN_H
             )
+        if dlg_ed_state.get("show"):
+            dlg_ui["layout"] = dlg_ed.draw_modal(
+                screen, font, title_font, dlg_ed_state, SCREEN_W, SCREEN_H
+            )
 
         # --- [UI] 이벤트 박스(event_zones) 설정 팝업창 ---
         if show_zone_config:
@@ -13050,6 +13619,7 @@ def editor_main():
                 zone_modal_scroll,
                 zone_fields,
                 active_zone_field,
+                edit_session=text_edit,
             )
             save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
             canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
@@ -13096,6 +13666,7 @@ def editor_main():
                 bgzone_fields,
                 active_bgzone_field,
                 area_theme="bgzone",
+                edit_session=text_edit,
             )
             save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
             canc_btn = pygame.Rect(panel_rect.centerx + 10, panel_rect.bottom - 50, 100, 35)
@@ -13196,6 +13767,14 @@ def editor_main():
             pygame.draw.rect(screen, t_color, type_rect, 1)
             cur_type_label = _ko_step_type(step_fields.get("type", "MOVE"))
             screen.blit(font.render(cur_type_label, True, (255, 255, 255)), (type_rect.x + 5, type_rect.y + 5))
+            type_sort_rect = _step_config_type_sort_rect(panel_rect)
+            pygame.draw.rect(screen, (28, 36, 48), type_sort_rect)
+            pygame.draw.rect(screen, (140, 170, 200), type_sort_rect, 1)
+            sort_lab = "가나다" if step_type_sort == "alpha" else "분류순"
+            screen.blit(
+                font.render(sort_lab, True, (220, 230, 245)),
+                (type_sort_rect.x + 6, type_sort_rect.y + 5),
+            )
 
             draw_t_cur = (step_fields.get("type") or "MOVE").upper()
             step_body_sb_ui = None
@@ -13276,7 +13855,14 @@ def editor_main():
                     list_btn = pygame.Rect(panel_rect.x + 180 + 225, y_ptr - 5, 52, 30)
                     pygame.draw.rect(screen, (20, 20, 20), r)
                     pygame.draw.rect(screen, color, r, 1)
-                    screen.blit(font.render(str(step_fields.get(key, "")), True, (255, 255, 255)), (r.x + 5, r.y + 5))
+                    ed_txt.blit_field_value(
+                        screen,
+                        font,
+                        step_fields.get(key, ""),
+                        r,
+                        active=(active_step_field == key),
+                        session=text_edit,
+                    )
                     pygame.draw.rect(screen, (50, 70, 90), list_btn)
                     pygame.draw.rect(screen, (120, 160, 200), list_btn, 1)
                     screen.blit(font.render("List", True, (230, 240, 255)), (list_btn.x + 8, list_btn.y + 7))
@@ -13285,7 +13871,14 @@ def editor_main():
                     list_btn = pygame.Rect(panel_rect.x + 180 + 225, y_ptr - 5, 52, 30)
                     pygame.draw.rect(screen, (20, 20, 20), r)
                     pygame.draw.rect(screen, color, r, 1)
-                    screen.blit(font.render(str(step_fields.get(key, "")), True, (255, 255, 255)), (r.x + 5, r.y + 5))
+                    ed_txt.blit_field_value(
+                        screen,
+                        font,
+                        step_fields.get(key, ""),
+                        r,
+                        active=(active_step_field == key),
+                        session=text_edit,
+                    )
                     pygame.draw.rect(screen, (50, 70, 90), list_btn)
                     pygame.draw.rect(screen, (120, 160, 200), list_btn, 1)
                     screen.blit(font.render("List", True, (230, 240, 255)), (list_btn.x + 8, list_btn.y + 7))
@@ -13294,23 +13887,52 @@ def editor_main():
                     list_btn = pygame.Rect(panel_rect.x + 180 + 225, y_ptr - 5, 52, 30)
                     pygame.draw.rect(screen, (20, 20, 20), r)
                     pygame.draw.rect(screen, color, r, 1)
-                    screen.blit(font.render(str(step_fields.get(key, "")), True, (255, 255, 255)), (r.x + 5, r.y + 5))
+                    ed_txt.blit_field_value(
+                        screen,
+                        font,
+                        step_fields.get(key, ""),
+                        r,
+                        active=(active_step_field == key),
+                        session=text_edit,
+                    )
                     pygame.draw.rect(screen, (50, 70, 90), list_btn)
                     pygame.draw.rect(screen, (120, 160, 200), list_btn, 1)
                     screen.blit(font.render("List", True, (230, 240, 255)), (list_btn.x + 8, list_btn.y + 7))
                 elif _step_row_color_palette(draw_t_cur, key):
                     r = pygame.Rect(panel_rect.x + 180, y_ptr - 5, 168, 30)
                     pal_btn = pygame.Rect(panel_rect.x + 180 + 172, y_ptr - 5, 58, 30)
-                    _editor_paint_color_field_row(
-                        screen, font, r, pal_btn, step_fields.get(key, ""), color
-                    )
+                    if active_step_field == key:
+                        pygame.draw.rect(screen, (20, 20, 20), r)
+                        pygame.draw.rect(screen, color, r, 1)
+                        ed_txt.blit_field_value(
+                            screen,
+                            font,
+                            step_fields.get(key, ""),
+                            r,
+                            active=True,
+                            session=text_edit,
+                        )
+                        pygame.draw.rect(screen, (70, 70, 90), pal_btn)
+                        pygame.draw.rect(screen, (160, 160, 200), pal_btn, 1)
+                        screen.blit(font.render("색", True, (240, 240, 255)), (pal_btn.x + 16, pal_btn.y + 7))
+                    else:
+                        _editor_paint_color_field_row(
+                            screen, font, r, pal_btn, step_fields.get(key, ""), color
+                        )
                 elif _step_row_entity_pick(draw_t_cur, key):
                     r = pygame.Rect(panel_rect.x + 180, y_ptr - 5, 220, 30)
                     list_btn = pygame.Rect(panel_rect.x + 180 + 225, y_ptr - 5, 52, 30)
                     pick_btn = pygame.Rect(panel_rect.x + 180 + 225 + 56, y_ptr - 5, 52, 30)
                     pygame.draw.rect(screen, (20, 20, 20), r)
                     pygame.draw.rect(screen, color, r, 1)
-                    screen.blit(font.render(str(step_fields.get(key, "")), True, (255, 255, 255)), (r.x + 5, r.y + 5))
+                    ed_txt.blit_field_value(
+                        screen,
+                        font,
+                        step_fields.get(key, ""),
+                        r,
+                        active=(active_step_field == key),
+                        session=text_edit,
+                    )
                     pygame.draw.rect(screen, (50, 70, 90), list_btn)
                     pygame.draw.rect(screen, (120, 160, 200), list_btn, 1)
                     screen.blit(font.render("List", True, (230, 240, 255)), (list_btn.x + 8, list_btn.y + 7))
@@ -13321,7 +13943,14 @@ def editor_main():
                     r = pygame.Rect(panel_rect.x + 180, y_ptr - 5, 280, 30)
                     pygame.draw.rect(screen, (20, 20, 20), r)
                     pygame.draw.rect(screen, color, r, 1)
-                    screen.blit(font.render(str(step_fields.get(key, "")), True, (255, 255, 255)), (r.x + 5, r.y + 5))
+                    ed_txt.blit_field_value(
+                        screen,
+                        font,
+                        step_fields.get(key, ""),
+                        r,
+                        active=(active_step_field == key),
+                        session=text_edit,
+                    )
                 for px_key, py_key in _step_coord_xy_pairs(draw_t_cur):
                     if key in (px_key, py_key):
                         pick_btn = pygame.Rect(r.right - 86, r.y + 4, 78, 22)
@@ -13373,18 +14002,19 @@ def editor_main():
             if step_type_dropdown_open:
                 dropdown_item_h = 22
                 max_h = 260
-                dd_h = min(max_h, dropdown_item_h * len(step_type_cycle))
+                _st_view = _editor_step_types_view(step_type_cycle, step_type_sort)
+                dd_h = min(max_h, dropdown_item_h * len(_st_view))
                 dropdown_rect = pygame.Rect(type_rect.x, type_rect.bottom, type_rect.width, dd_h)
                 cur_t = step_fields.get("type", "MOVE")
                 try:
-                    cur_i = step_type_cycle.index(cur_t)
+                    cur_i = _st_view.index(cur_t)
                 except ValueError:
                     cur_i = -1
                 step_type_dd_ui = _draw_dropdown_with_scrollbar(
                     screen,
                     font,
                     dropdown_rect,
-                    [_ko_step_type(t) for t in step_type_cycle],
+                    [_ko_step_type(t) for t in _st_view],
                     cur_i,
                     step_type_scroll,
                     dropdown_item_h,

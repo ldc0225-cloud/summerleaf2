@@ -244,16 +244,16 @@
                     "7": {
                         "map_id": "bg_circurt01",
                         "laps": 7,
-                        "time_sec": 122.794,
-                        "time_str": "2:02.79",
-                        "char": "summer_k"
+                        "time_sec": 111.975,
+                        "time_str": "1:51.98",
+                        "char": "igyeong_k"
                     },
                     "1": {
                         "map_id": "bg_circurt01",
                         "laps": 1,
-                        "time_sec": 22.189,
-                        "time_str": "0:22.19",
-                        "char": "summer_k"
+                        "time_sec": 19.822,
+                        "time_str": "0:19.82",
+                        "char": "dani_k"
                     }
                 }
             }
@@ -282,6 +282,30 @@
                 "laps": 1,
                 "time_sec": 22.189,
                 "time_str": "0:22.19"
+            },
+            {
+                "mode": "record",
+                "map_id": "bg_circurt01",
+                "char": "igyeong_k",
+                "laps": 7,
+                "time_sec": 117.742,
+                "time_str": "1:57.74"
+            },
+            {
+                "mode": "record",
+                "map_id": "bg_circurt01",
+                "char": "igyeong_k",
+                "laps": 7,
+                "time_sec": 111.975,
+                "time_str": "1:51.98"
+            },
+            {
+                "mode": "record",
+                "map_id": "bg_circurt01",
+                "char": "dani_k",
+                "laps": 1,
+                "time_sec": 19.822,
+                "time_str": "0:19.82"
             }
         ]
     }

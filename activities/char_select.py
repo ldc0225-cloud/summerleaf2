@@ -65,6 +65,10 @@ class CharSelectActivity(BaseFieldActivity):
     def blocks_field_move(self) -> bool:
         return True
 
+    def freeze_field(self) -> bool:
+        """선택창 뒤 데모 맵이 계속 움직이면 산만하므로 월드 애니까지 멈춤."""
+        return True
+
     def blocks_zone_confirm(self) -> bool:
         return True
 

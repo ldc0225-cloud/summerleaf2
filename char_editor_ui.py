@@ -8,6 +8,8 @@ import pygame
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import editor_text as ed_txt
+
 
 ROW_H = 38
 BOOL_OPTS = [("Yes", "true"), ("No", "false")]
@@ -36,6 +38,8 @@ YSORT_OPTS = [("—", ""), ("ground", "ground"), ("visual", "visual")]
 SHEAR_ON_OPTS = [("—", ""), ("On", "true"), ("Off", "false")]
 # 맵 루트 field — 비우면 CONFIG 전역 기본 (FIELD_PERSPECTIVE_DEFAULT_ON / TILT_SHEAR_ENABLED)
 MAP_FIELD_ON_OPTS = [("CONFIG 기본", ""), ("On", "true"), ("Off", "false")]
+# reverse_tilt: CONFIG 상속 없음. Off=위→오른쪽(기본), On=위→왼쪽
+MAP_REVERSE_TILT_OPTS = [("Off (기본)", ""), ("On (반대방향)", "true")]
 # 맵 ambient SCREEN_FX — Off 가 기본(키 없음). On 이면 screen_fx[kind] 저장.
 MAP_FX_ON_OPTS = [("Off", "false"), ("On", "true")]
 MAP_CLOUD_DIR_OPTS = [
@@ -51,7 +55,95 @@ MAP_TONE_PRESET_OPTS = [
     ("neutral", "neutral"),
     ("custom", "custom"),
 ]
+MAP_MUSIC_LOOP_OPTS = [("On", "true"), ("Off", "false")]
 DEFAULT_PRESENCE_TARGETS = 3
+
+# 에디터 맵 field 모달 — BGM 미리듣기용 MusicManager (게임과 동일 라이브러리/재생 경로)
+_editor_music_mgr = None
+
+
+def _ensure_editor_music_mgr():
+    """pygame.mixer + MusicManager 를 한 번만 준비. 실패 시 None."""
+    global _editor_music_mgr
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+    except Exception as e:
+        print(f"[EDITOR MUSIC] mixer init failed: {e}")
+        return None
+    if _editor_music_mgr is None:
+        try:
+            from engine import MusicManager
+
+            _editor_music_mgr = MusicManager()
+        except Exception as e:
+            print(f"[EDITOR MUSIC] MusicManager init failed: {e}")
+            return None
+    return _editor_music_mgr
+
+
+def _editor_preview_map_music(fields: dict | None) -> bool:
+    """모달 fields 의 map_music / loop / volume 으로 BGM 미리듣기.
+    queue_after_current=False — 에디터에서는 즉시 교체."""
+    mgr = _ensure_editor_music_mgr()
+    if mgr is None:
+        return False
+    f = fields or {}
+    name = str(f.get("map_music") or "").strip()
+    if not name:
+        print("[EDITOR MUSIC] 트랙 미선택 — music 드롭다운에서 곡을 고르세요")
+        return False
+    loop_b = _parse_opt_bool(f.get("map_music_loop"))
+    loop = True if loop_b is None else bool(loop_b)
+    vol = None
+    vol_s = str(f.get("map_music_volume") or "").strip()
+    if vol_s:
+        try:
+            vol = max(0.0, min(1.0, float(vol_s)))
+        except (TypeError, ValueError):
+            vol = None
+    ok = bool(
+        mgr.play(
+            name,
+            fade_in_ms=0,
+            loop=loop,
+            volume=vol,
+            queue_after_current=False,
+        )
+    )
+    if ok:
+        print(f"[EDITOR MUSIC] preview: {name} (loop={loop}, vol={vol})")
+    return ok
+
+
+def _editor_stop_map_music_preview() -> None:
+    """맵 field 모달 BGM 미리듣기 즉시 정지."""
+    mgr = _editor_music_mgr
+    if mgr is None:
+        return
+    try:
+        mgr.end_now()
+    except Exception:
+        try:
+            mgr.stop(fade_out_ms=0)
+        except Exception:
+            pass
+
+
+def _map_music_track_opts() -> list:
+    """맵 기본 BGM 드롭다운 — (표시명, 키). 비움 = BGM 없음."""
+    opts = [("— (없음)", "")]
+    try:
+        from data import iter_music_assets
+
+        for mid, _fn, title in iter_music_assets():
+            lab = str(title or mid).strip() or mid
+            if lab != mid:
+                lab = f"{lab} [{mid}]"
+            opts.append((lab[:40], mid))
+    except Exception:
+        pass
+    return opts
 
 
 def _ui_font_dropdown_opts() -> list:
@@ -264,6 +356,8 @@ def map_field_defaults_to_fields(field: dict) -> dict:
     fields = {
         "map_tilt_on": _opt_bool_field(f.get("tilt_on"), ""),
         "map_shear_on": _opt_bool_field(f.get("shear_on"), ""),
+        # reverse_tilt 생략/빈칸 = Off(정상 방향)
+        "map_reverse_tilt": _opt_bool_field(f.get("reverse_tilt"), ""),
     }
     sfx = f.get("screen_fx") if isinstance(f.get("screen_fx"), dict) else {}
 
@@ -302,6 +396,16 @@ def map_field_defaults_to_fields(field: dict) -> dict:
     fields["map_tone_preset"] = preset if preset in ("warm", "cool", "neutral", "custom") else "warm"
     fields["map_tone_strength"] = _map_sfx_str(t.get("strength"), "")
     fields["map_tone_color"] = _map_sfx_rgb_str(t.get("color"), "")
+
+    # 맵 기본 BGM (field.music)
+    fields["map_music"] = _map_sfx_str(f.get("music") or f.get("bgm"), "")
+    loop_raw = f.get("music_loop", f.get("bgm_loop"))
+    if loop_raw is None:
+        fields["map_music_loop"] = "true"
+    else:
+        fields["map_music_loop"] = _opt_bool_field(loop_raw, "true") or "true"
+    vol = f.get("music_volume", f.get("bgm_volume"))
+    fields["map_music_volume"] = "" if vol is None else str(vol)
     return fields
 
 
@@ -336,6 +440,13 @@ def map_field_defaults_from_fields(fields: dict) -> dict:
     s = _parse_opt_bool(fields.get("map_shear_on"))
     if s is not None:
         out["shear_on"] = bool(s)
+    # reverse_tilt: On 일 때만 저장(Off/빈칸은 키 생략 = 정상 방향)
+    rt = _parse_opt_bool(fields.get("map_reverse_tilt"))
+    if rt is True:
+        out["reverse_tilt"] = True
+    elif rt is False and str(fields.get("map_reverse_tilt") or "").strip() != "":
+        # 명시 Off 도 저장해 두면 맵 간 복사 시 의도 유지
+        out["reverse_tilt"] = False
 
     screen_fx = {}
 
@@ -381,11 +492,24 @@ def map_field_defaults_from_fields(fields: dict) -> dict:
 
     if screen_fx:
         out["screen_fx"] = screen_fx
+
+    # 맵 기본 BGM
+    music = str(fields.get("map_music") or "").strip()
+    if music:
+        out["music"] = music
+        loop_b = _parse_opt_bool(fields.get("map_music_loop"))
+        out["music_loop"] = True if loop_b is None else bool(loop_b)
+        vol_s = str(fields.get("map_music_volume") or "").strip()
+        if vol_s:
+            try:
+                out["music_volume"] = max(0.0, min(1.0, float(vol_s)))
+            except (TypeError, ValueError):
+                pass
     return out
 
 
 def map_field_defaults_modal_section_rows() -> dict:
-    """맵 진입 시 틸트/쉬어 + ambient SCREEN_FX 모달 행."""
+    """맵 진입 시 틸트/쉬어 + ambient SCREEN_FX + 기본 BGM 모달 행."""
     try:
         from data import CONFIG
 
@@ -408,7 +532,24 @@ def map_field_defaults_modal_section_rows() -> dict:
             ("tilt_on (세로 압축)", "map_tilt_on", "dropdown", MAP_FIELD_ON_OPTS),
             ("shear_on (가로 밀림)", "map_shear_on", "dropdown", MAP_FIELD_ON_OPTS),
             (
-                "틸트·쉬어·FX 모두 비우면 world_data 의 field 키를 제거합니다",
+                "reverse_tilt (On=윗쪽→왼쪽 / Off=윗쪽→오른쪽)",
+                "map_reverse_tilt",
+                "dropdown",
+                MAP_REVERSE_TILT_OPTS,
+            ),
+            (
+                "※ 기본 BGM — 맵 들어올 때·이벤트 MUSIC persist=false 종료 시 재생",
+                "_hint_map_music",
+                "hint",
+            ),
+            ("music (MUSIC_ASSETS 키)", "map_music", "dropdown", _map_music_track_opts()),
+            ("music_loop", "map_music_loop", "dropdown", MAP_MUSIC_LOOP_OPTS),
+            ("music_volume (0~1, 비우면 엔진 기본)", "map_music_volume", "text"),
+            # 미리듣기 — 게임 MusicManager 경로. 모달 닫으면 정지.
+            ("▶ 선택 BGM 미리듣기", "_music:preview", "add_btn"),
+            ("■ BGM 정지", "_music:stop", "add_btn"),
+            (
+                "틸트·쉬어·FX·BGM 모두 비우면 world_data 의 field 키를 제거합니다",
                 "_hint_map_field_clear",
                 "hint",
             ),
@@ -912,6 +1053,51 @@ def _parse_talk_after(s: str) -> Any:
     return parse_talk_after_text(t)
 
 
+def _talk_to_slot_fields(talk, fields: dict) -> None:
+    """talk dict → lineN_when/text/after + fallback_text. 타입·맵 인스턴스 공용."""
+    talk = talk if isinstance(talk, dict) else {}
+    lines = list(talk.get("lines") or [])
+    fb = talk.get("fallback") or {}
+    fb_say = fb.get("say") if isinstance(fb, dict) else {}
+    talk_count = max(DEFAULT_TALK_LINES, len(lines))
+    for i in range(1, talk_count + 1):
+        if i - 1 < len(lines) and isinstance(lines[i - 1], dict):
+            ln = lines[i - 1]
+            say = ln.get("say") or {}
+            fields[f"line{i}_when"] = _format_talk_when(ln.get("when"))
+            fields[f"line{i}_text"] = str(say.get("text") or "")
+            fields[f"line{i}_after"] = _format_talk_after(ln.get("after"))
+        else:
+            _init_talk_line_fields(fields, i)
+    fields["fallback_text"] = str((fb_say or {}).get("text") or "")
+
+
+def _talk_from_slot_fields(fields: dict, who_name: str = "") -> dict:
+    """에디터 슬롯 → world/char talk. 비어 있으면 {} (맵 인스턴스는 타입 기본값 유지)."""
+    lines = []
+    talk_count = max(DEFAULT_TALK_LINES, _max_numbered_slot(fields, "line"))
+    for i in range(1, talk_count + 1):
+        txt = str(fields.get(f"line{i}_text") or "").strip()
+        if not txt:
+            continue
+        wh = _parse_talk_when(fields.get(f"line{i}_when"))
+        af = _parse_talk_after(fields.get(f"line{i}_after"))
+        say = {"who": who_name, "text": txt, "show_name": True}
+        entry = {"id": f"line{i}", "say": say}
+        if wh is not None:
+            entry["when"] = wh
+        if af:
+            entry["after"] = af
+        lines.append(entry)
+    talk: dict = {}
+    if lines:
+        talk["lines"] = lines
+    fb_txt = str(fields.get("fallback_text") or "").strip()
+    if fb_txt:
+        talk["fallback"] = {"say": {"text": fb_txt, "show_name": False}}
+    return talk
+
+
 def _bindings_to_slot_fields(bindings, fields: dict) -> None:
     bind_count = max(
         DEFAULT_BIND_SLOTS,
@@ -958,6 +1144,11 @@ def _interact_enabled_field(inter: dict) -> str:
 
 
 def _bindings_from_slot_fields(fields: dict) -> list:
+    """
+    에디터 슬롯 → interact.bindings.
+    조건이 비어 있어도 event_id(또는 인라인 state/after)가 있으면 저장한다.
+    (런타임: 빈 condition 은 항상 참)
+    """
     out = []
     bind_count = max(DEFAULT_BIND_SLOTS, _max_numbered_slot(fields, "bind"))
     for i in range(1, bind_count + 1):
@@ -968,9 +1159,11 @@ def _bindings_from_slot_fields(fields: dict) -> list:
         fx = _entity_fx_from_fields_optional(fields, prefix=f"bind{i}_")
         if not cond and not eid and not after and not st and fx is None:
             continue
-        if not cond:
+        if not eid and not st and not after and fx is None:
             continue
-        row: dict = {"condition": cond}
+        row: dict = {}
+        if cond:
+            row["condition"] = cond
         if eid:
             row["event_id"] = eid
         if st:
@@ -979,8 +1172,6 @@ def _bindings_from_slot_fields(fields: dict) -> list:
             row["after"] = after
         if fx is not None:
             row["entity_fx"] = fx
-        if not eid and not st and not after and fx is None:
-            continue
         pr_s = str(fields.get(f"bind{i}_pri") or "").strip()
         if pr_s:
             try:
@@ -1084,24 +1275,111 @@ def _interact_dict_from_fields(fields: dict) -> dict:
     return out
 
 
-def _bindings_slot_rows(*, bind_count: int = DEFAULT_BIND_SLOTS, with_add: bool = True) -> list:
-    """bindings 본문 (섹션 헤더 없음)."""
+def _npc_interact_to_fields(inter: dict, fields: dict) -> None:
+    """interact → 에디터 단일 조건/이벤트 필드."""
+    from flow import normalize_interact_spec
+
+    inter = normalize_interact_spec(inter or {})
+    iox, ioy = _interact_offset_to_fields(inter)
+    fields["interact_enabled"] = _interact_enabled_field(inter)
+    fields["interact_range"] = str(inter.get("range", 48) if inter.get("range") is not None else "")
+    fields["interact_offset_x"] = iox
+    fields["interact_offset_y"] = ioy
+    fields.update(_interact_prompt_to_fields(inter))
+    fields["face_player"] = "true" if inter.get("face_player_on_talk", True) else "false"
+    binds = inter.get("bindings") or []
+    b0 = binds[0] if binds and isinstance(binds[0], dict) else {}
+    fields["interact_cond"] = str(
+        b0.get("condition") or inter.get("condition") or inter.get("when") or ""
+    )
+    fields["interact_event"] = str(
+        b0.get("event_id") or inter.get("event_id") or ""
+    )
+
+
+def _npc_interact_dict_from_fields(fields: dict) -> dict:
+    """에디터 단일 조건/이벤트 → interact (bindings 길이 1)."""
+    out = {
+        "enabled": str(fields.get("interact_enabled", "false")).lower() in ("true", "1", "yes"),
+    }
+    rng_s = str(fields.get("interact_range") or "").strip()
+    if rng_s:
+        try:
+            out["range"] = float(rng_s)
+        except ValueError:
+            out["range"] = 48.0
+    else:
+        out["range"] = 48.0
+    _interact_offset_into_dict(fields, out)
+    _interact_prompt_into_dict(fields, out)
+    out["face_player_on_talk"] = str(fields.get("face_player", "true")).lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    eid = str(fields.get("interact_event") or "").strip()
+    cond = str(fields.get("interact_cond") or "").strip()
+    if eid:
+        row: dict = {"event_id": eid, "priority": 100}
+        if cond:
+            row["condition"] = cond
+        out["bindings"] = [row]
+    return out
+
+
+def _npc_interact_simple_rows() -> list:
+    """NPC 상호작용: 설정 묶음 + 전용 이벤트 하나 (+ 바로가기)."""
+    rows = [
+        ("── ① 상호작용 설정 ──", "_hint_npc_ix_a", "hint"),
+        (
+            "  클릭 가능 여부·거리·안내 아이콘. 발동 조건은 progress 식 (비우면 항상)",
+            "_hint_npc_ix_a2",
+            "hint",
+        ),
+        ("상호작용 사용", "interact_enabled", "dropdown", BOOL_OPTS),
+        ("발동 조건", "interact_cond", "text"),
+        ("대화 시 플레이어 쪽 바라보기", "face_player", "dropdown", BOOL_OPTS),
+    ]
+    rows.extend(_interact_range_offset_rows())
+    rows.extend(
+        [
+            ("── ② 전용 이벤트 ──", "_hint_npc_ix_b", "hint"),
+            (
+                "  조건이 맞으면 이 이벤트만 실행. 대화·분기·FX 는 이벤트 스텝에서 편집",
+                "_hint_npc_ix_b2",
+                "hint",
+            ),
+            ("전용 이벤트 ID", "interact_event", "events"),
+            ("▶ 이벤트 편집", "_goto:interact_event", "add_btn"),
+        ]
+    )
+    return rows
+
+
+def _bindings_slot_rows(
+    *,
+    bind_count: int = DEFAULT_BIND_SLOTS,
+    with_add: bool = True,
+    include_inline: bool = True,
+) -> list:
+    """오브젝트용 bindings (다단계). NPC 는 _npc_interact_simple_rows 사용."""
     rows = [
         ("상호작용 사용", "interact_enabled", "dropdown", BOOL_OPTS),
     ]
     rows.extend(_interact_range_offset_rows())
     rows.append(
         (
-            "  조건=progress 식 · 이벤트 ID=events.json · 우선순위 숫자 클수록 먼저 검사",
+            "  조건 맞으면 events.json 이벤트 실행 — 대화·분기·FX 는 그 이벤트 스텝에서 편집",
             "_hint_bind",
             "hint",
         )
     )
     for i in range(1, bind_count + 1):
-        rows.append((f"  #{i} 조건", f"bind{i}_cond", "text"))
+        rows.append((f"  #{i} 발동 조건", f"bind{i}_cond", "text"))
         rows.append((f"  #{i} 이벤트 ID", f"bind{i}_event", "events"))
         rows.append((f"  #{i} 우선순위", f"bind{i}_pri", "text"))
-    rows.extend(_binding_inline_rows(bind_count=bind_count))
+    if include_inline:
+        rows.extend(_binding_inline_rows(bind_count=bind_count))
     if with_add:
         rows.append(_add_btn_row("+ 단계 추가", "_add:bind"))
     return rows
@@ -1112,16 +1390,21 @@ def _bindings_core_rows(
     intro_hint: str = "_hint_evt",
     bind_count: int = DEFAULT_BIND_SLOTS,
     with_add: bool = True,
+    include_inline: bool = True,
 ) -> list:
     rows = [
-        ("── [A] 클릭 상호작용 (bindings) ──", intro_hint, "hint"),
+        ("── 클릭 상호작용 → 이벤트 ──", intro_hint, "hint"),
         (
-            "  플레이어가 클릭했을 때 — 조건 맞으면 이벤트 실행 또는 즉시 상태 변경",
+            "  enabled + 조건 + event_id. 인스턴스에서 덮어쓰면 그 개체만 다른 이벤트",
             "_hint_evt2",
             "hint",
         ),
     ]
-    rows.extend(_bindings_slot_rows(bind_count=bind_count, with_add=with_add))
+    rows.extend(
+        _bindings_slot_rows(
+            bind_count=bind_count, with_add=with_add, include_inline=include_inline
+        )
+    )
     return rows
 
 
@@ -1134,6 +1417,25 @@ def _talk_line_rows(*, talk_count: int = DEFAULT_TALK_LINES, with_add: bool = Tr
     if with_add:
         rows.append(_add_btn_row("+ 단계 추가", "_add:talk"))
     return rows
+
+
+def _npc_talk_legacy_rows(*, talk_count: int = DEFAULT_TALK_LINES) -> list:
+    """구형 talk.lines — 이벤트 바인딩이 없을 때만 동작."""
+    return [
+        ("── 구형 일상 대사 (비권장) ──", "_hint_talk", "hint"),
+        (
+            "  ※ 권장: 「상호작용→이벤트」에서 전용 이벤트 + 스텝 편집",
+            "_hint_talk_rec",
+            "hint",
+        ),
+        (
+            "  talk.lines 는 짧은 SAY 만 가능. 전용 이벤트가 있으면 무시됨",
+            "_hint_talk_when",
+            "hint",
+        ),
+    ] + _talk_line_rows(talk_count=talk_count) + [
+        ("  기본 대사 (위 조건 모두 안 맞을 때)", "fallback_text", "text"),
+    ]
 
 
 def char_def_modal_section_rows(
@@ -1172,21 +1474,8 @@ def char_def_modal_section_rows(
     return {
         "basic_setup": basic_setup,
         "progress": _progress_editor_rows(prog_prefix="prog", rule_count=prog_count),
-        "interact": _bindings_core_rows(bind_count=bind_count),
-        "talk": [
-            ("── [B] 일상 대사 (게임 중 말 걸기) ──", "_hint_talk", "hint"),
-            ("대화 시 플레이어 쪽 바라보기", "face_player", "dropdown", BOOL_OPTS),
-            (
-                "  when=progress 조건 · 위에서 아래 첫 번째 맞는 대사만 표시",
-                "_hint_talk_when",
-                "hint",
-            ),
-        ]
-        + _talk_line_rows(talk_count=talk_count)
-        + [
-            ("  기본 대사 (위 조건 모두 안 맞을 때)", "fallback_text", "text"),
-            ("  after 예: progress_c10_talk:1 — 대사 후 progress 변경", "_hint_talk_after", "hint"),
-        ],
+        "interact": _npc_interact_simple_rows(),
+        "talk": _npc_talk_legacy_rows(talk_count=talk_count),
     }
 
 
@@ -1200,6 +1489,7 @@ def char_def_modal_rows() -> list:
 def char_inst_modal_section_rows(
     *,
     bind_count: int = DEFAULT_BIND_SLOTS,
+    talk_count: int = DEFAULT_TALK_LINES,
     inst_prog_count: int = DEFAULT_PROGRESS_RULES,
 ) -> dict:
     basic_setup = [
@@ -1232,15 +1522,19 @@ def char_inst_modal_section_rows(
             ("── 맵 전용: progress (타입 [D] 덮어쓰기) ──", "_hint_inst_prog", "hint"),
         ]
         + _progress_editor_rows(prog_prefix="inst_prog", rule_count=inst_prog_count),
-        "interact": [
-            ("── 맵 전용: 클릭 상호작용 bindings ──", "_hint_inst_evt", "hint"),
+        "interact": _npc_interact_simple_rows(),
+        "talk": [
+            ("── 맵 전용: 구형 대사 (비권장) ──", "_hint_inst_talk", "hint"),
             (
-                "※ 여기 입력한 bindings 가 타입(char_defs) 설정보다 우선합니다",
-                "_hint_inst_talk",
+                "※ 권장: 상호작용→이벤트 탭의 전용 이벤트. 이벤트가 있으면 talk 무시",
+                "_hint_inst_talk_prio",
                 "hint",
             ),
         ]
-        + _bindings_slot_rows(bind_count=bind_count),
+        + _talk_line_rows(talk_count=talk_count)
+        + [
+            ("  기본 대사 (위 조건 모두 안 맞을 때)", "fallback_text", "text"),
+        ],
     }
 
 
@@ -1296,40 +1590,17 @@ def obj_inst_modal_section_rows(
 def char_def_to_fields(cdef: dict, char_name: str) -> dict:
     from char_behavior import display_behavior_mode
 
-    inter = cdef.get("interact") or {}
-    beh = cdef.get("behavior") or {}
-    talk = cdef.get("talk") or {}
-    lines = list(talk.get("lines") or [])
-    fb = talk.get("fallback") or {}
-    fb_say = fb.get("say") if isinstance(fb, dict) else {}
-    iox, ioy = _interact_offset_to_fields(inter)
     fields = {
         "name": str(cdef.get("name") or char_name),
         "display_name": str(cdef.get("display_name") or ""),
-        "interact_range": str(inter.get("range", 48)),
-        "interact_offset_x": iox,
-        "interact_offset_y": ioy,
-        "interact_enabled": _interact_enabled_field(inter),
-        "face_player": "true" if inter.get("face_player_on_talk", True) else "false",
-        "behavior_mode": display_behavior_mode(beh.get("mode") or "idle"),
-        "wander_radius": str(beh.get("radius", 64)),
-        "wander_interval_ms": str(beh.get("interval_ms", 3000)),
+        "behavior_mode": display_behavior_mode((cdef.get("behavior") or {}).get("mode") or "idle"),
+        "wander_radius": str((cdef.get("behavior") or {}).get("radius", 64)),
+        "wander_interval_ms": str((cdef.get("behavior") or {}).get("interval_ms", 3000)),
         "jump_max_gap": str(cdef.get("jump_max_gap", 30)),
         "mask_nav": "true" if cdef.get("mask_nav") else "false",
-        "fallback_text": str((fb_say or {}).get("text") or ""),
     }
-    _bindings_to_slot_fields(inter.get("bindings"), fields)
-    fields.update(_interact_prompt_to_fields(inter))
-    talk_count = max(DEFAULT_TALK_LINES, len(lines))
-    for i in range(1, talk_count + 1):
-        if i - 1 < len(lines):
-            ln = lines[i - 1]
-            say = ln.get("say") or {}
-            fields[f"line{i}_when"] = _format_talk_when(ln.get("when"))
-            fields[f"line{i}_text"] = str(say.get("text") or "")
-            fields[f"line{i}_after"] = _format_talk_after(ln.get("after"))
-        else:
-            _init_talk_line_fields(fields, i)
+    _npc_interact_to_fields(cdef.get("interact") or {}, fields)
+    _talk_to_slot_fields(cdef.get("talk"), fields)
     if not fields["display_name"]:
         fields["display_name"] = char_name
     if not str(fields.get("name") or "").strip():
@@ -1354,12 +1625,7 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
     dn = str(fields.get("display_name") or "").strip()
     if dn:
         out["display_name"] = dn
-    out["interact"] = _interact_dict_from_fields(fields)
-    out["interact"]["face_player_on_talk"] = str(fields.get("face_player", "true")).lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    out["interact"] = _npc_interact_dict_from_fields(fields)
     mode = str(fields.get("behavior_mode") or "idle").strip() or "idle"
     from char_behavior import display_behavior_mode
 
@@ -1384,27 +1650,7 @@ def fields_to_char_def(fields: dict, char_name: str) -> dict:
     fx = _entity_fx_from_fields_optional(fields, prefix="")
     if fx is not None:
         out["entity_fx"] = fx
-    lines = []
-    talk_count = max(DEFAULT_TALK_LINES, _max_numbered_slot(fields, "line"))
-    for i in range(1, talk_count + 1):
-        txt = str(fields.get(f"line{i}_text") or "").strip()
-        if not txt:
-            continue
-        wh = _parse_talk_when(fields.get(f"line{i}_when"))
-        af = _parse_talk_after(fields.get(f"line{i}_after"))
-        say = {"who": char_name, "text": txt, "show_name": True}
-        entry = {"id": f"line{i}", "say": say}
-        if wh is not None:
-            entry["when"] = wh
-        if af:
-            entry["after"] = af
-        lines.append(entry)
-    talk: dict = {}
-    if lines:
-        talk["lines"] = lines
-    fb_txt = str(fields.get("fallback_text") or "").strip()
-    if fb_txt:
-        talk["fallback"] = {"say": {"text": fb_txt, "show_name": False}}
+    talk = _talk_from_slot_fields(fields, char_name)
     if talk:
         out["talk"] = talk
     merged = _deep_merge(base, out)
@@ -1459,15 +1705,8 @@ def char_inst_fields_from_npc(npc) -> dict:
     spec = getattr(npc, "behavior_spec", None) or {}
     raw = getattr(npc, "interact_instance", None) or {}
     inter = raw if isinstance(raw, dict) else {}
-    iox, ioy = _interact_offset_to_fields(inter)
     fields = {
         "instance_id": str(getattr(npc, "instance_id", "") or ""),
-        "interact_enabled": (
-            _interact_enabled_field(inter) if "enabled" in inter else ""
-        ),
-        "interact_range": str(inter.get("range", "")),
-        "interact_offset_x": iox,
-        "interact_offset_y": ioy,
         "behavior_mode": display_behavior_mode(spec.get("mode") or "idle"),
         "waypoints": format_waypoints(spec.get("waypoints") or []),
         "wait_ms": str(spec.get("wait_ms", 800)),
@@ -1478,9 +1717,24 @@ def char_inst_fields_from_npc(npc) -> dict:
         "flee_trigger": str(spec.get("trigger_range", 80)),
         "flee_safe": str(spec.get("safe_range", 140)),
     }
-    _bindings_to_slot_fields(inter.get("bindings"), fields)
-    fields.update(_interact_prompt_to_fields(inter))
+    # 인스턴스 interact 가 비어 있으면 빈 필드(타입 상속) — enabled 키 없으면 공란
+    if inter:
+        _npc_interact_to_fields(inter, fields)
+        if "enabled" not in inter:
+            fields["interact_enabled"] = ""
+        if inter.get("range") is None:
+            fields["interact_range"] = ""
+    else:
+        fields["interact_enabled"] = ""
+        fields["interact_range"] = ""
+        fields["interact_cond"] = ""
+        fields["interact_event"] = ""
+        fields["face_player"] = "true"
+        fields["interact_offset_x"] = ""
+        fields["interact_offset_y"] = ""
+        fields.update(_interact_prompt_to_fields({}))
     we = getattr(npc, "_world_entry", None) or {}
+    _talk_to_slot_fields(we.get("talk"), fields)
     _state_patch_to_fields(we.get("spawn_state") or {}, fields, "inst_spawn_")
     _progress_apply_to_fields(we.get("progress_apply"), fields, slot_prefix="inst_prog")
     return fields
@@ -1490,22 +1744,34 @@ def apply_char_inst_fields(npc, fields: dict) -> None:
     from char_behavior import attach_npc_from_entry, npc_entry_from_instance
 
     inst_inter: dict = {}
-    if str(fields.get("interact_enabled", "")).strip():
-        inst_inter["enabled"] = str(fields.get("interact_enabled", "false")).lower() in (
-            "true",
-            "1",
-            "yes",
-        )
+    en_s = str(fields.get("interact_enabled", "")).strip()
+    eid = str(fields.get("interact_event") or "").strip()
+    cond = str(fields.get("interact_cond") or "").strip()
     rng_s = str(fields.get("interact_range") or "").strip()
-    if rng_s:
-        try:
-            inst_inter["range"] = float(rng_s)
-        except ValueError:
-            pass
-    _interact_offset_into_dict(fields, inst_inter)
-    binds = _bindings_from_slot_fields(fields)
-    if binds:
-        inst_inter["bindings"] = binds
+    # 뭔가 입력했으면 인스턴스 interact 저장
+    if en_s or eid or cond or rng_s:
+        if en_s:
+            inst_inter["enabled"] = en_s.lower() in ("true", "1", "yes")
+        elif eid:
+            inst_inter["enabled"] = True
+        if rng_s:
+            try:
+                inst_inter["range"] = float(rng_s)
+            except ValueError:
+                pass
+        _interact_offset_into_dict(fields, inst_inter)
+        _interact_prompt_into_dict(fields, inst_inter)
+        if str(fields.get("face_player", "")).strip():
+            inst_inter["face_player_on_talk"] = str(fields.get("face_player", "true")).lower() in (
+                "true",
+                "1",
+                "yes",
+            )
+        if eid:
+            row: dict = {"event_id": eid, "priority": 100}
+            if cond:
+                row["condition"] = cond
+            inst_inter["bindings"] = [row]
     npc.interact_instance = inst_inter
 
     from char_behavior import display_behavior_mode
@@ -1561,6 +1827,11 @@ def apply_char_inst_fields(npc, fields: dict) -> None:
         entry["progress_apply"] = pa
     else:
         entry.pop("progress_apply", None)
+    talk = _talk_from_slot_fields(fields, str(getattr(npc, "name", "") or ""))
+    if talk:
+        entry["talk"] = talk
+    else:
+        entry.pop("talk", None)
     npc._world_entry = dict(entry)
     attach_npc_from_entry(npc, entry)
     from char_behavior import apply_entity_progress_state
@@ -1609,6 +1880,21 @@ class _ConfigModal:
         self._body_drag = False
         self._dd_drag = False
         self.color_picker = None
+        # 텍스트 칸 커서·선택·붙여넣기 (editor_text.EditSession)
+        self.text_edit = ed_txt.EditSession()
+
+    def _focus_field(self, key: str, ctx=None, val_rect=None, click_pos=None) -> None:
+        """입력란 활성화 + 커서(클릭 위치 또는 끝)."""
+        self.active_field = key
+        cur = str(self.fields.get(key, "") or "")
+        font = (ctx or {}).get("font") if ctx else None
+        if font is not None and val_rect is not None and click_pos is not None:
+            try:
+                self.text_edit.focus_click(cur, font, float(click_pos[0]) - float(val_rect.x))
+                return
+            except Exception:
+                pass
+        self.text_edit.focus(cur)
 
     def _reset_section(self):
         sections = self.get_sections()
@@ -1633,6 +1919,20 @@ class _ConfigModal:
         self.scroll = max_scroll
 
     def _on_add_slot_click(self, add_id: str, ctx) -> None:
+        if add_id == "_goto:interact_event":
+            eid = str(self.fields.get("interact_event") or "").strip()
+            if not eid:
+                return
+            # 현재 설정 저장 후 EVENT 모드·우측 스텝 목록으로 이동
+            try:
+                self.on_save(ctx)
+            except Exception:
+                pass
+            self.close()
+            cb = (ctx or {}).get("on_open_interact_event")
+            if callable(cb):
+                cb(eid)
+            return
         if add_id == "_add:bind":
             if self.slot_counts["bind"] >= MAX_EXPAND_SLOTS:
                 return
@@ -1655,6 +1955,10 @@ class _ConfigModal:
         self.dd_open = False
         self.active_field = None
         self._scroll_to_bottom(ctx)
+
+    def _on_dropdown_picked(self, key: str, value: str, ctx) -> None:
+        """드롭다운 항목 선택 직후 훅. 하위 모달에서 미리듣기 등에 사용."""
+        return
 
     def _section_bar_h(self) -> int:
         from editor import EDITOR_MODAL_SECTION_BAR_H
@@ -1819,6 +2123,7 @@ class _ConfigModal:
                         if 0 <= ix < len(self.dd_options):
                             if self.dd_key:
                                 self.fields[self.dd_key] = str(self.dd_options[ix])
+                                self._on_dropdown_picked(self.dd_key, self.fields[self.dd_key], ctx)
                             self.dd_open = False
                         return True
                 self.dd_open = False
@@ -1876,7 +2181,7 @@ class _ConfigModal:
                         field_x, ry + 3, body_rect.right - field_x - 8, EDITOR_MODAL_ROW_H - 6
                     )
                     if val_rect.collidepoint(event.pos):
-                        self.active_field = rk
+                        self._focus_field(rk, ctx, val_rect, event.pos)
                         return True
                 elif kind == "color":
                     val_rect = pygame.Rect(field_x, ry + 3, color_w, EDITOR_MODAL_ROW_H - 6)
@@ -1890,7 +2195,7 @@ class _ConfigModal:
                         )
                         return True
                     if val_rect.collidepoint(event.pos):
-                        self.active_field = rk
+                        self._focus_field(rk, ctx, val_rect, event.pos)
                         return True
                 elif kind == "events":
                     lb = pygame.Rect(field_x + field_w + 4, ry + 3, list_w, EDITOR_MODAL_ROW_H - 6)
@@ -1909,7 +2214,7 @@ class _ConfigModal:
                         )
                         return True
                     if val_rect.collidepoint(event.pos):
-                        self.active_field = rk
+                        self._focus_field(rk, ctx, val_rect, event.pos)
                         return True
                 elif kind == "dropdown":
                     lb = pygame.Rect(field_x + field_w + 4, ry + 3, list_w, EDITOR_MODAL_ROW_H - 6)
@@ -1928,7 +2233,7 @@ class _ConfigModal:
                         )
                         return True
                     if val_rect.collidepoint(event.pos):
-                        self.active_field = rk
+                        self._focus_field(rk, ctx, val_rect, event.pos)
                         return True
             return True
 
@@ -1942,13 +2247,20 @@ class _ConfigModal:
                     self.close()
                 return True
             if self.active_field:
-                if event.key == pygame.K_BACKSPACE:
-                    self.fields[self.active_field] = self.fields.get(self.active_field, "")[:-1]
-                elif event.key == pygame.K_RETURN:
+                if event.key == pygame.K_RETURN:
                     self.active_field = None
+                    return True
+                nt, handled = self.text_edit.keydown(
+                    self.fields.get(self.active_field, "") or "", event
+                )
+                if handled:
+                    self.fields[self.active_field] = nt
+                    return True
                 return True
         if event.type == pygame.TEXTINPUT and self.active_field:
-            self.fields[self.active_field] = self.fields.get(self.active_field, "") + event.text
+            self.fields[self.active_field] = self.text_edit.insert(
+                self.fields.get(self.active_field, "") or "", event.text or ""
+            )
             return True
         return True
 
@@ -1982,6 +2294,7 @@ class _ConfigModal:
             self.fields,
             self.active_field,
             section_bar_h=sbh,
+            edit_session=self.text_edit,
         )
         self._paint_section_tabs(screen, font, panel_rect)
         save_btn = pygame.Rect(panel_rect.centerx - 110, panel_rect.bottom - 50, 100, 35)
@@ -2019,8 +2332,8 @@ class CharDefModal(_ConfigModal):
         return [
             ("basic_setup", "기본설정"),
             ("progress", "자동 실행"),
-            ("interact", "상호작용(이벤트)"),
-            ("talk", "상호작용(대화)"),
+            ("interact", "상호작용→이벤트"),
+            ("talk", "구형 대사"),
         ]
 
     def get_section_rows(self):
@@ -2062,12 +2375,14 @@ class CharInstModal(_ConfigModal):
         return [
             ("basic_setup", "기본설정"),
             ("progress", "자동 실행"),
-            ("interact", "상호작용(이벤트)"),
+            ("interact", "상호작용→이벤트"),
+            ("talk", "구형 대사"),
         ]
 
     def get_section_rows(self):
         return char_inst_modal_section_rows(
             bind_count=self.slot_counts["bind"],
+            talk_count=self.slot_counts["talk"],
             inst_prog_count=self.slot_counts["inst_prog"],
         )
 
@@ -2387,14 +2702,16 @@ class ObjInstModal(_ConfigModal):
 
 
 class MapFieldDefaultsModal(_ConfigModal):
-    """MAP world_data[map].field — 맵 진입 시 틸트/쉬어 + ambient SCREEN_FX."""
+    """MAP world_data[map].field — 맵 진입 시 틸트/쉬어 + ambient SCREEN_FX + 기본 BGM.
+    basic 탭의 ▶/■ 버튼으로 지정 BGM 을 에디터에서 미리들을 수 있다 (MusicManager).
+    """
 
     tag = "map_field"
-    title = "MAP FIELD / SCREEN FX"
+    title = "MAP FIELD / SCREEN FX / BGM"
 
     def get_sections(self):
         return [
-            ("basic", "틸트 / 쉬어"),
+            ("basic", "틸트 / 쉬어 / BGM"),
             ("cloud", "구름"),
             ("rain", "비"),
             ("vignette", "비네팅"),
@@ -2415,6 +2732,32 @@ class MapFieldDefaultsModal(_ConfigModal):
         self._reset_section()
         self.active_field = None
         self.dd_open = False
+
+    def close(self):
+        # 미리듣기가 에디터에 남지 않도록 모달 닫을 때 정지
+        _editor_stop_map_music_preview()
+        super().close()
+
+    def _on_add_slot_click(self, add_id: str, ctx) -> None:
+        if add_id == "_music:preview":
+            _editor_preview_map_music(self.fields)
+            self.dd_open = False
+            self.active_field = None
+            return
+        if add_id == "_music:stop":
+            _editor_stop_map_music_preview()
+            self.dd_open = False
+            self.active_field = None
+            return
+        super()._on_add_slot_click(add_id, ctx)
+
+    def _on_dropdown_picked(self, key: str, value: str, ctx) -> None:
+        # music 키를 고르면 바로 미리듣기(없음 선택 시 정지)
+        if key == "map_music":
+            if str(value or "").strip():
+                _editor_preview_map_music(self.fields)
+            else:
+                _editor_stop_map_music_preview()
 
     def on_save(self, ctx):
         cb = ctx.get("on_map_field_defaults_saved")

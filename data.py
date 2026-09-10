@@ -1,40 +1,42 @@
 import android_fix  # noqa: F401  # Android asset-path shim; must run before any asset load
+import os
 
 CONFIG = {
     # --- Render output mode ---
-    # UPSCALE_320: 320x240 논리 렌더 → 정수배(기본 2x)로 640x480 출력
-    # NATIVE_640: 640x480 논리 렌더(업스케일 없음)
-    #"OUTPUT_MODE": "UPSCALE_320",  # "UPSCALE_320" | "NATIVE_640"
-    "OUTPUT_MODE": "NATIVE_640",  # "UPSCALE_320" | "NATIVE_640"
-    "UPSCALE_FACTOR": 2,           # UPSCALE_320에서만 사용(정수배)
-    # 물리 창 크기 고정. None이면 기존처럼 논리×UPSCALE(보통 640×480).
-    # "320x240": OS 창을 항상 320×240으로 유지(줌2/UPSCALE_320 시야에 맞춤).
-    #   - 논리 320이면 1:1, 논리 640(NATIVE/줌아웃)이면 다운스케일 present.
-    #   - AUTO_OUTPUT_MODE·F5 전환은 그대로 동작하되 창 크기만 바뀌지 않음.
+    # UPSCALE_320: 320x240 논리 렌더 (FIXED_PHYSICAL 320이면 1:1 present)
+    # NATIVE_640: 640x480 논리 렌더 — ALLOW_NATIVE_640=False 이면 사용하지 않음
+    "OUTPUT_MODE": "UPSCALE_320",  # "UPSCALE_320" | "NATIVE_640"
+    "UPSCALE_FACTOR": 2,           # UPSCALE_320에서만 사용(정수배) / 줌2x→해상도 치환 배수
+    # 물리 창 크기 고정. None이면 기존처럼 논리×UPSCALE.
+    # "320x240": OS 창을 항상 320×240으로 유지.
     "FIXED_PHYSICAL_WINDOW": "320x240",  # None | "320x240" | "640x480"
-    # "FIXED_PHYSICAL_WINDOW": None,  # None | "320x240" | "640x480"
     "FULLSCREEN": False,
     # Android: 기기 해상도에 맞춰 640x480 비율 유지 스케일(레터박스). main.py가 런타임에 자동 적용.
     "ANDROID_DISPLAY_FIT": True,
 
 
-    # --- 가변 해상도(자동 출력 모드 전환) ---
-    # 기본은 640x480(NATIVE_640). world_zoom이 2.0에 "완료"되면 320x240(UPSCALE_320)로 바꾸고
-    # world_zoom은 1.0으로 리셋해서 체감 줌(시야)을 유지하면서 후처리 스케일 비용을 줄인다.
+    # SCREEN 이벤트 스텝은 출력 모드를 바꾸지 않음(hi_res 폐지).
+    # 그림은 현재 논리 화면(보통 320×240)에 비율 유지 스케일.
+
+    # --- 월드 줌 ↔ 출력 모드 ---
+    # world_zoom 은 계속 640 기준(1.0=넓게, 2.0=가깝게). 이벤트 ZOOM 숫자 유지.
+    # ALLOW_NATIVE_640=False(기본): 논리는 항상 320. 줌아웃은 draw=zoom/UPSCALE_FACTOR 로만 표현.
+    # True 이면 예전처럼 줌아웃 시 NATIVE_640 으로 올렸다가 줌인 완료 시 320 으로 되돌림.
     "AUTO_OUTPUT_MODE_ENABLED": True,
+    "AUTO_OUTPUT_MODE_ALLOW_NATIVE_640": False,
     "AUTO_OUTPUT_MODE_ON_WORLD_ZOOM": 2.0,
     "AUTO_OUTPUT_MODE_OFF_WORLD_ZOOM": 1.0,
     "AUTO_OUTPUT_MODE_COOLDOWN_MS": 900,
     # 3D_ROTATE(Mode7) 샘플 해상도 = CONFIG WIDTH×HEIGHT.
     # True면 Mode7 활성 중 논리 해상도를 320×240(UPSCALE_320)로 강제(해상도 재설정→깜빡임).
-    # 기본 화면이 이미 zoom=2.0(UPSCALE_320)이면 False 권장 — 성능은 같고 깜빡임만 제거.
+    # 기본이 이미 UPSCALE_320 이면 False 권장.
     "ROTATE3D_FORCE_LOGICAL_320": False,
 
 
-    # 논리 해상도(게임 내부 좌표 기준)
-    "WIDTH": 640, "HEIGHT": 480, "FPS": 30,
+    # 논리 해상도(게임 내부 좌표 기준) — UPSCALE_320 기본과 맞춤
+    "WIDTH": 320, "HEIGHT": 240, "FPS": 30,
     # UI 아이콘(말풍선·pushbutton·이모트): 논리 px = 에셋 px (런타임에 WIDTH와 동기화)
-    "UI_LAYOUT_WIDTH": 640,
+    "UI_LAYOUT_WIDTH": 320,
     # 텍스트박스·폰트·RECT_*_320 값만 320 설계 기준 → WIDTH/320 으로 스케일
     "UI_TEXT_REFERENCE_WIDTH": 320,
 
@@ -120,6 +122,7 @@ CONFIG = {
     "FIELD_BOOT_EVENT_ID": "ev_gl_field_boot",
     "NEW_GAME_SPAWN_MAP": "bg_jjangpu",
     "NEW_GAME_SPAWN_POS": [653, 1360],
+    # NPC 접근 시 상호작용·푸쉬버튼 안내. is_visible=false / alpha=0 이면 거리 안이어도 무시.
     "NPC_INTERACT_RANGE": 48,
     # FieldItem interact.bindings 클릭 판정(비우면 interact.range / 기본 16)
     "OBJECT_INTERACT_RANGE": 16,
@@ -162,7 +165,7 @@ CONFIG = {
     "CHAR_SELECT_WELCOME": "짱짱 어드벤처에 오신 것을 환영 합니다.",
     "CHAR_SELECT_PROMPT": "여러분과 함께 모험을 떠날 친구를 선택 해 주세요",
     "CHAR_SELECT_CONFIRM_FMT": "{name}로 선택 하시겠어요?",  # {name}=캐릭터 UI 이름
-    "CHAR_SELECT_FAREWELL": "그럼 짱짱 친구들과 함께 신나는 모험의 세계로 떠나 볼까요~",
+    "CHAR_SELECT_FAREWELL": "그럼 짱짱이들과 함께 신나는 모험의 세계로 떠나 볼까요~",
     # 캐릭터 선택 종료 → 본편 스폰 직전 페이드아웃 초. 밝히기는 본편 첫 auto 이벤트(FADEIN)에 맡긴다.
     "CHAR_SELECT_EXIT_FADEOUT_SEC": 1.0,
     "CHAR_SPEED": 1.6, "CURSOR_SPEED": 3.5,
@@ -182,12 +185,12 @@ CONFIG = {
     "SAY_USE_TEXTBOX_UI": True,
     "SAY_TEXTBOX_ASSET": "textbox01",
     # 320x240 기준 텍스트 영역 (x, y, w, h)
-    "SAY_TEXTBOX_RECT_320": [30, 182, 284, 52],
+    "SAY_TEXTBOX_RECT_320": [10, 182, 270, 52],
     # 폰트 (UI_FONT_FILES 키)
     "SAY_FONT_KEY": "dialog",
     "SAY_FONT_SIZE_320": 10,
     "SAY_NAME_FONT_SIZE_320": 12,
-    # 이름(Who) 표시 기본값
+    # 이름(Who) 표시 기본값. SAY show_name 을 비우면 이 값. false 면 대화창에 이름 숨김(who 는 말풍선용으로 유지)
     "SAY_SHOW_NAME_DEFAULT": True,
     # 간격 (320 기준 px)
     "SAY_LINE_GAP_PX_320": 2,
@@ -225,7 +228,7 @@ CONFIG = {
     "SAY_BOX_TOP_FALLBACK_SLACK_PX_320": 10,
     # 상단 텍스트 영역 [x,y,w,h]. null 이면 하단 RECT 대칭(y≈6 → 너무 위에 붙을 수 있음)
     # y 를 키우면 글자가 아래로, 줄이면 위로. (예: [30, 20, 284, 52])
-    "SAY_TEXTBOX_RECT_TOP_320": [48, 38, 302, 70],
+    "SAY_TEXTBOX_RECT_TOP_320": [10, 38, 270, 70],
     # 상단 폴백일 때 뒤집은 textbox 이미지를 화면 위쪽에서 얼마나 내릴지(320 기준 px)
     # 0=맨 위 붙임. 글자 RECT 와 비슷하게 맞추려면 14~20 권장.
     "SAY_TEXTBOX_TOP_BLIT_Y_PX_320": 14,
@@ -250,6 +253,9 @@ CONFIG = {
 
     # --- SELECTBOX: 이벤트 스텝 예/아니오 선택창 기본값 ---
     # SELECTBOX 스텝 파라미터로 개별 오버라이드 가능.
+    # 안내 글자(name/text) 크기: 여기 SELECTBOX_TEXT_SIZE / NAME_SIZE (320 기준) 또는 스텝 text_size/name_size
+    # 안내 글자색·테두리: OVERLAY_UI 와 같은 폰트 슬롯 "ui" (에디터 FONT → 일반 UI / 오버레이, ui.state.json)
+    #   force_color 가 켜져 있으면 show_selectbox 에 적힌 color 문자열은 무시됨
     # SELECTBOX_YES_TEXT / NO_TEXT : 버튼 글자
     "SELECTBOX_YES_TEXT": "예",
     "SELECTBOX_NO_TEXT": "아니오",
@@ -260,6 +266,22 @@ CONFIG = {
     "SELECTBOX_TEXT_SIZE": 12,    # 질문 텍스트
     "SELECTBOX_NAME_SIZE": 12,    # 창 이름(제목)
     "SELECTBOX_BTN_SIZE": 12,     # 버튼 글자
+
+    # --- NOTICE: 화면을 어둡게 하고 중앙 패널에 설명글 (대화창 SAY 와 별도) ---
+    # 이벤트 스텝 type: NOTICE. text 필수. name=제목(선택). auto/val 은 SAY 와 동일 의미.
+    #   auto true + val(초): 타자 완료 후 그 시간 지나면 자동 닫기. false 면 클릭/A 로 닫기.
+    #   줄바꿈: text 안에 \n (JSON에서는 "줄1\\n줄2" 또는 실제 개행). SAY 와 동일.
+    "NOTICE_DIM_ALPHA": 180,           # 뒤 월드 어둡게 (0~255). 캐릭터 선택 오버레이(210)보다 살짝 얕게
+    "NOTICE_PANEL_W_320": 248,         # 중앙 패널 폭 (320 논리 기준)
+    "NOTICE_PANEL_PAD_320": 12,        # 패널 안쪽 여백
+    "NOTICE_PANEL_MAX_H_320": 180,     # 패널 최대 높이 (화면 여백 확보)
+    "NOTICE_PANEL_BG": (22, 30, 48),   # 패널 배경 RGB
+    "NOTICE_PANEL_BORDER": (150, 175, 210),
+    "NOTICE_TITLE_COLOR": (255, 248, 220),
+    "NOTICE_TEXT_COLOR": (235, 240, 250),
+    "NOTICE_FONT_SIZE_320": 11,
+    "NOTICE_TITLE_SIZE_320": 13,
+    "NOTICE_LINE_GAP_PX_320": 3,
 
     # --- SAY 말풍선 (assets/images/ui/speechbubble0N/speechbubble0N_0.png …) ---
     # SAY_BUBBLE_DEFAULT True: 스텝에 bubble 을 안 적어도 speechbubble01 표시
@@ -348,6 +370,11 @@ CONFIG = {
     "ENTITY_ZOOM_MAX": 2.0,
     "ENTITY_ZOOM_DEFAULT_DURATION_SEC": 1.0,
     "ENTITY_ZOOM_LERP": 0.12,  # 0~1, 클수록 더 빠름
+    # CHANGE 스텝: 옛 스프라이트(ghost)와 새 스프라이트를 발 앵커로 겹쳐 페이드 전환.
+    # speed(초)=변신 시간. fade(초)=같은 크로스페이드(에디터 필드 유지). speed 가 있으면 speed, 없으면 fade.
+    # 둘 다 0/빈칸이면 즉시 교체. TUNE visible 로 숨겼다 보일 필요 없음.
+    # ANIM_ONCE: pos [x,y] 한 곳, 또는 [[x,y],[x,y],...] 여러 곳에 같은 애니를 동시에 재생.
+    # wait 기본 true(전부 끝날 때까지). wait:false 면 즉시 다음 — 연속 ANIM_ONCE 는 한 프레임에 같이 시작.
 
     # --- 틸트/쉬어/캐시(줌과 무관) ---
     "RENDER_TILT_STEP": 0.01,  # 0.005~0.02 권장
@@ -613,14 +640,20 @@ CONFIG = {
         {"key": "y", "event_id": "ev_hotkey_cloud"},  # 구름 효과
         # e: 이벤트 피커(목록 모달) — GLOBAL_EVENT_HOTKEYS 가 아님. field_runtime EventPicker
     ],
-    # 필드 플레이 중 E 키 — 등록 이벤트 목록 모달(클릭/Enter 즉시 실행). False면 비활성
+    # 필드 플레이 중 E 키 — 등록 이벤트 목록 모달(탭으로 즉시 실행). False면 비활성
     "EVENT_PICKER_HOTKEY_ENABLED": True,
-    # EVENT_PICKER_HOTKEY: 피커 토글 키 (한 글자 / F키 / K_*). 기본 e
+    # EVENT_PICKER_HOTKEY: 피커 토글 키 (한 글자 / F키 / K_*). 기본 e. 터치/마우스는 debug 패널의 이벤트 피커 항목 사용
     "EVENT_PICKER_HOTKEY": "e",
-    # EVENT_PICKER_ROW_H: 목록 한 줄 높이(논리 px)
-    "EVENT_PICKER_ROW_H": 18,
-    # EVENT_PICKER_VISIBLE_ROWS: 한 화면에 보이는 줄 수
+    # EVENT_PICKER_ROW_H: 목록 한 줄 높이(논리 px). 터치 탭용으로 약간 큼
+    "EVENT_PICKER_ROW_H": 22,
+    # EVENT_PICKER_VISIBLE_ROWS: 한 화면에 보이는 줄 수(화면이 작으면 레이아웃이 줄임)
     "EVENT_PICKER_VISIBLE_ROWS": 12,
+    # GAME_MODAL_SB_W: 디버그 패널·이벤트 피커 세로 스크롤바 폭(논리 px). 터치 드래그용
+    "GAME_MODAL_SB_W": 12,
+    # GAME_MODAL_WHEEL_STEP: 마우스 휠 한 칸당 스크롤 픽셀
+    "GAME_MODAL_WHEEL_STEP": 28,
+    # GAME_MODAL_DRAG_SLOP: 리스트 탭 vs 드래그 스크롤 구분(논리 px). 이 이상 움직이면 탭이 아님
+    "GAME_MODAL_DRAG_SLOP": 6,
     # --- 3D_ROTATE / Mode7 (레이싱 전용 맵 원근). 사다리꼴 레거시 키는 사용하지 않음. ---
     "ROTATE3D_DEFAULT_STRENGTH": 1.0,   # 이벤트/토글 on 시 목표 strength(0~1)
     "ROTATE3D_DEFAULT_DURATION_SEC": 0.4,  # 이벤트 스텝 기본 보간 시간(초)
@@ -642,6 +675,8 @@ CONFIG = {
     # True면 DEPTH_MUL만 맞춰 발이 빌보드 Y에 오게 함(행별 원근 식은 그대로)
     "ROTATE3D_PIVOT_FIT_PLAYER": True,
     # 스프라이트: scale = ref_forward/forward (앞뒤만). 호출측에서 ×zoom
+    # 벽 컬럼(wall_angle≠0 또는 wall_3d=true): 중심 한 값이 아니라 열마다 이 스케일.
+    # wall_3d는 맵 오브젝트 인스턴스 플래그(world_data). 0°여도 열 원근. 기본 false.
     "ROTATE3D_SPRITE_SCALE_ENABLED": True,
     "ROTATE3D_SPRITE_SCALE_MIN": 0.05,
     "ROTATE3D_SPRITE_SCALE_MAX": 8.0,
@@ -671,10 +706,17 @@ CONFIG = {
     "ROTATE3D_ANDROID_FALLBACK_X_STEP": 3,      # Android get_at 폴백 가로 간격
     "ROTATE3D_ANDROID_FALLBACK_Y_STEP": 2,      # Android get_at 폴백 세로 간격
     # 시작 시 디버그 텍스트 오버레이(HUD) 기본 표시 여부. 런타임 토글은 'O' 키.
+    # O키 HUD 글자: UI_FONT_PROFILES ui 슬롯 size_320 (대화와 같이 WIDTH/320 스케일).
+    # 예전 get_ui_font(10)은 640 기준 고정이라 NATIVE_640을 320 창에 줄이면 대화보다 훨씬 작아 보였음.
     "SHOW_OVERLAY_DEFAULT": False,
+    # ui 프로필을 못 읽을 때만 쓰는 폴백 (320 기준 px).
+    "OVERLAY_HUD_FONT_SIZE_320": 12,
+    # O키 HUD에 그릴 progress 변수 최대 줄 수. 넘치면 마지막에 ... +N.
+    "OVERLAY_PROGRESS_MAX_LINES": 24,
     # 오버레이(HUD)를 껐을 때도 RSS 메모리 표시를 남길지 여부.
     "SHOW_RSS_OVERLAY_WHEN_OFF": False,
     # 필드 플레이 중 오른쪽 위 게임 종료 버튼(OVERLAY_UI, events.json fishing_exit와 동일 파이프).
+    # GAME_OPTIONS_BUTTON(설정)도 동일 플래그로 on/off.
     "GAME_EXIT_OVERLAY_ENABLED": True,
     # RG34XX 등 터치 없는 기기: A+X 동시 입력 시 앱 즉시 종료 (확인창 없음).
     "APP_FORCE_QUIT_COMBO_ENABLED": True,
@@ -803,17 +845,38 @@ CONFIG = {
     "AVOID_STEER_STEP_DEG": 18,       # 각도 탐색 간격(작을수록 촘촘/부드럽지만 약간 더 연산)
     "AVOID_STEER_MAX_DEG": 105,       # 최대 비껴가기 각도(이보다 더 틀어야 하면 A*에 맡김)
 
-    # FOLLOW 재경로계산(성능): 목표점이 바뀌어도 매 프레임 A* 하지 않도록 제한
-    "FOLLOW_REPLAN_MS": 220, #220
-    "FOLLOW_REPLAN_DIST_PX": 24.0, #24
-    # 리더 뒤 목표점을 픽셀 격자로 반올림(미세 플로트 변동으로 인한 불필요 재계획·떨림 완화)
+    # FOLLOW 동행: 리더가 실제로 걸은 발자국(트레일)을 복사해 따라감.
+    # 평소에는 팔로워 A* 없음 → 부하·경로 예측이 안정적. 떨어진 뒤에만 A* 1회(reconnect).
+    # FOLLOW_TRAIL_SAMPLE_PX: 리더가 이 거리(월드 px) 이상 움직이면 트레일 점 1개
+    "FOLLOW_TRAIL_SAMPLE_PX": 5.0,
+    # FOLLOW_TRAIL_MAX_POINTS: 리더당 최대 점 수. 넘치면 오래된 점부터 삭제
+    "FOLLOW_TRAIL_MAX_POINTS": 240,
+    # FOLLOW_TRAIL_RECONNECT_PX: 홀드(따라붙을 지점)와 이보다 멀면 A*로 바로 붙음. 옛 트레일을 되밟지 않음
+    "FOLLOW_TRAIL_RECONNECT_PX": 48.0,
+    # FOLLOW_TRAIL_RECONNECT_MS: reconnect A* 최소 간격(ms). 낙오 catch-up 은 force 로 무시
+    "FOLLOW_TRAIL_RECONNECT_MS": 80,
+    # FOLLOW_TRAIL_LOOKAHEAD: 한 번에 path 에 넣는 최대 점 수. 길면 뒤쪽 옛 점을 다시 걸어 낙오함
+    "FOLLOW_TRAIL_LOOKAHEAD": 6,
+    # FOLLOW_TRAIL_BREAK_PX: 점프 없이 이 거리 이상 순간이동이면 트레일 리셋(맵 전환)
+    "FOLLOW_TRAIL_BREAK_PX": 96.0,
+    # FOLLOW_TRAIL_ARRIVE_PX: 이 점 위에 서 있다고 보고 다음 점으로 넘김. 크면 점프하듯 건너뜀
+    "FOLLOW_TRAIL_ARRIVE_PX": 2.5,
+    # 리더 뒤 목표점을 픽셀 격자로 반올림(reconnect A* 목표 떨림 완화)
     "FOLLOW_SLOT_QUANTIZE_PX": 4, #4
-    # FOLLOW_START 여러 명이 같은 leader 를 따를 때: 세로 간격(px, 320 기준 아님 — 월드 px)
+    # FOLLOW_START 여러 명이 같은 leader 를 따를 때: 트레일에서 뒤로 더 밀어내는 간격(월드 px)
     "FOLLOW_MULTI_SPACING_PX": 18.0,
-    # 슬롯 목표점까지 이 거리 이하면 정지
-    "FOLLOW_SLOT_ARRIVE_PX": 12.0,
+    # 홀드 점(dist 뒤)까지 이 거리 이하면 대기
+    "FOLLOW_SLOT_ARRIVE_PX": 10,
+    # 낙오 가속: 리더와 거리가 hold(dist)+START 보다 크면 잠시 빨리 걸어 간격을 좁힘.
+    # SYNC 이하면 리더 속도로 복귀. (체인 follow 에서도 sync 기준은 리더의 catch-up 제외 속도)
+    "FOLLOW_CATCHUP_START_PX": 100.0,
+    "FOLLOW_CATCHUP_SYNC_PX": 20.0,
+    "FOLLOW_CATCHUP_SPEED_MUL": 2.0,
 
     # PLACE persist + behavior:follow(또는 travel:true) 동행 — 맵 전환 시 플레이어 근처 스폰
+    # persist 없는 PLACE(here01 등 휘발 마커)는 재시작 시 사라짐.
+    # CHANGE persist:true 는 placed.name 을 to 키로 바꿔 재시작 후에도 교체된 외형을 유지.
+    # 그 사이 진행값은 RESULT session:true 로 두면 세이브에 안 남아, 미완료 종료 후 이전 이벤트를 다시 탈 수 있다.
     # PLACED_FOLLOW_SPAWN_OFFSET_PX: 첫 동행 NPC를 플레이어 왼쪽으로 띄울 거리(px)
     "PLACED_FOLLOW_SPAWN_OFFSET_PX": 28,
     # PLACED_FOLLOW_SPAWN_SPACING_PX: 동행이 여러 명일 때 가로로 벌리는 간격(px)
@@ -840,6 +903,16 @@ CONFIG = {
 
     # 초기값
     "progress_wateringcan":1001,
+    # 화면 아래 진행 안내 문구. RESULT 로 갱신 → OVERLAY_UI text: "{progress_status}" 로 표시.
+    # 재시작 시 ev_gl_field_boot 등에서 같은 템플릿으로 복원. 빈 문자열이면 오버레이 show 스킵.
+    "progress_status": "",
+    # 들꽃 퀘스트. 1001=첫 만남 전, 1003+=심음(세이브).
+    # 1002(here01 표시·심기 대기)는 RESULT session:true 로만 씀 — 세이브에 안 남김.
+    # 구 세이브에 1002가 있으면 merge_save_defaults 가 1001로 되돌림.
+    "progress_flower1_1": 1001,
+    # 심기 칸 점유. here01 중엔 session RESULT 1, 꽃을 심은 뒤에만 세이브 1.
+    # 이벤트박스 conditions: { "progress_flower1_ground": 1 } 로 검사.
+    "progress_flower1_ground": 0,
     "progress_frog_minigame_win": 0,
     "progress_frog_seed": 0,
     "progress_frog_minigame_tried": 0,
@@ -848,6 +921,15 @@ CONFIG = {
     "progress_fishing_win": 0,
     "score_frog_trial_best": 0,
     "score_frog_trial_last": 0,
+
+    # --- BGM (assets/musics) ---
+    # 곡 목록은 파일 하단 MUSIC_ASSETS. 이벤트 MUSIC_PLAY / SCREEN 의 music 필드 = 그 키.
+    # 맵 기본 BGM: world_data[맵].field.music (같은 키). 이벤트 음악 persist=false 면 종료 시 이 곡으로 복귀.
+    "MUSIC_DIR": "assets/musics",  # BGM 폴더. 값의 file 이 상대경로가 아니면 여기에 붙인다.
+    # True면 MUSIC_ASSETS에 없는 파일도 파일명(확장자 제외)으로 재생. 등록 키가 우선.
+    "MUSIC_INCLUDE_UNREGISTERED": True,
+    # 맵 진입·맵 기본 BGM 복귀 시 페이드인(ms). MusicManager 가 볼륨 보간(SDL fade_ms 의존 X).
+    "MUSIC_MAP_FADE_IN_MS": 1800,
 }
 
 
@@ -870,8 +952,13 @@ CONFIG = {
 #   같은 name 복제 NPC(예: frog01×3): target 에 instance_id 사용
 #     world_data npcs[].instance_id 예) "frog01@64_416"
 #     → MOVE/PLACE/TUNE 등에서 그 개체만 지정
+#     world_data npcs[].talk — 그 개체만 다른 대사 (에디터: NPC 맵 인스턴스 → 상호작용(대화))
+#       비우면 char_defs 타입 talk. 있으면 build_npc_def 가 타입 talk 에 병합
+#       클릭 bindings 는 npcs[].interact (같은 모달의 상호작용(이벤트) 탭)
 #   FOLLOW_START follower: 여러 명 쉼표 가능 ("ally1,ally2,ally3")
-#     → 같은 leader 로 일괄 등록 + 슬롯 대형(겹침 완화)
+#     → 같은 leader 로 일괄 등록. 리더 발자국 트레일을 따라감 (평소 A* 없음)
+#     → 체인(A→B→C)이어도 리더가 움직이면 바로 따라감. dist 는 간격이고 출발 대기가 아님
+#     → speed 는 리더 event_speed_mul 대비 배율(1.0=리더와 같음). 리더가 0.5면 팔로워도 0.5
 #     → 이벤트 종료 후에도 FOLLOW_STOP 전까지 유지 (필드 동행)
 #   FOLLOW_STOP 로 해제 (비우면 전부)
 #   player 는 엔진이 엔티티로 특별 처리하므로 그대로 둔다.
@@ -896,7 +983,7 @@ SAY_BUBBLE_EDITOR_CHOICES = (
     "???",
     "^^",
     "ㅠㅠ",
-    "01",
+    "`^'",
     "02",
     "03",
     "04",
@@ -922,6 +1009,8 @@ SAY_BUBBLE_TOKEN_TO_SET = {
     "ㅜㅜ": "speechbubble05",
     "tt": "speechbubble05",
     "sad": "speechbubble05",
+    "angry": "speechbubble06",
+    "`^'": "speechbubble06",
 }
 
 
@@ -1224,8 +1313,10 @@ def resolve_story_who_label(who, save_data=None, config=None) -> str:
     - player → 세이브 주인공의 char_defs.name (예: 여름이)
     - ally1~5 / *_parent 별칭 → 실제 캐릭터 UI 이름
     - char_defs 키(summer_k, frog01 …) → 그 정의의 name (없으면 id)
+    - object_defs 키(flower1_ …) → 그 정의의 name (예: 쓰러져 있는 꽃)
     - 여러 명: "a,b,c" → 각각 풀어 ", " 로 연결
     - 이미 한글로 쓴 표시명·알 수 없는 토큰 → 원문 유지
+    SAY show_name:false 면 이 라벨을 대화창에 안 그림 (who 는 말풍선 대상으로 유지)
     """
     raw = str(who or "").strip()
     if not raw:
@@ -1276,6 +1367,19 @@ def resolve_story_who_label(who, save_data=None, config=None) -> str:
         if label:
             return label
 
+    # object_defs 키 → name (who: "flower1_" → "쓰러져 있는 꽃")
+    oassets = OBJ_ASSETS if isinstance(OBJ_ASSETS, dict) else {}
+    oid = raw if raw in oassets else None
+    if oid is None:
+        for k in oassets:
+            if str(k).lower() == key:
+                oid = k
+                break
+    if oid is not None:
+        label = str((oassets.get(oid) or {}).get("name") or "").strip()
+        if label:
+            return label
+
     return raw
 
 
@@ -1308,6 +1412,34 @@ def resolve_story_alias_ui_name(token, save_data=None, config=None) -> str:
     return str(get_char_ui_name(cid) or "")
 
 
+def expand_save_brace_vars(text, vars_dict=None) -> str:
+    """
+    남은 {key} 를 vars_dict(세이브·세션) 값으로 치환.
+    - 키가 있으면 str(값) (None → "")
+    - 없으면 중괄호 그대로 둠 (오타·미정의 구분)
+    OVERLAY_UI / SAY 공통: expand_story_text 가 캐릭터 별칭 치환 뒤 호출.
+    """
+    import re
+
+    raw = str(text or "")
+    if not raw or "{" not in raw:
+        return raw
+    src = vars_dict if isinstance(vars_dict, dict) else {}
+    if not src:
+        return raw
+
+    def _repl(m):
+        key = m.group(1)
+        if key not in src:
+            return m.group(0)
+        val = src.get(key)
+        if val is None:
+            return ""
+        return str(val)
+
+    return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", _repl, raw)
+
+
 def expand_story_text(text, save_data=None, config=None) -> str:
     """
     SAY 등 스토리 문구 템플릿.
@@ -1320,6 +1452,9 @@ def expand_story_text(text, save_data=None, config=None) -> str:
     따옴표 별칭: "ally5" "player" "ally1_parent" → 표시 이름
       예: "\"ally5\"가 위험에 쳐했어!!" → "록희가 위험에 쳐했어!!"
     단축 중괄호: {ally5} {player} {parent} → 표시 이름 ({ally5_name} 과 동일)
+
+    그 다음 세이브/세션 변수: {mainprogress} {progress_status} {progress_*} 등
+    (expand_save_brace_vars — 키가 있을 때만 치환)
     """
     import re
 
@@ -1387,29 +1522,27 @@ def expand_story_text(text, save_data=None, config=None) -> str:
             return name if name else m.group(0)
 
         out = re.sub(r'"([A-Za-z_][A-Za-z0-9_]*)"', _repl_quoted, out)
+    # 캐릭터 별칭 뒤: 세이브 진행 변수 {progress_status} 등
+    if "{" in out:
+        out = expand_save_brace_vars(out, sd)
     return out
 
 
 
-# 맵별 필드 기본값 (틸트·쉬어·화면 FX·물결 타일 ambient)
+# 맵별 필드 기본값 (틸트·쉬어·화면 FX·물결 타일 ambient·BGM)
 # - 저장: world_data.json → [맵ID].field
 #   예: "field": {
-#         "tilt_on": false, "shear_on": true,
-#         "screen_fx": {
-#           "cloud": {"dir":"RANDOM","speed":15,"freq":0.5},
-#           "rain": {"density":0.4,"speed":280,"angle":82},
-#           "vignette": {"strength":0.55,"size":0.42,"softness":0.65},
-#           "tone": {"preset":"warm","strength":0.35}
-#         },
-#         "wave_tiles": {
-#           "on": true, "fill_map": true, "fps": 8, "scale": 0.5,
-#           "fx_dir": "assets/images/fx/wave01", "phase_stagger": true
-#         }
-#         # 또는 부분: "rects": [[x,y,w,h], ...]
-#         # 또는 다각형(마스크 파일 없이 꼭짓점만): "polygons": [[[x,y],...], ...]
+#         "tilt_on": false, "shear_on": true, "reverse_tilt": false,
+#         "music": "cheongyo_04", "music_loop": true, "music_volume": 0.8,
+#         "screen_fx": { ... },
+#         "wave_tiles": { ... }
 #       }
-# - 맵 진입 시 field_runtime.apply_map_field_defaults
+# - music: MUSIC_ASSETS 키. 비우면 이 맵은 기본 BGM 없음.
+# - 맵 진입 시 field_runtime.apply_map_field_defaults (이벤트 중이면 BGM은 캐시만, 실제 재생은 이벤트 종료 시 persist=false)
+# - MUSIC_PLAY/STOP persist:true → 이벤트 끝나도 그 상태 유지. false/생략 → 맵 field.music 으로 복귀.
 # - tilt_on/shear_on 생략 → CONFIG (FIELD_PERSPECTIVE_DEFAULT_ON / TILT_SHEAR_ENABLED)
+# - reverse_tilt: True면 쉬어 방향 반전(맵 윗쪽→왼쪽). 기본 False(윗쪽→오른쪽). 세로 압축과 별개.
+#   이벤트 TILT 스텝의 reverse_tilt 가 있으면 그 값이 맵 기본보다 우선.
 # - screen_fx 의 kind 키가 있으면 ON (엔진 build_*_from_step 과 동일 파라미터). 없으면 해당 FX OFF.
 # - wave_tiles: 공유 프레임 + 뷰포트 컬링. polygons 는 configure 시 타일 마스크 bake.
 # - presence_zones[].field 는 존 체류 중 틸트/쉬어만 덮어쓰기. 맵 루트 field 는 진입 시 1회.
@@ -1426,14 +1559,16 @@ def get_map_field_raw(map_id: str, world_data=None) -> dict:
 
 
 def resolve_map_field_defaults(map_id: str, world_data=None) -> dict:
-    """맵 ID → {tilt_on: bool, shear_on: bool, screen_fx: dict, wave_tiles: dict|None}.
+    """맵 ID → {tilt_on, shear_on, reverse_tilt, screen_fx, wave_tiles, music, music_loop, music_volume}.
 
     screen_fx 는 kind→파라미터 dict (키가 있으면 해당 FX ON). 없으면 {}.
     wave_tiles 는 field.wave_tiles (없으면 None = OFF).
+    music: MUSIC_ASSETS 키 문자열. 없으면 "".
+    reverse_tilt: 쉬어 방향 반전(기본 False). 키 생략 시 False.
     """
     out: dict = {}
     field = get_map_field_raw(map_id, world_data)
-    for key in ("tilt_on", "shear_on"):
+    for key in ("tilt_on", "shear_on", "reverse_tilt"):
         val = field.get(key)
         if val is None or (isinstance(val, str) and not str(val).strip()):
             continue
@@ -1449,10 +1584,24 @@ def resolve_map_field_defaults(map_id: str, world_data=None) -> dict:
         out["tilt_on"] = bool(CONFIG.get("FIELD_PERSPECTIVE_DEFAULT_ON", False))
     if "shear_on" not in out:
         out["shear_on"] = bool(CONFIG.get("TILT_SHEAR_ENABLED", False))
+    # reverse_tilt 는 CONFIG 기본 없음 — 생략 시 정상 방향(위→오른쪽)
+    if "reverse_tilt" not in out:
+        out["reverse_tilt"] = False
     sfx = field.get("screen_fx")
     out["screen_fx"] = dict(sfx) if isinstance(sfx, dict) else {}
     wt = field.get("wave_tiles")
     out["wave_tiles"] = dict(wt) if isinstance(wt, dict) else None
+    out["music"] = str(field.get("music") or field.get("bgm") or "").strip()
+    loop_raw = field.get("music_loop", field.get("bgm_loop", True))
+    if isinstance(loop_raw, str):
+        out["music_loop"] = loop_raw.strip().lower() not in ("0", "false", "f", "no", "n", "off")
+    else:
+        out["music_loop"] = bool(loop_raw) if loop_raw is not None else True
+    vol = field.get("music_volume", field.get("bgm_volume"))
+    try:
+        out["music_volume"] = None if vol is None or str(vol).strip() == "" else float(vol)
+    except (TypeError, ValueError):
+        out["music_volume"] = None
     return out
 
 
@@ -1651,16 +1800,16 @@ RACING_DEFAULTS = {
     # 에셋이 없으면 삼각형 화살표를 코드로 자동 생성.
     # 애니 세트(선택): assets/images/ui/racing/<lane_btn_*_anim>/ 폴더 PNG 시퀀스
     #   또는 assets/images/ui/racing/<name>_0.png … 번호 시퀀스 (_load_numbered_ui_sequence).
-    # 카메라 옆: 캐릭터 뒤 ▲▼ / 카메라 뒤: 캐릭터 아래 ◀▶
-    "lane_btn_up_anim": "lane_up",
-    "lane_btn_down_anim": "lane_down",
+    # 카메라 뒤에서보기 고정: 캐릭터 아래 ◀▶ (A← / →C)
+    "lane_btn_up_anim": "lane_up",      # (레거시) 옆시점 ▲ — 런타임은 left 사용
+    "lane_btn_down_anim": "lane_down",  # (레거시) 옆시점 ▼ — 런타임은 right 사용
     "lane_btn_left_anim": "lane_left",
     "lane_btn_right_anim": "lane_right",
     "lane_btn_anim_fps": 8.0,
     "lane_btn_size_px_320": 40.0,
     "lane_btn_gap_px_320": 10.0,
     "lane_btn_char_gap_px_320": 8.0,  # 캐릭터와 버튼 사이 간격
-    "lane_btn_y_down_px_320": 40.0,   # 뒤/비스듬히 ◀▶ 를 캐릭터 기준 아래로
+    "lane_btn_y_down_px_320": 40.0,   # 뒤에서보기 ◀▶ 를 캐릭터 기준 아래로
     "lane_btn_alpha": 128,            # 반투명 (~50%)
     "lane_btn_margin_x_frac": 0.03,   # (레거시·폴백) 화면 왼쪽 여백
     "lane_btn_center_y_frac": 0.55,   # (레거시·폴백) 세로 중심
@@ -1668,6 +1817,7 @@ RACING_DEFAULTS = {
     "turn_rate_rad": 2.2,
     "path_pull": 2.2,
     "path_soft_follow": 0.5,
+    # (레거시) 옆/비스듬 시점용. 카메라는 뒤에서보기로 고정되어 런타임에서 읽지 않음.
     "cam_side_sign": -1.0,   # Mode7: heading + sign*π/2 = 진행 방향의 오른쪽에서 비춤
     "cam_oblique_rad": 0.4,  # 비스듬히: 뒤 추적 + 이 각만큼 yaw (≈45°)
     "cam_turn_rate_rad": 3.4,  # 카메라가 플레이어 heading을 따라 도는 각속도(스냅 방지)
@@ -1737,12 +1887,14 @@ RACING_DEFAULTS = {
     "roulette_lane_period_sec": 0.55,
     "summon_flash_sec": 1.6,
     # --- 레이스 탑승 애니 (몸=seat_idle + 뒤쪽 자벌레 underlay) ---
-    # 에셋: assets/images/character/racing/<inchworm_anim>_left/
+    # 에셋 prefix: assets/images/character/racing/<inchworm_anim>_<facing>/
+    #   facing front = 직진(기본), left = 왼쪽 차선 이동. 오른쪽 이동은 left 세트를 좌우 반전.
     # 가속·정속(crawl): 자벌레 fps ∝ r.speed (0→정지, max_speed→inchworm_fps_at_max)
     #   프레임 1~coast = 관성(속도 유지), 이후 프레임 = 가속(속도 추가). 자벌레 구부림→펼침.
     # 감속(slide): fps는 속도에 맞춰 느려지다 inchworm_slide_freeze_sec 후 프레임 고정(미끄러짐)
     # 다시 가속할 때까지 frozen 유지. 물리 속도는 그대로 감속.
-    "inchworm_anim": "moveinchworm_racing",  # load_racing_overlay_frames 애니 세트명
+    "inchworm_anim": "moveinchworm_racing",  # load_racing_overlay_frames 애니 세트명 (폴더 prefix)
+    "inchworm_lane_switch_eps": 0.08,        # |lane-lane_target| 이 값 초과면 옆보기(left/반전) 애니
     "inchworm_fps_at_max": 14.0,             # 최고속(max_speed)일 때 자벌레 프레임/초
     "inchworm_speed_eps": 1.0,               # 이 속도(px/s) 이하면 애니 완전 정지(fps=0)
     "inchworm_drive_band": 1.0,              # target_spd 대비 이 이내면 hold(가속/감속 판정 데드존)
@@ -1876,7 +2028,8 @@ RACING_ITEM_TYPES = {
 # 황소개구리 보스전 (activities/bullfrog) — 전역 기본값
 # 맵별 덮어쓰기: world_data.json → [맵ID].bullfrog
 # 진입: bg_jjangpu 이벤트존 → MAP bg_pond01 → start_bullfrog
-# 퇴장: result.quit + return_map → ev_bullfrog_exit → return_from_bullfrog
+# 퇴장: result.quit + return_map → ev_bullfrog_exit → MAP(착지) → return_from_bullfrog(정리)
+# start 의 return_map/pos 는 퇴장 이벤트 트리거·강제종료 복구용. 연출 착지는 exit 이벤트의 MAP.
 # ---------------------------------------------------------------------------
 BULLFROG_DEFAULTS = {
     # 기본 아레나 맵 ID (320×240 고정 화면)
@@ -2086,6 +2239,7 @@ BULLFROG_DEFAULTS = {
 # 타일: bullfrog 와 같이 origin + cols×rows 균일 그리드 (칸 개별 좌표 없음)
 # 표시: 활동 시작 전에도 같은 그리드로 연꽃잎을 그림. world_data.objects 에 따로 깔지 말 것
 # 퇴장: 끝 열에서 강가 쪽으로 한 칸 더 점프 → exit_pos_* 착지 후 필드 복귀
+#       착지 직후 ST_QUIT 동안에도 연꽃잎은 계속 그림 (idle 장식과 빈 프레임이 안 생기게)
 #       타일 위에서는 A·B 양쪽 모두 나갈 수 있음 (순간이동 없음)
 # ---------------------------------------------------------------------------
 LOTUS_CROSS_DEFAULTS = {
@@ -2165,6 +2319,8 @@ RACING_LANE_LETTERS = {
 
 # 낚시터 정의 — 물 영역·낚시대 위치(이벤트박스와 별도).
 # 이벤트박스는 world_data.json event_zones, 물가 좌표는 여기서 관리.
+# 시작: DEV_CMD start_fishing. 종료: 나가기 버튼 → cancel → ev_fishing_exit → return_from_fishing
+# (맵 전환 없음. 카메라 follow_player·fishing_exit 오버레이 제거. 야구의 return_from_baseball 대응)
 # (에디터: 존은 편집 가능, 물 rect는 추후 전용 레이어 추가 예정)
 FISHING_PONDS = {
     "jjangpu_water1": {
@@ -2250,7 +2406,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "dialog_name": {
@@ -2263,7 +2419,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "ui": {
@@ -2276,7 +2432,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "object_label": {
@@ -2289,7 +2445,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "hud_fishing": {
@@ -2302,7 +2458,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "hud_baseball": {
@@ -2315,7 +2471,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "hud_racing": {
@@ -2328,20 +2484,20 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "logo": {
         "label": "타이틀 / 로고",
-        "desc": "TITLE·홈런 연출 등 logo 폰트",
+        "desc": "TITLE·홈런 연출 등 logo 폰트. 노란 채움이면 테두리는 어두운색(흰 테두리는 배경과 묻힘)",
         "font_key": "logo",
         "size_320": 36,
-        "color": (0, 0, 0),
+        "color": (255, 255, 0),
         "outline_enabled": True,
-        "outline_px_320": 1,
-        "outline_color": (255, 255, 255),
+        "outline_px_320": 2,
+        "outline_color": (40, 20, 0),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
     "screen_caption": {
@@ -2354,7 +2510,7 @@ UI_FONT_PROFILE_DEFAULTS = {
         "outline_px_320": 1,
         "outline_color": (255, 255, 255),
         "force_color": True,
-        "antialias": True,
+        "antialias": False,
         "soft_px_320": 0,
     },
 }
@@ -2414,6 +2570,88 @@ CHAR_DERIVED_ANIM_SETS = {
         "align_feet": True,
     },
 }
+
+# ---------------------------------------------------------------------------
+# BGM 레지스트리 — 파일은 assets/musics/ (CONFIG MUSIC_DIR)
+# 키: 이벤트 MUSIC_PLAY / SCREEN / 맵 field.music 에 넣는 ID
+# 값:
+#   "파일명.mp3"
+#   또는 {"file": "파일명.mp3", "title": "에디터·로그용 표시명"}
+# file 이 assets/ 로 시작하거나 절대경로면 그대로 쓰고, 아니면 MUSIC_DIR 아래.
+# ---------------------------------------------------------------------------
+MUSIC_ASSETS = {
+    "demo_bgm": {"file": "demo_bgm.mp3", "title": "데모 BGM"},
+    "cheongyo_01": {"file": "김희동 청요 01 내 맘에도 별이 내려.mp3", "title": "내 맘에도 별이 내려"},
+    "cheongyo_01_mr": {"file": "김희동 청요 01 내 맘에도 별이 내려 MR.mp3", "title": "내 맘에도 별이 내려 MR"},
+    "cheongyo_02": {"file": "김희동 청요 02 별빛 아이.mp3", "title": "별빛 아이"},
+    "cheongyo_02_mr": {"file": "김희동 청요 02 별빛 아이 MR.mp3", "title": "별빛 아이 MR"},
+    "cheongyo_03": {"file": "김희동 청요 03 우리들의 날은 아름다워.mp3", "title": "우리들의 날은 아름다워"},
+    "cheongyo_04": {"file": "김희동 청요 04 이 더운 날에.mp3", "title": "이 더운 날에"},
+    "cheongyo_05": {"file": "김희동 청요 05 민들레.mp3", "title": "민들레"},
+    "cheongyo_06": {"file": "김희동 청요 06 나무 곁에 내 마음.mp3", "title": "나무 곁에 내 마음"},
+    "cheongyo_07": {"file": "김희동 청요 07 꽃들.mp3", "title": "꽃들"},
+    "cheongyo_08": {"file": "김희동 청요 08 달님에게.mp3", "title": "달님에게"},
+    "cheongyo_08_mr": {"file": "김희동 청요 08 달님에게 MR.mp3", "title": "달님에게 MR"},
+    "cheongyo_09": {"file": "김희동 청요 09 모든 것은 이어져.mp3", "title": "모든 것은 이어져"},
+    "cheongyo_10": {"file": "김희동 청요 10 지키지 않은 것은 지켜지지 않는다.mp3", "title": "지키지 않은 것은 지켜지지 않는다"},
+    "cheongyo_22": {"file": "김희동 청요 22 축복송.mp3", "title": "축복송"},
+}
+
+
+def music_dir():
+    """BGM 폴더 상대경로 (assets/musics)."""
+    try:
+        d = str(CONFIG.get("MUSIC_DIR") or "assets/musics").strip() or "assets/musics"
+    except Exception:
+        d = "assets/musics"
+    return d.replace("\\", "/")
+
+
+def iter_music_assets():
+    """
+    MUSIC_ASSETS → (id, filename, title).
+    값 형식: "file.mp3" 또는 {"file": "...", "title": "..."}.
+    """
+    items = MUSIC_ASSETS if isinstance(MUSIC_ASSETS, dict) else {}
+    for key, spec in items.items():
+        mid = str(key or "").strip()
+        if not mid:
+            continue
+        filename = ""
+        title = mid
+        if isinstance(spec, str):
+            filename = spec.strip()
+        elif isinstance(spec, dict):
+            filename = str(spec.get("file") or spec.get("path") or spec.get("name") or "").strip()
+            t = spec.get("title") or spec.get("label")
+            if t is not None and str(t).strip():
+                title = str(t).strip()
+        if not filename:
+            continue
+        yield mid, filename, title
+
+
+def music_file_relpath(filename):
+    """등록 file → 프로젝트 상대경로. 이미 assets/ 이거나 절대면 그대로."""
+    fn = str(filename or "").strip().replace("\\", "/")
+    if not fn:
+        return ""
+    if os.path.isabs(fn) or fn.startswith("assets/"):
+        return fn
+    base = music_dir().rstrip("/")
+    return f"{base}/{fn.lstrip('/')}"
+
+
+def music_track_ids():
+    """에디터 MUSIC_PLAY 드롭다운: MUSIC_ASSETS 등록 키만 (등록 순서)."""
+    ids = []
+    seen = set()
+    for mid, _, _ in iter_music_assets():
+        if mid not in seen:
+            ids.append(mid)
+            seen.add(mid)
+    return ids
+
 
 # path 규칙 (object_defs.json 주석용 요약):
 # - 단일: images/object/tree1.png

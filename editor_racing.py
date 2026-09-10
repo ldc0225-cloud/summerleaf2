@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pygame
 
+import editor_text as ed_txt
+
 from data import (
     RACING_DEFAULTS,
     RACING_ITEM_TYPES,
@@ -54,7 +56,16 @@ def new_state() -> dict:
         "_edit_field": None,
         "dirty": False,
         "hint": "맵 클릭으로 경로 점 추가",
+        "text_edit": ed_txt.EditSession(),
     }
+
+
+def _te(state) -> ed_txt.EditSession:
+    te = state.get("text_edit")
+    if not isinstance(te, ed_txt.EditSession):
+        te = ed_txt.EditSession()
+        state["text_edit"] = te
+    return te
 
 
 # --- world_data.racing -----------------------------------------------------
@@ -1645,7 +1656,9 @@ def draw_settings_modal(screen, font, state, sw, sh) -> dict:
         active = state.get("_edit_field") == key
         pygame.draw.rect(screen, (255, 215, 0) if active else (120, 140, 170), fr, 1)
         val = str(fields_data.get(key, ""))
-        screen.blit(font.render(val[:28], True, (240, 248, 255)), (fr.x + 4, fr.y + 4))
+        ed_txt.blit_field_value(
+            screen, font, val, fr, active=active, session=_te(state), color=(240, 248, 255), trunc_limit=28
+        )
     screen.set_clip(clip)
 
     for b, lab, col in (
@@ -1679,6 +1692,7 @@ def handle_settings_modal_click(state, mx, my, ui, flow, map_id) -> Optional[str
     for key, fr in (ui.get("fields") or {}).items():
         if fr.collidepoint(mx, my):
             state["_edit_field"] = key
+            _te(state).focus(str((state.get("settings_fields") or {}).get(key, "")))
             return None
     return None
 
@@ -1701,7 +1715,7 @@ def handle_textinput(state, text: str) -> bool:
     ef = state.get("_edit_field")
     if ef and state.get("show_settings"):
         fields = state.setdefault("settings_fields", {})
-        fields[ef] = str(fields.get(ef, "")) + t
+        fields[ef] = _te(state).insert(str(fields.get(ef, "")), t)
         return True
     return False
 
@@ -1723,12 +1737,14 @@ def handle_keydown(state, event, flow, map_id) -> bool:
     if state.get("show_settings") and state.get("_edit_field"):
         ef = state["_edit_field"]
         fields = state.setdefault("settings_fields", {})
-        if key == pygame.K_BACKSPACE:
-            fields[ef] = str(fields.get(ef, ""))[:-1]
-            return True
         if key == pygame.K_RETURN:
             state.pop("_edit_field", None)
             return True
+        nt, handled = _te(state).keydown(str(fields.get(ef, "")), event)
+        if handled:
+            fields[ef] = nt
+            return True
+        return True
     if key in (pygame.K_DELETE, pygame.K_BACKSPACE) and not state.get("show_settings"):
         if str(state.get("tool") or "") == "ITEMS":
             if delete_selected_item(state):

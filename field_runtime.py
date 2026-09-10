@@ -88,6 +88,7 @@ class FieldRuntimeUI:
         "show_camera_focus",
         "tilt_bg_demo",
         "tilt_target",
+        "tilt_reverse",
         "shear_debug_on",
         "shear_suppressed",
         "zoom_idx",
@@ -103,6 +104,8 @@ class FieldRuntimeUI:
         self.show_camera_focus = False
         self.tilt_bg_demo = False
         self.tilt_target = 1.0  # 틸트 데모 목표 (이벤트 TILT와 공유)
+        # 리버스 틸트(맵 field.reverse_tilt): True면 쉬어가 위→왼쪽(기본은 위→오른쪽)
+        self.tilt_reverse = False
         self.shear_debug_on = False
         # TILT_SHEAR_ENABLED=True일 때 핫키(R)로 필드 쉬어 끄기
         self.shear_suppressed = False
@@ -130,6 +133,56 @@ def _shear_strength_from_tilt(tilt_current):
     denom = max(1e-6, (1.0 - float(on_f)))
     strength = (1.0 - float(tilt_current)) / denom
     return 0.0 if strength < 0.0 else (1.0 if strength > 1.0 else strength)
+
+
+def shear_reverse_active(ev_mgr=None, ui=None):
+    """쉬어 방향이 리버스(위→왼쪽)인지.
+
+    기본(False): 맵 윗쪽이 오른쪽으로 밀림.
+    True: 반대 방향(윗쪽→왼쪽). 세로 압축(tilt factor) 자체는 동일.
+
+    우선순위:
+      1) 이벤트 tilt_control 에 reverse_tilt 키가 있으면 그 값
+      2) 맵 기본 ui.tilt_reverse (world_data field.reverse_tilt)
+    """
+    if ev_mgr is not None:
+        tc = getattr(ev_mgr, "tilt_control", None)
+        if isinstance(tc, dict) and "reverse_tilt" in tc:
+            return bool(tc.get("reverse_tilt"))
+    rt = ui if ui is not None else FIELD_RUNTIME_UI
+    return bool(getattr(rt, "tilt_reverse", False))
+
+
+def shear_screen_x_offset(rel, shear_eff, *, reverse=False, blit_origin_shifted=False):
+    """배경 쉬어와 같은 가로 오프셋(화면 px). 스프라이트 발·클릭 역변환 공용.
+
+    rel: 0=화면/필드 상단, 1=하단 (클램프).
+    reverse: field.reverse_tilt / shear_reverse_active.
+    blit_origin_shifted:
+      True  — blit_x = bg_blit_dx - shear (뷰포트 확장 경로). 리버스는 -(1-rel)*S.
+      False — blit_x = bg_blit_dx (CONFIG BG_VIEWPORT_BLIT_ENABLED=False 기본).
+              정상 plan: top=+S → +(1-rel)*S.
+              리버스 plan: top=0, bottom=+S → +rel*S  (단순 부호 반전이 아님).
+    """
+    try:
+        s = float(shear_eff)
+    except Exception:
+        return 0.0
+    if s <= 1e-9:
+        return 0.0
+    try:
+        r = float(rel)
+    except Exception:
+        r = 0.0
+    if r < 0.0:
+        r = 0.0
+    elif r > 1.0:
+        r = 1.0
+    if not reverse:
+        return (1.0 - r) * s
+    if blit_origin_shifted:
+        return -(1.0 - r) * s
+    return r * s
 
 
 def tilt_shear_effective(ev_mgr, tilt_current, shear_debug=False):
@@ -256,9 +309,9 @@ def parse_duration_sec(step, *, default_sec=1.0):
     return max(0.0, float(default_sec))
 
 
-# 연속 배치 시 한 프레임에 같이 시작 (ZOOM·TILT·SHEAR·CAMERA)
+# 연속 배치 시 한 프레임에 같이 시작 (ZOOM·TILT·SHEAR·CAMERA·ANIM_ONCE wait:false)
 PARALLEL_EFFECT_STEP_TYPES = frozenset(
-    {"ZOOM", "TILT", "SHEAR", "CAMERA", "3D_ROTATE", "CONDITION", "CONDITION_SKIP"}
+    {"ZOOM", "TILT", "SHEAR", "CAMERA", "3D_ROTATE", "CONDITION", "CONDITION_SKIP", "ANIM_ONCE"}
 )
 
 
@@ -494,6 +547,7 @@ def apply_map_field_defaults(map_id, ui, ev_mgr=None, world_data=None, wave_ambi
 
     world_data: flow.world_data.
     - tilt_on / shear_on: 생략 시 CONFIG 전역 기본값.
+    - reverse_tilt: True면 쉬어 위→왼쪽(기본 False=위→오른쪽). ui.tilt_reverse 에 반영.
     - screen_fx: cloud|rain|vignette|tone — 맵 ambient (이벤트 SCREEN_FX 와 동일 빌더).
     - wave_tiles: 공유 프레임 물결 타일 ambient (wave_ambient 인스턴스에 전달).
     스키마: data.resolve_map_field_defaults / data.py 주석.
@@ -503,6 +557,8 @@ def apply_map_field_defaults(map_id, ui, ev_mgr=None, world_data=None, wave_ambi
     cfg = resolve_map_field_defaults(map_id, world_data=world_data)
     tilt_on = bool(cfg.get("tilt_on", False))
     shear_on = bool(cfg.get("shear_on", False))
+    # reverse_tilt: 쉬어 방향만 반전(세로 압축 on/off 와 독립)
+    ui.tilt_reverse = bool(cfg.get("reverse_tilt", False))
 
     ui.tilt_bg_demo = False
     if tilt_on:
@@ -547,7 +603,81 @@ def apply_map_field_defaults(map_id, ui, ev_mgr=None, world_data=None, wave_ambi
                 wave_ambient.configure(None)
             except Exception:
                 pass
+    apply_map_default_music(
+        map_id,
+        getattr(ev_mgr, "music", None) if ev_mgr is not None else None,
+        world_data,
+        ev_mgr=ev_mgr,
+        cfg=cfg,
+    )
     return float(ui.tilt_target)
+
+
+def _map_music_fade_in_ms(default=1800):
+    """CONFIG MUSIC_MAP_FADE_IN_MS — 맵 기본 BGM 페이드인(ms)."""
+    try:
+        from data import CONFIG
+
+        return max(0, int(CONFIG.get("MUSIC_MAP_FADE_IN_MS", default) or default))
+    except Exception:
+        return int(default)
+
+
+def apply_map_default_music(map_id, music_mgr, world_data=None, *, ev_mgr=None, cfg=None, force=False, fade_in_ms=None):
+    """맵 field.music 을 기본 BGM으로 재생.
+
+    이벤트 진행 중(force=False)이면 재생은 미루고 키만 기억한다.
+    이벤트 MUSIC_* persist=false 종료 시 restore_map_default_music → force 재생.
+    같은 곡이 이미 나오면 처음부터 다시 감기지 않음.
+    fade_in_ms=None 이면 CONFIG MUSIC_MAP_FADE_IN_MS (소프트웨어 볼륨 페이드).
+    """
+    if fade_in_ms is None:
+        fade_in_ms = _map_music_fade_in_ms()
+    if cfg is None:
+        from data import resolve_map_field_defaults
+
+        cfg = resolve_map_field_defaults(map_id, world_data=world_data)
+    name = str((cfg or {}).get("music") or "").strip()
+    loop = True if (cfg or {}).get("music_loop", True) else False
+    vol = (cfg or {}).get("music_volume")
+    if ev_mgr is not None:
+        ev_mgr._map_default_music = name
+        ev_mgr._map_default_music_loop = loop
+        ev_mgr._map_default_music_volume = vol
+    if music_mgr is None:
+        return
+    if (not force) and ev_mgr is not None and getattr(ev_mgr, "active_event", None):
+        return
+    if not name:
+        if force:
+            try:
+                music_mgr.stop(fade_out_ms=int(max(0, fade_in_ms)))
+            except Exception:
+                pass
+        return
+    try:
+        music_mgr.play_if_changed(name, fade_in_ms=int(max(0, fade_in_ms)), loop=loop, volume=vol)
+    except Exception:
+        pass
+
+
+def restore_map_default_music(ev_mgr, map_id=None, world_data=None, *, fade_in_ms=None):
+    """이벤트 종료 후 맵 기본 BGM으로 되돌림 (persist=false 인 MUSIC_* 가 있었을 때)."""
+    if ev_mgr is None:
+        return
+    mid = str(map_id or getattr(ev_mgr, "_runtime_map_id", "") or "").strip()
+    wd = world_data
+    if wd is None:
+        fl = getattr(ev_mgr, "flow", None)
+        wd = getattr(fl, "world_data", None) if fl is not None else None
+    apply_map_default_music(
+        mid,
+        getattr(ev_mgr, "music", None),
+        wd,
+        ev_mgr=ev_mgr,
+        force=True,
+        fade_in_ms=_map_music_fade_in_ms() if fade_in_ms is None else fade_in_ms,
+    )
 
 
 def tilt_factor_from_strength(strength_01, on=True):
@@ -571,6 +701,13 @@ def tilt_strength_from_factor(factor):
 
 
 def parse_tilt_step(step):
+    """TILT 스텝 파싱.
+
+    reverse_tilt / reverse:
+      - 키 없음 → None (맵 field.reverse_tilt / ui.tilt_reverse 유지)
+      - true → 쉬어 위→왼쪽
+      - false → 이 이벤트 동안 강제 정상 방향(위→오른쪽)
+    """
     on = parse_step_bool(step.get("on"), True)
     strength = step.get("strength")
     if strength is None or str(strength).strip() == "":
@@ -589,12 +726,19 @@ def parse_tilt_step(step):
     strength = parse_strength_01(strength, 1.0 if on else 0.0)
     target = tilt_factor_from_strength(strength, on=on)
     dur = parse_duration_sec(step, default_sec=float(CONFIG.get("TILT_DEFAULT_DURATION_SEC", 1.0) or 1.0))
+    # reverse_tilt: 생략 시 맵 기본 따름. 명시 시에만 tilt_control 에 기록.
+    rev_raw = step.get("reverse_tilt", step.get("reverse"))
+    if rev_raw is None or (isinstance(rev_raw, str) and not str(rev_raw).strip()):
+        reverse_tilt = None
+    else:
+        reverse_tilt = bool(parse_step_bool(rev_raw, False))
     return {
         "on": bool(on),
         "strength": float(strength),
         "target": float(target),
         "duration_sec": float(dur),
         "instant": float(dur) <= 0.0,
+        "reverse_tilt": reverse_tilt,
     }
 
 
@@ -798,6 +942,8 @@ _RESULT_STEP_META_KEYS = frozenset(
         "options",
         "extra",
         "patch",
+        "session",
+        "persist",
     }
 )
 
@@ -809,7 +955,8 @@ def parse_result_step(step):
       { "type":"RESULT", "mainprogress":"ev_xxx" }
       { "type":"RESULT", "key":"progress_flower1_1", "val":1004 }
       { "type":"RESULT", "add_laugh_point":5, "progress_flower1_1":1004 }
-      { "type":"RESULT", "opt":"{\\"progress_x\\": 1002}" }  # JSON 추가키
+      { "type":"RESULT", "progress_flower1_1":1002, "session": true }
+      # session:true → 세이브 안 함. 재시작하면 사라짐 (휘발 마커·미완료 점유).
 
     헤더 result 는 이벤트 종료 시 그대로 적용. 이 스텝은 중간에 같은 갱신을 수행.
     """
@@ -861,13 +1008,33 @@ def parse_result_step(step):
     return out
 
 
+def result_step_is_session(step) -> bool:
+    """
+    RESULT session:true — 세이브에 쓰지 않고 이번 실행(session_progress)에만 반영.
+    here01 같은 휘발 마커 + 이벤트박스 점유 플래그처럼, 다음 이벤트가 끝나기 전에
+    게임을 끄면 진행이 되돌아가게 할 때 사용.
+    """
+    if not isinstance(step, dict):
+        return False
+    raw = step.get("session")
+    if raw is True or raw == 1:
+        return True
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
 def _canonical_tilt_json(parsed):
-    return {
+    j = {
         "type": "TILT",
         "on": bool(parsed["on"]),
         "strength": round(float(parsed["strength"]), 4),
         "duration_sec": round(float(parsed["duration_sec"]), 4),
     }
+    # reverse_tilt 는 명시했을 때만 저장(생략=맵 기본 방향)
+    if parsed.get("reverse_tilt") is not None:
+        j["reverse_tilt"] = bool(parsed["reverse_tilt"])
+    return j
 
 
 def _canonical_shear_json(parsed):
@@ -917,6 +1084,11 @@ def fill_editor_fields_from_step(step_fields, step, step_type):
         step_fields["tilt_on"] = "true" if p["on"] else "false"
         step_fields["tilt_strength"] = str(round(p["strength"], 4))
         step_fields["tilt_duration_sec"] = str(round(p["duration_sec"], 4))
+        # 빈 문자열 = 맵 기본 방향 유지
+        if p.get("reverse_tilt") is None:
+            step_fields["tilt_reverse"] = ""
+        else:
+            step_fields["tilt_reverse"] = "true" if p["reverse_tilt"] else "false"
     elif t == "SHEAR":
         p = parse_shear_step(step)
         step_fields["shear_on"] = "true" if p["on"] else "false"
@@ -986,6 +1158,10 @@ def build_step_from_editor_fields(step_fields, step_type):
             "strength": step_fields.get("tilt_strength"),
             "duration_sec": step_fields.get("tilt_duration_sec"),
         }
+        # tilt_reverse 비우면 reverse_tilt 키 자체를 안 넣어 맵 기본 유지
+        rev = step_fields.get("tilt_reverse")
+        if rev is not None and str(rev).strip() != "":
+            stub["reverse_tilt"] = rev
         return _canonical_tilt_json(parse_tilt_step(stub))
     if t == "SHEAR":
         stub = {
@@ -1569,9 +1745,525 @@ def hide_game_exit_confirm(ev_mgr) -> None:
 
 
 # =============================================================================
+# 게임 설정(option) 버튼 (OVERLAY_UI) — GAME_EXIT_BUTTON 과 동일 파이프라인
+# 이벤트 스텝 GAME_OPTIONS_BUTTON 으로 표시. 클릭 시 설정창:
+#   음악 끄고켜기 / 새로 시작하기(확인) / 끝내기(확인)
+# =============================================================================
+
+GAME_OPTIONS_BTN_ID = "game_options_btn"
+GAME_OPTIONS_MENU_IDS = (
+    "game_options_menu_title",
+    "game_options_menu_music",
+    "game_options_menu_restart",
+    "game_options_menu_quit",
+    "game_options_menu_close",
+)
+GAME_OPTIONS_CONFIRM_IDS = (
+    "game_options_confirm_msg",
+    "game_options_confirm_yes",
+    "game_options_confirm_no",
+)
+# "restart" | "quit" | None — 확인창 예/아니오 분기
+_OPTIONS_CONFIRM_MODE = None
+
+
+def game_options_menu_open(ev_mgr) -> bool:
+    """설정 메뉴(제목 오버레이)가 떠 있는지."""
+    try:
+        for ov in list(getattr(ev_mgr, "_ui_overlays", None) or []):
+            if ov.get("id") == GAME_OPTIONS_MENU_IDS[0] and ov.get("phase") != "done":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def game_options_confirm_open(ev_mgr) -> bool:
+    """설정창의 새로시작/끝내기 확인이 떠 있는지."""
+    try:
+        for ov in list(getattr(ev_mgr, "_ui_overlays", None) or []):
+            if ov.get("id") == GAME_OPTIONS_CONFIRM_IDS[0] and ov.get("phase") != "done":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def field_overlay_modal_open(ev_mgr) -> bool:
+    """필드 입력을 막는 모달(종료 확인·설정 메뉴·설정 확인)."""
+    return bool(
+        game_exit_confirm_open(ev_mgr)
+        or game_options_menu_open(ev_mgr)
+        or game_options_confirm_open(ev_mgr)
+    )
+
+
+def _options_music_button_label(ev_mgr) -> str:
+    """뮤트면 '음악 켜기', 아니면 '음악 끄기'."""
+    music = getattr(ev_mgr, "music", None)
+    muted = False
+    try:
+        if music is not None and callable(getattr(music, "is_user_muted", None)):
+            muted = bool(music.is_user_muted())
+    except Exception:
+        muted = False
+    return "음악 켜기" if muted else "음악 끄기"
+
+
+def install_game_options_button(ev_mgr) -> None:
+    """오른쪽 위 exit/debug 아래 'option' 버튼. game_options_button_visible 일 때만."""
+    if not _game_exit_overlay_enabled():
+        return
+    if not bool(getattr(ev_mgr, "game_options_button_visible", False)):
+        return
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="option",
+            font="default",
+            size=10,
+            pad_x=6,
+            pad_y=3,
+            color="230,225,210",
+            bg_color="42,48,42",
+            overlay_id=GAME_OPTIONS_BTN_ID,
+            anchor="top_right",
+            margin_x=5,
+            margin_y=5,
+            clickable=True,
+            click_action="game_options_open",
+        ),
+    )
+
+
+def hide_game_options_button(ev_mgr) -> None:
+    """option 버튼·설정 메뉴·확인창 모두 제거."""
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if callable(rm):
+        try:
+            rm(GAME_OPTIONS_BTN_ID)
+        except Exception:
+            pass
+    hide_game_options_menu(ev_mgr)
+    hide_game_options_confirm(ev_mgr)
+
+
+def set_game_options_button_visible(
+    ev_mgr, visible: bool, *, persist: bool | None = None
+) -> None:
+    """이벤트 스텝 GAME_OPTIONS_BUTTON — option 버튼 표시."""
+    try:
+        ev_mgr.game_options_button_visible = bool(visible)
+    except Exception:
+        pass
+    if persist is not None:
+        try:
+            ev_mgr._game_options_button_persist = bool(persist)
+        except Exception:
+            pass
+    if bool(visible):
+        install_game_options_button(ev_mgr)
+    else:
+        hide_game_options_button(ev_mgr)
+
+
+def show_game_options_menu(ev_mgr) -> None:
+    """설정 메뉴: 음악 끄고켜기 / 새로 시작하기 / 끝내기 / 닫기."""
+    if not _game_exit_overlay_enabled():
+        return
+    hide_game_exit_confirm(ev_mgr)
+    hide_game_options_confirm(ev_mgr)
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="text",
+            text="설정",
+            font="default",
+            size=14,
+            color="245,245,250",
+            overlay_id=GAME_OPTIONS_MENU_IDS[0],
+            anchor="center",
+            margin_y=-78,
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text=_options_music_button_label(ev_mgr),
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="48,72,88",
+            pad_x=14,
+            pad_y=6,
+            overlay_id=GAME_OPTIONS_MENU_IDS[1],
+            anchor="center",
+            margin_y=-36,
+            clickable=True,
+            click_action="game_options_music",
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="새로 시작하기",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="72,68,48",
+            pad_x=14,
+            pad_y=6,
+            overlay_id=GAME_OPTIONS_MENU_IDS[2],
+            anchor="center",
+            margin_y=4,
+            clickable=True,
+            click_action="game_options_restart",
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="끝내기",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="90,58,58",
+            pad_x=14,
+            pad_y=6,
+            overlay_id=GAME_OPTIONS_MENU_IDS[3],
+            anchor="center",
+            margin_y=44,
+            clickable=True,
+            click_action="game_options_quit",
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="닫기",
+            font="default",
+            size=11,
+            color="230,230,235",
+            bg_color="54,54,60",
+            pad_x=12,
+            pad_y=5,
+            overlay_id=GAME_OPTIONS_MENU_IDS[4],
+            anchor="center",
+            margin_y=84,
+            clickable=True,
+            click_action="game_options_close",
+        ),
+    )
+
+
+def hide_game_options_menu(ev_mgr) -> None:
+    """설정 메뉴 오버레이 제거 (option 버튼은 유지)."""
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if not callable(rm):
+        return
+    for oid in GAME_OPTIONS_MENU_IDS:
+        try:
+            rm(oid)
+        except Exception:
+            pass
+
+
+def show_game_options_confirm(ev_mgr, mode: str) -> None:
+    """새로시작/끝내기 확인. mode: 'restart' | 'quit'."""
+    global _OPTIONS_CONFIRM_MODE
+    if not _game_exit_overlay_enabled():
+        return
+    mode_s = str(mode or "").strip().lower()
+    if mode_s not in ("restart", "quit"):
+        return
+    _OPTIONS_CONFIRM_MODE = mode_s
+    hide_game_options_menu(ev_mgr)
+    hide_game_exit_confirm(ev_mgr)
+    msg = "게임을 새로 시작할까요?" if mode_s == "restart" else "게임을 끝낼까요?"
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="text",
+            text=msg,
+            font="default",
+            size=13,
+            color="245,245,250",
+            overlay_id=GAME_OPTIONS_CONFIRM_IDS[0],
+            anchor="center",
+            margin_y=-22,
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="응",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="52,110,72",
+            overlay_id=GAME_OPTIONS_CONFIRM_IDS[1],
+            anchor="center",
+            margin_x=-36,
+            margin_y=18,
+            clickable=True,
+            click_action="game_options_confirm_yes",
+        ),
+    )
+    _apply_overlay_ui_step_dict(
+        ev_mgr,
+        _persist_overlay_ui_step(
+            content="button",
+            text="아니",
+            font="default",
+            size=12,
+            color="255,255,255",
+            bg_color="90,58,58",
+            overlay_id=GAME_OPTIONS_CONFIRM_IDS[2],
+            anchor="center",
+            margin_x=36,
+            margin_y=18,
+            clickable=True,
+            click_action="game_options_confirm_no",
+        ),
+    )
+
+
+def hide_game_options_confirm(ev_mgr) -> None:
+    """설정 확인 오버레이 제거."""
+    global _OPTIONS_CONFIRM_MODE
+    _OPTIONS_CONFIRM_MODE = None
+    rm = getattr(ev_mgr, "remove_ui_overlay", None)
+    if not callable(rm):
+        return
+    for oid in GAME_OPTIONS_CONFIRM_IDS:
+        try:
+            rm(oid)
+        except Exception:
+            pass
+
+
+# =============================================================================
+# 게임 모달 공통 스크롤바 (에디터 모달과 동일 기하)
+# - 디버그 패널·이벤트 피커에서 공유. editor.py 를 import 하지 않음(순환 참조 방지)
+# - 마우스/터치: 휠, 스크롤바 썸·트랙, 리스트 드래그. 탭 vs 드래그는 DRAG_SLOP 로 구분
+# =============================================================================
+
+
+def _game_modal_sb_w() -> int:
+    """세로 스크롤바 폭(논리 px)."""
+    try:
+        return max(8, min(24, int(CONFIG.get("GAME_MODAL_SB_W", 12) or 12)))
+    except Exception:
+        return 12
+
+
+def _game_modal_wheel_step() -> int:
+    """마우스 휠 한 칸 → 스크롤 픽셀."""
+    try:
+        return max(8, int(CONFIG.get("GAME_MODAL_WHEEL_STEP", 28) or 28))
+    except Exception:
+        return 28
+
+
+def _game_modal_drag_slop() -> int:
+    """리스트 탭 vs 드래그 스크롤 구분(논리 px)."""
+    try:
+        return max(2, int(CONFIG.get("GAME_MODAL_DRAG_SLOP", 6) or 6))
+    except Exception:
+        return 6
+
+
+def _game_modal_scrollbar_layout(sb_rect, viewport_h, content_h, scroll_px):
+    """세로 스크롤바 트랙/썸 — editor._step_overlay_scrollbar_layout 과 동일."""
+    vh = max(1, int(viewport_h))
+    ch = max(int(content_h), 1)
+    max_scroll = max(0, ch - vh)
+    sp = int(max(0, min(max_scroll, int(scroll_px or 0))))
+    track = thumb = None
+    thumb_h = None
+    if max_scroll > 0 and sb_rect is not None and sb_rect.height > 2:
+        track = pygame.Rect(sb_rect.x + 1, sb_rect.y + 1, sb_rect.width - 2, sb_rect.height - 2)
+        thumb_h = max(14, int(track.height * (vh / float(ch))))
+        span = max(0, track.height - thumb_h)
+        thumb_y = track.y + int(round(span * (sp / float(max_scroll))))
+        thumb = pygame.Rect(track.x + 1, thumb_y, track.width - 2, thumb_h)
+    return {
+        "max_scroll": max_scroll,
+        "scroll_px": sp,
+        "track": track,
+        "thumb": thumb,
+        "thumb_h": thumb_h,
+    }
+
+
+def _game_modal_scroll_px_from_sb_my(my, sb_ui):
+    """스크롤바 트랙 Y → scroll 픽셀(0..max)."""
+    tr = (sb_ui or {}).get("track")
+    th = int((sb_ui or {}).get("thumb_h") or 14)
+    max_sc = int((sb_ui or {}).get("max_scroll") or 0)
+    if tr is None or max_sc <= 0:
+        return None
+    y = int(my) - (th // 2)
+    y = max(tr.y, min(tr.bottom - th, y))
+    span = max(0, tr.height - th)
+    p = 0.0 if span <= 0 else (y - tr.y) / float(span)
+    return int(round(p * max_sc))
+
+
+def _game_modal_sb_hit(pos, sb_ui):
+    """스크롤바 클릭 — 'thumb' | 'track' | None."""
+    max_sc = int((sb_ui or {}).get("max_scroll") or 0)
+    if max_sc <= 0:
+        return None
+    th = (sb_ui or {}).get("thumb")
+    tr = (sb_ui or {}).get("track")
+    if th is not None and th.collidepoint(pos):
+        return "thumb"
+    if tr is not None and tr.collidepoint(pos):
+        return "track"
+    return None
+
+
+def _draw_game_modal_scrollbar(surf, sb_ui):
+    """트랙 + 썸. 스크롤 불필요하면 그리지 않음."""
+    if not sb_ui or int(sb_ui.get("max_scroll") or 0) <= 0:
+        return
+    tr = sb_ui.get("track")
+    thm = sb_ui.get("thumb")
+    if tr is not None:
+        pygame.draw.rect(surf, (18, 18, 24), tr)
+    if thm is not None:
+        pygame.draw.rect(surf, (110, 120, 150), thm, border_radius=3)
+        pygame.draw.rect(surf, (140, 150, 180), thm, 1, border_radius=3)
+
+
+def _game_modal_split_list_and_sb(list_outer, content_h):
+    """list_outer 안에서 본문/스크롤바 rect 분할. 내용이 짧으면 스크롤바 없음."""
+    vh = max(1, int(list_outer.height))
+    ch = max(1, int(content_h))
+    sb_w = _game_modal_sb_w()
+    gap = 4
+    need_sb = ch > vh
+    if need_sb:
+        body = pygame.Rect(
+            list_outer.x, list_outer.y, max(40, list_outer.width - sb_w - gap), vh
+        )
+        sb = pygame.Rect(list_outer.right - sb_w, list_outer.y, sb_w, vh)
+    else:
+        body = pygame.Rect(list_outer)
+        sb = None
+    max_scroll = max(0, ch - vh)
+    return body, sb, max_scroll
+
+
+def _game_modal_pointer_xy(event, logical_xy):
+    """논리 좌표 우선, 없으면 event.pos."""
+    if logical_xy is not None and len(logical_xy) >= 2:
+        return int(logical_xy[0]), int(logical_xy[1])
+    pos = getattr(event, "pos", None)
+    if pos is not None:
+        try:
+            return int(pos[0]), int(pos[1])
+        except Exception:
+            pass
+    return None, None
+
+
+def _game_modal_wheel_delta(event):
+    """휠/버튼4·5 → scroll_px 증감(위로 스크롤이면 음수). editor._editor_any_wheel_delta 와 동일."""
+    st = _game_modal_wheel_step()
+    if event.type == pygame.MOUSEWHEEL:
+        dy = getattr(event, "precise_y", None)
+        if dy is not None:
+            delta = int(round(-float(dy) * st))
+        else:
+            delta = -int(getattr(event, "y", 0) or 0) * st
+        if delta == 0 and getattr(event, "y", 0):
+            delta = -int(event.y) * st
+        return delta
+    if event.type == pygame.MOUSEBUTTONDOWN and int(getattr(event, "button", 0) or 0) in (4, 5):
+        return -st if int(event.button) == 4 else st
+    return 0
+
+
+def _game_modal_clamp_scroll(state, max_scroll):
+    sp = int(state.get("scroll_px") or 0)
+    state["scroll_px"] = max(0, min(int(max_scroll or 0), sp))
+    return int(state["scroll_px"])
+
+
+def _game_modal_clear_drag(state):
+    """탭/드래그 제스처 상태 초기화."""
+    state["sb_drag"] = False
+    state["body_drag"] = False
+    state["drag_moved"] = False
+    state["press_token"] = None
+    state["drag_start_y"] = 0
+    state["drag_start_scroll"] = 0
+
+
+def _game_modal_begin_body_drag(state, my, row_token):
+    """리스트 본문에서 포인터 다운 — 탭 후보 + 드래그 스크롤 시작."""
+    state["body_drag"] = True
+    state["sb_drag"] = False
+    state["drag_start_y"] = int(my)
+    state["drag_start_scroll"] = int(state.get("scroll_px") or 0)
+    state["drag_moved"] = False
+    state["press_token"] = row_token
+
+
+def _game_modal_begin_sb_drag(state):
+    """스크롤바 썸/트랙 드래그 시작(탭이 아님)."""
+    state["sb_drag"] = True
+    state["body_drag"] = False
+    state["press_token"] = None
+    state["drag_moved"] = True
+
+
+def _game_modal_on_motion(state, my, sb_ui) -> bool:
+    """스크롤바·리스트 드래그 중이면 scroll_px 갱신. True면 소비."""
+    if state.get("sb_drag"):
+        sp = _game_modal_scroll_px_from_sb_my(my, sb_ui)
+        if sp is not None:
+            state["scroll_px"] = sp
+        return True
+    if state.get("body_drag"):
+        dy = int(my) - int(state.get("drag_start_y") or 0)
+        if abs(dy) >= _game_modal_drag_slop():
+            state["drag_moved"] = True
+        if state.get("drag_moved"):
+            state["scroll_px"] = int(state.get("drag_start_scroll") or 0) - dy
+        return True
+    return False
+
+
+def _game_modal_end_pointer(state):
+    """포인터 업. (was_tap, press_token) — 탭이면 행 실행용 토큰."""
+    was_tap = bool(state.get("body_drag")) and not bool(state.get("drag_moved"))
+    token = state.get("press_token") if was_tap else None
+    _game_modal_clear_drag(state)
+    return was_tap, token
+
+
+def _game_modal_row_at_y(row_hit, mx, my):
+    """draw 가 채운 (rect, token) 목록에서 포인터 아래 토큰."""
+    for rr, token in list(row_hit or []):
+        if rr is not None and rr.collidepoint(mx, my):
+            return token
+    return None
+
+
+# =============================================================================
 # 디버그 버튼 + 설정 패널 (안드로이드 터치용 — 키보드 핫키 대체)
 # - GAME_EXIT_BUTTON 과 함께 오른쪽 위에 "debug" 버튼
 # - 누르면 주요 DEV_CMD / 이벤트 피커 on·off 패널
+# - 조작: 탭=토글, 휠/드래그/스크롤바=스크롤, 바깥·×=닫기
 # =============================================================================
 
 GAME_DEBUG_BTN_ID = "game_debug_btn"
@@ -1581,7 +2273,18 @@ _DEBUG_PANEL = {
     "row_hit": [],
     "panel_rect": None,
     "close_rect": None,
+    "list_rect": None,
+    "body_rect": None,
+    "sb_ui": None,
+    "max_scroll": 0,
+    "scroll_px": 0,
     "confirm_restart": False,
+    "sb_drag": False,
+    "body_drag": False,
+    "drag_moved": False,
+    "press_token": None,
+    "drag_start_y": 0,
+    "drag_start_scroll": 0,
 }
 
 
@@ -1651,11 +2354,18 @@ def debug_panel_close() -> None:
     _DEBUG_PANEL["row_hit"] = []
     _DEBUG_PANEL["panel_rect"] = None
     _DEBUG_PANEL["close_rect"] = None
+    _DEBUG_PANEL["list_rect"] = None
+    _DEBUG_PANEL["body_rect"] = None
+    _DEBUG_PANEL["sb_ui"] = None
+    _DEBUG_PANEL["max_scroll"] = 0
     _DEBUG_PANEL["confirm_restart"] = False
+    _game_modal_clear_drag(_DEBUG_PANEL)
 
 
 def debug_panel_open() -> None:
     _DEBUG_PANEL["confirm_restart"] = False
+    _DEBUG_PANEL["scroll_px"] = 0
+    _game_modal_clear_drag(_DEBUG_PANEL)
     _DEBUG_PANEL["open"] = True
 
 
@@ -1686,8 +2396,8 @@ def install_game_debug_button(ev_mgr) -> None:
             bg_color="36,48,64",
             overlay_id=GAME_DEBUG_BTN_ID,
             anchor="top_right",
-            margin_x=6,
-            margin_y=28,
+            margin_x=55,
+            margin_y=5,
             clickable=True,
             click_action="game_debug_open",
         ),
@@ -1722,31 +2432,92 @@ def set_game_debug_button_visible(ev_mgr, visible: bool, *, persist: bool | None
 
 
 def _debug_panel_layout(surf_w, surf_h):
+    """헤더+리스트+힌트. 화면이 작으면 리스트를 잘라 스크롤."""
     rows = _debug_panel_rows()
-    row_h = 20
+    row_h = 22
     pad = 8
-    title_h = 22
-    n = len(rows) + (1 if _DEBUG_PANEL.get("confirm_restart") else 0)
+    title_h = 24
+    hint_h = 16
+    extra = 1 if _DEBUG_PANEL.get("confirm_restart") else 0
+    n = len(rows) + extra
+    content_h = max(row_h, n * row_h)
     panel_w = min(int(surf_w * 0.9), max(200, int(surf_w) - 16))
-    list_h = max(row_h, n * row_h)
-    panel_h = title_h + pad + list_h + pad + 14
-    panel_h = min(panel_h, int(surf_h) - 12)
+    max_panel_h = max(title_h + hint_h + row_h + pad, int(surf_h) - 12)
+    max_list_h = max(row_h, max_panel_h - title_h - pad - hint_h)
+    list_h = min(content_h, max_list_h)
+    panel_h = title_h + pad + list_h + hint_h
     px = max(4, (int(surf_w) - panel_w) // 2)
     py = max(4, (int(surf_h) - panel_h) // 2)
     panel = pygame.Rect(px, py, panel_w, panel_h)
-    close_r = pygame.Rect(panel.right - 22, panel.top + 4, 18, 14)
-    list_r = pygame.Rect(panel.left + pad, panel.top + title_h + 2, panel_w - pad * 2, panel_h - title_h - pad - 12)
-    return panel, close_r, list_r, row_h
+    close_r = pygame.Rect(panel.right - 26, panel.top + 4, 22, 18)
+    list_r = pygame.Rect(
+        panel.left + pad,
+        panel.top + title_h + 2,
+        panel_w - pad * 2,
+        list_h,
+    )
+    return panel, close_r, list_r, row_h, content_h
+
+
+def _debug_panel_activate_row(row, *, ev_mgr, cam, flow, map_id, player, event_data) -> str:
+    """탭한 디버그 행 실행. 항상 consumed."""
+    kind = str((row or {}).get("kind") or "")
+    if kind == "restart_confirm" or (
+        kind == "restart" and _DEBUG_PANEL.get("confirm_restart")
+    ):
+        _DEBUG_PANEL["confirm_restart"] = False
+        apply_dev_runtime_command(
+            "restart_delete_save",
+            ev_mgr=ev_mgr,
+            cam=cam,
+            flow=flow,
+            map_id=map_id,
+            player=player,
+        )
+        return "consumed"
+    if kind == "restart":
+        _DEBUG_PANEL["confirm_restart"] = True
+        # 확인 줄이 보이도록 맨 아래
+        _DEBUG_PANEL["scroll_px"] = 99999
+        return "consumed"
+    if kind == "picker":
+        debug_panel_close()
+        try:
+            event_picker_open(event_data if event_data is not None else {})
+        except Exception:
+            pass
+        return "consumed"
+    if kind == "cmd":
+        cmd = str(row.get("cmd") or "").strip()
+        if cmd:
+            apply_dev_runtime_command(
+                cmd,
+                ev_mgr=ev_mgr,
+                cam=cam,
+                flow=flow,
+                map_id=map_id,
+                player=player,
+            )
+        _DEBUG_PANEL["confirm_restart"] = False
+        return "consumed"
+    return "consumed"
 
 
 def draw_debug_panel(surf, *, font_title=None, font_row=None) -> None:
-    """논리 해상도 surf 위 디버그 설정 패널."""
+    """논리 해상도 surf 위 디버그 설정 패널. 리스트+스크롤바는 마우스/터치."""
     if not debug_panel_is_open() or surf is None:
         return
     sw, sh = surf.get_width(), surf.get_height()
-    panel, close_r, list_r, row_h = _debug_panel_layout(sw, sh)
+    panel, close_r, list_r, row_h, content_h = _debug_panel_layout(sw, sh)
+    body, sb_rect, max_scroll = _game_modal_split_list_and_sb(list_r, content_h)
+    scroll_px = _game_modal_clamp_scroll(_DEBUG_PANEL, max_scroll)
+    sb_ui = _game_modal_scrollbar_layout(sb_rect, body.height, content_h, scroll_px)
     _DEBUG_PANEL["panel_rect"] = panel
     _DEBUG_PANEL["close_rect"] = close_r
+    _DEBUG_PANEL["list_rect"] = list_r
+    _DEBUG_PANEL["body_rect"] = body
+    _DEBUG_PANEL["sb_ui"] = sb_ui
+    _DEBUG_PANEL["max_scroll"] = max_scroll
 
     try:
         dim = pygame.Surface((sw, sh), pygame.SRCALPHA)
@@ -1772,11 +2543,25 @@ def draw_debug_panel(surf, *, font_title=None, font_row=None) -> None:
     xlbl = font_row.render("x", True, (255, 220, 220))
     surf.blit(xlbl, (close_r.centerx - xlbl.get_width() // 2, close_r.centery - xlbl.get_height() // 2))
 
-    hits = []
-    y = list_r.top
     rows = _debug_panel_rows()
-    for row in rows:
-        rr = pygame.Rect(list_r.left, y, list_r.width, row_h)
+    draw_rows = list(rows)
+    if _DEBUG_PANEL.get("confirm_restart"):
+        draw_rows.append({"id": "restart_confirm", "kind": "restart_confirm", "label": ""})
+
+    prev_clip = surf.get_clip()
+    surf.set_clip(body)
+    hits = []
+    for i, row in enumerate(draw_rows):
+        rr = pygame.Rect(body.left, body.top + i * row_h - scroll_px, body.width, row_h)
+        hit_r = rr.clip(body)
+        if hit_r.height <= 0:
+            continue
+        if str(row.get("kind") or "") == "restart_confirm":
+            pygame.draw.rect(surf, (90, 40, 40), rr, border_radius=3)
+            img = font_row.render("세이브 삭제 후 재시작?  다시 탭", True, (255, 200, 190))
+            surf.blit(img, (rr.left + 4, rr.top + max(0, (row_h - img.get_height()) // 2)))
+            hits.append((hit_r, dict(row)))
+            continue
         on = _debug_feature_on(row)
         if on is True:
             pygame.draw.rect(surf, (40, 70, 55), rr, border_radius=3)
@@ -1806,18 +2591,12 @@ def draw_debug_panel(surf, *, font_title=None, font_row=None) -> None:
         surf.blit(img, (rr.left + 4, rr.top + max(0, (row_h - img.get_height()) // 2)))
         simg = font_row.render(state, True, scolor)
         surf.blit(simg, (rr.right - simg.get_width() - 4, rr.top + max(0, (row_h - simg.get_height()) // 2)))
-        hits.append((rr, dict(row)))
-        y += row_h
+        hits.append((hit_r, dict(row)))
+    surf.set_clip(prev_clip)
+    _draw_game_modal_scrollbar(surf, sb_ui)
 
-    if _DEBUG_PANEL.get("confirm_restart"):
-        rr = pygame.Rect(list_r.left, y, list_r.width, row_h)
-        pygame.draw.rect(surf, (90, 40, 40), rr, border_radius=3)
-        img = font_row.render("세이브 삭제 후 재시작?  다시 탭", True, (255, 200, 190))
-        surf.blit(img, (rr.left + 4, rr.top + max(0, (row_h - img.get_height()) // 2)))
-        hits.append((rr, {"id": "restart_confirm", "kind": "restart_confirm"}))
-
-    hint = font_row.render("탭=토글 · 바깥/× 닫기", True, (140, 150, 165))
-    surf.blit(hint, (panel.left + 8, panel.bottom - 12))
+    hint = font_row.render("탭=토글 · 드래그/휠=스크롤", True, (140, 150, 165))
+    surf.blit(hint, (panel.left + 8, panel.bottom - 14))
     _DEBUG_PANEL["row_hit"] = hits
 
 
@@ -1833,7 +2612,7 @@ def debug_panel_handle(
     logical_xy=None,
 ) -> str | None:
     """
-    디버그 패널 입력.
+    디버그 패널 입력 — 마우스/터치 우선 (휠·스크롤바·리스트 드래그·탭).
     Returns: "consumed" | None
     """
     if not debug_panel_is_open():
@@ -1843,61 +2622,68 @@ def debug_panel_handle(
         if event.key == pygame.K_ESCAPE:
             debug_panel_close()
             return "consumed"
-    if event.type == pygame.MOUSEBUTTONDOWN and int(getattr(event, "button", 0) or 0) == 1:
-        if logical_xy is not None:
-            mx, my = int(logical_xy[0]), int(logical_xy[1])
-        else:
-            mx, my = int(event.pos[0]), int(event.pos[1])
-        close_r = _DEBUG_PANEL.get("close_rect")
-        panel = _DEBUG_PANEL.get("panel_rect")
+
+    mx, my = _game_modal_pointer_xy(event, logical_xy)
+    max_scroll = int(_DEBUG_PANEL.get("max_scroll") or 0)
+    body = _DEBUG_PANEL.get("body_rect")
+    sb_ui = _DEBUG_PANEL.get("sb_ui")
+    panel = _DEBUG_PANEL.get("panel_rect")
+    close_r = _DEBUG_PANEL.get("close_rect")
+
+    wheel_d = _game_modal_wheel_delta(event)
+    if wheel_d:
+        _DEBUG_PANEL["scroll_px"] = int(_DEBUG_PANEL.get("scroll_px") or 0) + wheel_d
+        _game_modal_clamp_scroll(_DEBUG_PANEL, max_scroll)
+        return "consumed"
+
+    if event.type == pygame.MOUSEMOTION and mx is not None:
+        if _game_modal_on_motion(_DEBUG_PANEL, my, sb_ui):
+            _game_modal_clamp_scroll(_DEBUG_PANEL, max_scroll)
+            return "consumed"
+        return "consumed"
+
+    if event.type == pygame.MOUSEBUTTONUP and int(getattr(event, "button", 0) or 0) == 1:
+        was_tap, token = _game_modal_end_pointer(_DEBUG_PANEL)
+        if was_tap and isinstance(token, dict):
+            return _debug_panel_activate_row(
+                token,
+                ev_mgr=ev_mgr,
+                cam=cam,
+                flow=flow,
+                map_id=map_id,
+                player=player,
+                event_data=event_data,
+            )
+        return "consumed"
+
+    if event.type == pygame.MOUSEBUTTONDOWN:
+        btn = int(getattr(event, "button", 0) or 0)
+        if btn in (4, 5):
+            return "consumed"
+        if btn != 1 or mx is None:
+            return "consumed"
         if close_r is not None and close_r.collidepoint(mx, my):
             debug_panel_close()
             return "consumed"
-        for rr, row in list(_DEBUG_PANEL.get("row_hit") or []):
-            if not rr.collidepoint(mx, my):
-                continue
-            kind = str(row.get("kind") or "")
-            if kind == "restart_confirm" or (
-                kind == "restart" and _DEBUG_PANEL.get("confirm_restart")
-            ):
-                _DEBUG_PANEL["confirm_restart"] = False
-                apply_dev_runtime_command(
-                    "restart_delete_save",
-                    ev_mgr=ev_mgr,
-                    cam=cam,
-                    flow=flow,
-                    map_id=map_id,
-                    player=player,
-                )
-                return "consumed"
-            if kind == "restart":
-                _DEBUG_PANEL["confirm_restart"] = True
-                return "consumed"
-            if kind == "picker":
-                debug_panel_close()
-                try:
-                    event_picker_open(event_data if event_data is not None else {})
-                except Exception:
-                    pass
-                return "consumed"
-            if kind == "cmd":
-                cmd = str(row.get("cmd") or "").strip()
-                if cmd:
-                    apply_dev_runtime_command(
-                        cmd,
-                        ev_mgr=ev_mgr,
-                        cam=cam,
-                        flow=flow,
-                        map_id=map_id,
-                        player=player,
-                    )
-                _DEBUG_PANEL["confirm_restart"] = False
-                return "consumed"
+        sb_hit = _game_modal_sb_hit((mx, my), sb_ui)
+        if sb_hit == "thumb":
+            _game_modal_begin_sb_drag(_DEBUG_PANEL)
+            return "consumed"
+        if sb_hit == "track":
+            sp = _game_modal_scroll_px_from_sb_my(my, sb_ui)
+            if sp is not None:
+                _DEBUG_PANEL["scroll_px"] = sp
+            _game_modal_begin_sb_drag(_DEBUG_PANEL)
             return "consumed"
         if panel is not None and not panel.collidepoint(mx, my):
             debug_panel_close()
             return "consumed"
+        token = _game_modal_row_at_y(_DEBUG_PANEL.get("row_hit"), mx, my)
+        if body is not None and body.collidepoint(mx, my):
+            _game_modal_begin_body_drag(_DEBUG_PANEL, my, token)
+            return "consumed"
         return "consumed"
+
     if event.type in (
         pygame.MOUSEBUTTONDOWN,
         pygame.MOUSEBUTTONUP,
@@ -2006,6 +2792,7 @@ def show_selectbox(ev_mgr, step: dict) -> None:
     # 버튼들과 텍스트의 뒤에 깔리는 시각적 그룹핑 역할
     if name_text:
         # 이름이 있으면 이름 텍스트 먼저 표시 (질문 바로 위)
+        # 색·테두리는 폰트 슬롯 "ui"(force_color)가 최종. 여기 color 는 force_color 꺼져 있을 때만.
         name_step = dict(
             base_appear,
             content="text", text=name_text,
@@ -2055,18 +2842,30 @@ def show_selectbox(ev_mgr, step: dict) -> None:
 
 
 # =============================================================================
-# 이벤트 피커 (필드 E 키) — LOCAL/GLOBAL/SYNC/FRAGMENTS 목록 → 클릭/Enter 즉시 실행
+# 이벤트 피커 (debug 패널 / E 키) — LOCAL/GLOBAL/SYNC/FRAGMENTS 목록
+# - 탭=실행, 휠·리스트 드래그·스크롤바=스크롤, 바깥·×=닫기
+# - 키보드(↑↓ Enter)는 보조. 게임 조작은 마우스/터치 기준
 # =============================================================================
 
 _EVENT_PICKER = {
     "open": False,
-    "scroll": 0,
+    "scroll_px": 0,
     "selected": 0,
     "rows": [],  # [{id, section, title, label}]
     "row_hit": [],  # [(rect, index)] — draw 시 갱신
     "panel_rect": None,
     "close_rect": None,
     "list_rect": None,
+    "body_rect": None,
+    "sb_ui": None,
+    "max_scroll": 0,
+    "row_h": 22,
+    "sb_drag": False,
+    "body_drag": False,
+    "drag_moved": False,
+    "press_token": None,
+    "drag_start_y": 0,
+    "drag_start_scroll": 0,
 }
 
 
@@ -2080,6 +2879,10 @@ def event_picker_close() -> None:
     _EVENT_PICKER["panel_rect"] = None
     _EVENT_PICKER["close_rect"] = None
     _EVENT_PICKER["list_rect"] = None
+    _EVENT_PICKER["body_rect"] = None
+    _EVENT_PICKER["sb_ui"] = None
+    _EVENT_PICKER["max_scroll"] = 0
+    _game_modal_clear_drag(_EVENT_PICKER)
 
 
 def _event_picker_enabled() -> bool:
@@ -2129,8 +2932,9 @@ def event_picker_open(event_data) -> None:
         return
     rows = build_event_picker_rows(event_data)
     _EVENT_PICKER["rows"] = rows
-    _EVENT_PICKER["scroll"] = 0
+    _EVENT_PICKER["scroll_px"] = 0
     _EVENT_PICKER["selected"] = 0 if rows else -1
+    _game_modal_clear_drag(_EVENT_PICKER)
     _EVENT_PICKER["open"] = True
 
 
@@ -2143,65 +2947,75 @@ def event_picker_toggle(event_data) -> bool:
     return True
 
 
-def _event_picker_layout(surf_w, surf_h):
+def _event_picker_row_h() -> int:
     try:
-        row_h = int(CONFIG.get("EVENT_PICKER_ROW_H", 18) or 18)
+        row_h = int(CONFIG.get("EVENT_PICKER_ROW_H", 22) or 22)
     except Exception:
-        row_h = 18
-    row_h = max(14, min(28, row_h))
+        row_h = 22
+    return max(16, min(32, row_h))
+
+
+def _event_picker_layout(surf_w, surf_h):
+    """헤더+리스트+힌트. 화면 높이에 맞춰 리스트를 자르고 나머지는 스크롤."""
+    row_h = _event_picker_row_h()
     try:
         vis = int(CONFIG.get("EVENT_PICKER_VISIBLE_ROWS", 12) or 12)
     except Exception:
         vis = 12
     vis = max(4, min(20, vis))
     pad = 8
-    title_h = 20
+    title_h = 24
+    hint_h = 16
     panel_w = min(int(surf_w * 0.92), max(220, int(surf_w) - 16))
     list_h = vis * row_h
-    panel_h = title_h + pad + list_h + pad + 16
+    panel_h = title_h + pad + list_h + hint_h
     panel_h = min(panel_h, int(surf_h) - 12)
-    list_h = max(row_h, panel_h - title_h - pad - 16)
-    vis = max(1, list_h // row_h)
+    list_h = max(row_h, panel_h - title_h - pad - hint_h)
     px = max(4, (int(surf_w) - panel_w) // 2)
     py = max(4, (int(surf_h) - panel_h) // 2)
     panel = pygame.Rect(px, py, panel_w, panel_h)
-    close_r = pygame.Rect(panel.right - 22, panel.top + 4, 18, 14)
+    close_r = pygame.Rect(panel.right - 26, panel.top + 4, 22, 18)
     list_r = pygame.Rect(panel.left + pad, panel.top + title_h + 4, panel_w - pad * 2, list_h)
-    return panel, close_r, list_r, row_h, vis
+    return panel, close_r, list_r, row_h
 
 
-def _event_picker_clamp_scroll():
+def _event_picker_content_h() -> int:
+    n = len(_EVENT_PICKER.get("rows") or [])
+    return max(1, n * _event_picker_row_h())
+
+
+def _event_picker_clamp_scroll(*, keep_selected_visible=False):
+    """scroll_px 클램프. 키보드 이동 시에만 선택이 보이도록 맞춤."""
     rows = _EVENT_PICKER.get("rows") or []
     n = len(rows)
-    vis = 1
+    row_h = _event_picker_row_h()
+    body = _EVENT_PICKER.get("body_rect")
     lr = _EVENT_PICKER.get("list_rect")
-    rh = int(CONFIG.get("EVENT_PICKER_ROW_H", 18) or 18)
-    if lr is not None:
-        try:
-            vis = max(1, int(lr.height) // max(1, rh))
-        except Exception:
-            vis = 12
-    else:
-        try:
-            vis = int(CONFIG.get("EVENT_PICKER_VISIBLE_ROWS", 12) or 12)
-        except Exception:
-            vis = 12
-    max_scroll = max(0, n - vis)
-    sc = int(_EVENT_PICKER.get("scroll") or 0)
-    sc = max(0, min(max_scroll, sc))
-    _EVENT_PICKER["scroll"] = sc
+    vh = 1
+    if body is not None:
+        vh = max(1, int(body.height))
+    elif lr is not None:
+        vh = max(1, int(lr.height))
+    content_h = max(1, n * row_h)
+    max_scroll = max(0, content_h - vh)
     sel = int(_EVENT_PICKER.get("selected") or 0)
     if n <= 0:
         _EVENT_PICKER["selected"] = -1
     else:
         sel = max(0, min(n - 1, sel))
         _EVENT_PICKER["selected"] = sel
-        # 선택이 보이도록 스크롤
-        if sel < sc:
-            _EVENT_PICKER["scroll"] = sel
-        elif sel >= sc + vis:
-            _EVENT_PICKER["scroll"] = sel - vis + 1
-    return max_scroll, vis
+        if keep_selected_visible:
+            sel_top = sel * row_h
+            sel_bot = sel_top + row_h
+            sc = int(_EVENT_PICKER.get("scroll_px") or 0)
+            if sel_top < sc:
+                _EVENT_PICKER["scroll_px"] = sel_top
+            elif sel_bot > sc + vh:
+                _EVENT_PICKER["scroll_px"] = sel_bot - vh
+    _game_modal_clamp_scroll(_EVENT_PICKER, max_scroll)
+    _EVENT_PICKER["max_scroll"] = max_scroll
+    _EVENT_PICKER["row_h"] = row_h
+    return max_scroll, vh
 
 
 def _event_picker_run_selected(
@@ -2256,7 +3070,7 @@ def event_picker_handle(
     call_catalog=None,
 ) -> str | None:
     """
-    피커 입력 처리.
+    피커 입력 — 마우스/터치 우선 (탭 실행, 휠·드래그·스크롤바).
     Returns:
       "consumed" — 입력 소비
       "started"  — 이벤트 시작함
@@ -2283,19 +3097,21 @@ def event_picker_handle(
         if event.key in (pygame.K_UP, pygame.K_w):
             sel = int(_EVENT_PICKER.get("selected") or 0) - 1
             _EVENT_PICKER["selected"] = sel
-            _event_picker_clamp_scroll()
+            _event_picker_clamp_scroll(keep_selected_visible=True)
             return "consumed"
         if event.key in (pygame.K_DOWN, pygame.K_s):
             sel = int(_EVENT_PICKER.get("selected") or 0) + 1
             _EVENT_PICKER["selected"] = sel
-            _event_picker_clamp_scroll()
+            _event_picker_clamp_scroll(keep_selected_visible=True)
             return "consumed"
         if event.key in (pygame.K_PAGEUP,):
-            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) - 5
+            vh = int((_EVENT_PICKER.get("body_rect") or pygame.Rect(0, 0, 0, 1)).height or 1)
+            _EVENT_PICKER["scroll_px"] = int(_EVENT_PICKER.get("scroll_px") or 0) - vh
             _event_picker_clamp_scroll()
             return "consumed"
         if event.key in (pygame.K_PAGEDOWN,):
-            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) + 5
+            vh = int((_EVENT_PICKER.get("body_rect") or pygame.Rect(0, 0, 0, 1)).height or 1)
+            _EVENT_PICKER["scroll_px"] = int(_EVENT_PICKER.get("scroll_px") or 0) + vh
             _event_picker_clamp_scroll()
             return "consumed"
         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_a, pygame.K_SPACE):
@@ -2305,44 +3121,66 @@ def event_picker_handle(
                 return "started"
             return "consumed"
 
-    if event.type == pygame.MOUSEWHEEL:
-        dy = int(getattr(event, "y", 0) or 0)
-        if dy:
-            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) - dy
-            _event_picker_clamp_scroll()
+    mx, my = _game_modal_pointer_xy(event, logical_xy)
+    max_scroll = int(_EVENT_PICKER.get("max_scroll") or 0)
+    body = _EVENT_PICKER.get("body_rect")
+    sb_ui = _EVENT_PICKER.get("sb_ui")
+    panel = _EVENT_PICKER.get("panel_rect")
+    close_r = _EVENT_PICKER.get("close_rect")
+
+    wheel_d = _game_modal_wheel_delta(event)
+    if wheel_d:
+        _EVENT_PICKER["scroll_px"] = int(_EVENT_PICKER.get("scroll_px") or 0) + wheel_d
+        _event_picker_clamp_scroll()
         return "consumed"
 
-    if event.type == pygame.MOUSEBUTTONDOWN:
-        mx, my = None, None
-        if logical_xy is not None and len(logical_xy) >= 2:
-            mx, my = int(logical_xy[0]), int(logical_xy[1])
-        else:
-            try:
-                mx, my = int(event.pos[0]), int(event.pos[1])
-            except Exception:
-                return "consumed"
-        btn = int(getattr(event, "button", 1) or 1)
-        if btn in (4, 5):  # 일부 환경 휠
-            _EVENT_PICKER["scroll"] = int(_EVENT_PICKER.get("scroll") or 0) + (-1 if btn == 4 else 1)
+    if event.type == pygame.MOUSEMOTION and mx is not None:
+        if _game_modal_on_motion(_EVENT_PICKER, my, sb_ui):
             _event_picker_clamp_scroll()
             return "consumed"
-        if btn != 1:
-            return "consumed"
-        cr = _EVENT_PICKER.get("close_rect")
-        if cr is not None and cr.collidepoint(mx, my):
-            event_picker_close()
-            return "consumed"
-        for rect, idx in list(_EVENT_PICKER.get("row_hit") or []):
-            if rect.collidepoint(mx, my):
-                _EVENT_PICKER["selected"] = int(idx)
+        return "consumed"
+
+    if event.type == pygame.MOUSEBUTTONUP and int(getattr(event, "button", 0) or 0) == 1:
+        was_tap, token = _game_modal_end_pointer(_EVENT_PICKER)
+        if was_tap and token is not None:
+            try:
+                idx = int(token)
+            except Exception:
+                idx = -1
+            if idx >= 0:
+                _EVENT_PICKER["selected"] = idx
                 if _event_picker_run_selected(
                     ev_mgr, events_catalog, field_tilt_snapshot, call_catalog=call_catalog
                 ):
                     return "started"
-                return "consumed"
-        pr = _EVENT_PICKER.get("panel_rect")
-        if pr is not None and not pr.collidepoint(mx, my):
+        return "consumed"
+
+    if event.type == pygame.MOUSEBUTTONDOWN:
+        btn = int(getattr(event, "button", 0) or 0)
+        if btn in (4, 5):
+            return "consumed"
+        if btn != 1 or mx is None:
+            return "consumed"
+        if close_r is not None and close_r.collidepoint(mx, my):
             event_picker_close()
+            return "consumed"
+        sb_hit = _game_modal_sb_hit((mx, my), sb_ui)
+        if sb_hit == "thumb":
+            _game_modal_begin_sb_drag(_EVENT_PICKER)
+            return "consumed"
+        if sb_hit == "track":
+            sp = _game_modal_scroll_px_from_sb_my(my, sb_ui)
+            if sp is not None:
+                _EVENT_PICKER["scroll_px"] = sp
+            _event_picker_clamp_scroll()
+            _game_modal_begin_sb_drag(_EVENT_PICKER)
+            return "consumed"
+        if panel is not None and not panel.collidepoint(mx, my):
+            event_picker_close()
+            return "consumed"
+        token = _game_modal_row_at_y(_EVENT_PICKER.get("row_hit"), mx, my)
+        if body is not None and body.collidepoint(mx, my):
+            _game_modal_begin_body_drag(_EVENT_PICKER, my, token)
             return "consumed"
         return "consumed"
 
@@ -2351,20 +3189,25 @@ def event_picker_handle(
 
 
 def draw_event_picker(surf, *, font_title=None, font_row=None) -> None:
-    """논리 해상도 surf 위에 이벤트 피커 모달 그리기."""
+    """논리 해상도 surf 위에 이벤트 피커 모달. 리스트+스크롤바는 마우스/터치."""
     if not event_picker_is_open() or surf is None:
         return
     sw, sh = surf.get_width(), surf.get_height()
-    panel, close_r, list_r, row_h, vis = _event_picker_layout(sw, sh)
+    panel, close_r, list_r, row_h = _event_picker_layout(sw, sh)
+    content_h = _event_picker_content_h()
+    body, sb_rect, max_scroll = _game_modal_split_list_and_sb(list_r, content_h)
     _EVENT_PICKER["panel_rect"] = panel
     _EVENT_PICKER["close_rect"] = close_r
     _EVENT_PICKER["list_rect"] = list_r
-    max_scroll, vis = _event_picker_clamp_scroll()
+    _EVENT_PICKER["body_rect"] = body
+    _EVENT_PICKER["row_h"] = row_h
+    scroll_px = _game_modal_clamp_scroll(_EVENT_PICKER, max_scroll)
+    sb_ui = _game_modal_scrollbar_layout(sb_rect, body.height, content_h, scroll_px)
+    _EVENT_PICKER["sb_ui"] = sb_ui
+    _EVENT_PICKER["max_scroll"] = max_scroll
     rows = _EVENT_PICKER.get("rows") or []
-    sc = int(_EVENT_PICKER.get("scroll") or 0)
     sel = int(_EVENT_PICKER.get("selected") or -1)
 
-    # 딤
     try:
         dim = pygame.Surface((sw, sh), pygame.SRCALPHA)
         dim.fill((0, 0, 0, 140))
@@ -2383,20 +3226,20 @@ def draw_event_picker(surf, *, font_title=None, font_row=None) -> None:
     if font_row is None:
         font_row = font_title
 
-    title = font_title.render("Events (E/Esc 닫기)", True, (240, 230, 210))
+    title = font_title.render("Events", True, (240, 230, 210))
     surf.blit(title, (panel.left + 8, panel.top + 4))
     pygame.draw.rect(surf, (90, 50, 50), close_r, border_radius=3)
     xlbl = font_row.render("x", True, (255, 220, 220))
     surf.blit(xlbl, (close_r.centerx - xlbl.get_width() // 2, close_r.centery - xlbl.get_height() // 2))
 
-    # 리스트 클립
     prev_clip = surf.get_clip()
-    surf.set_clip(list_r)
+    surf.set_clip(body)
     hits = []
-    y0 = list_r.top
-    for i in range(sc, min(len(rows), sc + vis + 1)):
-        row = rows[i]
-        rr = pygame.Rect(list_r.left, y0 + (i - sc) * row_h, list_r.width, row_h)
+    for i, row in enumerate(rows):
+        rr = pygame.Rect(body.left, body.top + i * row_h - scroll_px, body.width, row_h)
+        hit_r = rr.clip(body)
+        if hit_r.height <= 0:
+            continue
         if i == sel:
             pygame.draw.rect(surf, (70, 90, 70), rr)
         elif i % 2 == 0:
@@ -2404,28 +3247,23 @@ def draw_event_picker(surf, *, font_title=None, font_row=None) -> None:
         else:
             pygame.draw.rect(surf, (40, 38, 44), rr)
         txt = str(row.get("label") or row.get("id") or "")
-        # 너무 길면 자르기
         max_w = rr.width - 6
         img = font_row.render(txt, True, (230, 225, 215))
         if img.get_width() > max_w:
-            # 대략 잘라 다시
             while txt and font_row.size(txt + "…")[0] > max_w:
                 txt = txt[:-1]
             img = font_row.render(txt + "…", True, (230, 225, 215))
         surf.blit(img, (rr.left + 3, rr.top + max(0, (row_h - img.get_height()) // 2)))
-        hits.append((rr, i))
+        hits.append((hit_r, i))
     surf.set_clip(prev_clip)
     _EVENT_PICKER["row_hit"] = hits
+    _draw_game_modal_scrollbar(surf, sb_ui)
 
-    # 스크롤바
-    if max_scroll > 0 and list_r.height > 8:
-        track = pygame.Rect(list_r.right - 4, list_r.top, 3, list_r.height)
-        pygame.draw.rect(surf, (60, 58, 64), track)
-        thumb_h = max(10, int(list_r.height * vis / max(1, len(rows))))
-        thumb_y = list_r.top + int((list_r.height - thumb_h) * (sc / max(1, max_scroll)))
-        pygame.draw.rect(surf, (160, 150, 130), pygame.Rect(track.left, thumb_y, track.width, thumb_h))
-
-    hint = font_row.render(f"{len(rows)} events  ↑↓/휠  Enter실행", True, (160, 155, 145))
+    hint = font_row.render(
+        f"{len(rows)}  탭=실행 · 드래그/휠=스크롤",
+        True,
+        (160, 155, 145),
+    )
     surf.blit(hint, (panel.left + 8, panel.bottom - 14))
 
 
@@ -2465,8 +3303,57 @@ def handle_overlay_ui_click_action(
         hide_game_exit_confirm(ev_mgr)
         return "consumed"
 
+    # --- 설정 확인(새로시작/끝내기): 응/아니/바깥 클릭 ---
+    if game_options_confirm_open(ev_mgr):
+        mode = str(_OPTIONS_CONFIRM_MODE or "")
+        if act == "game_options_confirm_yes":
+            hide_game_options_confirm(ev_mgr)
+            if mode == "restart":
+                apply_dev_runtime_command(
+                    "restart_delete_save",
+                    ev_mgr=ev_mgr,
+                    cam=cam,
+                    flow=getattr(ev_mgr, "flow", None),
+                    map_id=None,
+                    player=None,
+                )
+                return "consumed"
+            return "quit"
+        # 아니 / 바깥 클릭 → 확인만 닫고 설정 메뉴로 복귀
+        hide_game_options_confirm(ev_mgr)
+        show_game_options_menu(ev_mgr)
+        return "consumed"
+
+    # --- 설정 메뉴 열림 ---
+    if game_options_menu_open(ev_mgr):
+        if act == "game_options_music":
+            music = getattr(ev_mgr, "music", None)
+            try:
+                if music is not None and callable(getattr(music, "toggle_user_muted", None)):
+                    music.toggle_user_muted()
+            except Exception:
+                pass
+            # 버튼 문구(끄기/켜기) 갱신
+            show_game_options_menu(ev_mgr)
+            return "consumed"
+        if act == "game_options_restart":
+            show_game_options_confirm(ev_mgr, "restart")
+            return "consumed"
+        if act == "game_options_quit":
+            show_game_options_confirm(ev_mgr, "quit")
+            return "consumed"
+        # 닫기 / 바깥 클릭
+        hide_game_options_menu(ev_mgr)
+        return "consumed"
+
     if act == "game_exit_open":
+        hide_game_options_menu(ev_mgr)
+        hide_game_options_confirm(ev_mgr)
         show_game_exit_confirm(ev_mgr)
+        return "consumed"
+
+    if act == "game_options_open":
+        show_game_options_menu(ev_mgr)
         return "consumed"
 
     if act == "game_debug_open":
@@ -2483,14 +3370,7 @@ def handle_overlay_ui_click_action(
             ev_mgr.remove_ui_overlay("fishing_exit")
         except Exception:
             pass
-        try:
-            ev_mgr.pending_camera_command = {
-                "mode": "follow_player",
-                "smooth": True,
-                "duration_sec": 0.5,
-            }
-        except Exception:
-            pass
+        # 카메라는 ev_fishing_exit → return_from_fishing 이 담당 (페이드 전에 follow 로 바꾸지 않음)
         return "consumed"
 
     if act == "stop_baseball":
@@ -2574,6 +3454,69 @@ def handle_overlay_ui_click_action(
         return "consumed"
 
     return None
+
+
+def _restore_fishing_field(ev_mgr) -> None:
+    """낚시 세션 종료 후 필드 복구 — 오버레이 제거 + 카메라 follow.
+    stop_fishing(즉시 중단) / return_from_fishing(퇴장 이벤트) 공용.
+    """
+    try:
+        ev_mgr.field_activity_stop_request = True
+    except Exception:
+        pass
+    try:
+        ev_mgr.remove_ui_overlay("fishing_exit")
+    except Exception:
+        pass
+    try:
+        ev_mgr.pending_camera_command = {
+            "mode": "follow_player",
+            "smooth": True,
+            "duration_sec": 0.5,
+        }
+    except Exception:
+        pass
+
+
+def _return_from_minigame_cleanup(
+    ev_mgr,
+    flow,
+    player,
+    *,
+    overlay_id: str,
+    save_map_key: str,
+    save_pos_key: str,
+) -> None:
+    """야구·레이스·황소개구리 퇴장 DEV_CMD 공용.
+    맵/좌표는 하지 않는다 — 퇴장 이벤트의 MAP 스텝이 담당.
+    여기서는 오버레이 제거, 카메라 follow, 퇴장 임시키 정리, 현재 위치 세이브.
+    """
+    try:
+        ev_mgr.remove_ui_overlay(overlay_id)
+    except Exception:
+        pass
+    if flow is not None:
+        sd = getattr(flow, "save_data", None)
+        if isinstance(sd, dict):
+            sd.pop(save_map_key, None)
+            sd.pop(save_pos_key, None)
+            try:
+                mid = str(sd.get("current_map") or "").strip()
+                pos = sd.get("player_pos")
+                if player is not None:
+                    pos = [float(player.pos[0]), float(player.pos[1])]
+                    sd["player_pos"] = pos
+                if mid:
+                    flow.save_game(mid, pos, ignore_event_guard=True)
+            except Exception:
+                pass
+    try:
+        ev_mgr.pending_camera_command = {
+            "mode": "follow_player",
+            "smooth": False,
+        }
+    except Exception:
+        pass
 
 
 def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=None):
@@ -2673,23 +3616,10 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
             if step.get("await_tap") is not None:
                 params["await_tap"] = step.get("await_tap")
         request_field_activity(ev_mgr, "fishing", pond=pond, **params)
-    elif n == "stop_fishing":
-        try:
-            ev_mgr.field_activity_stop_request = True
-        except Exception:
-            pass
-        try:
-            ev_mgr.remove_ui_overlay("fishing_exit")
-        except Exception:
-            pass
-        try:
-            ev_mgr.pending_camera_command = {
-                "mode": "follow_player",
-                "smooth": True,
-                "duration_sec": 0.5,
-            }
-        except Exception:
-            pass
+    elif n in ("stop_fishing", "return_from_fishing"):
+        # stop_fishing: 세션 즉시 중단. return_from_fishing: ev_fishing_exit 에서 필드 복구
+        # (맵 전환 없음 — 야구 return_from_baseball 의 같은 맵 버전)
+        _restore_fishing_field(ev_mgr)
     elif n == "start_baseball":
         from activities import request_field_activity
 
@@ -2751,98 +3681,23 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
         except Exception:
             pass
     elif n == "return_from_racing":
-        target_map = ""
-        target_pos = None
-        try:
-            sd = flow.save_data if flow else {}
-            target_map = str(sd.pop("racing_exit_map", "") or "").strip()
-            target_pos = sd.pop("racing_exit_pos", None)
-        except Exception:
-            target_map = ""
-            target_pos = None
-        if not target_map:
-            target_map = "bg_jjangpu"
-            target_pos = [850.0, 2310.0]
-        if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
-            target_pos = [850.0, 2310.0]
-        try:
-            ev_mgr.pending_map_change = {
-                "map_id": target_map,
-                "pos": [float(target_pos[0]), float(target_pos[1])],
-            }
-            if flow is not None:
-                flow.save_data["current_map"] = target_map
-                flow.save_data["player_pos"] = [
-                    float(target_pos[0]),
-                    float(target_pos[1]),
-                ]
-                try:
-                    flow.save_game(
-                        target_map,
-                        [float(target_pos[0]), float(target_pos[1])],
-                        ignore_event_guard=True,
-                    )
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            ev_mgr.pending_camera_command = {
-                "mode": "follow_player",
-                "smooth": False,
-            }
-        except Exception:
-            pass
+        _return_from_minigame_cleanup(
+            ev_mgr,
+            flow,
+            player,
+            overlay_id="racing_exit",
+            save_map_key="racing_exit_map",
+            save_pos_key="racing_exit_pos",
+        )
     elif n == "return_from_baseball":
-        target_map = ""
-        target_pos = None
-        try:
-            sd = flow.save_data if flow else {}
-            target_map = str(sd.pop("baseball_exit_map", "") or "").strip()
-            target_pos = sd.pop("baseball_exit_pos", None)
-        except Exception:
-            target_map = ""
-            target_pos = None
-        if not target_map:
-            try:
-                bb = (flow.world_data or {}).get("bg_baseball1", {}).get("baseball", {})
-                target_map = str(bb.get("exit_map") or "bg_jjangpu").strip()
-                ep = bb.get("exit_pos")
-                if isinstance(ep, (list, tuple)) and len(ep) >= 2:
-                    target_pos = [float(ep[0]), float(ep[1])]
-            except Exception:
-                target_map = "bg_jjangpu"
-                target_pos = [853.0, 2304.0]
-        if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
-            target_pos = [853.0, 2304.0]
-        try:
-            ev_mgr.pending_map_change = {
-                "map_id": target_map,
-                "pos": [float(target_pos[0]), float(target_pos[1])],
-            }
-            if flow is not None:
-                flow.save_data["current_map"] = target_map
-                flow.save_data["player_pos"] = [
-                    float(target_pos[0]),
-                    float(target_pos[1]),
-                ]
-                try:
-                    flow.save_game(
-                        target_map,
-                        [float(target_pos[0]), float(target_pos[1])],
-                        ignore_event_guard=True,
-                    )
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            ev_mgr.pending_camera_command = {
-                "mode": "follow_player",
-                "smooth": False,
-            }
-        except Exception:
-            pass
+        _return_from_minigame_cleanup(
+            ev_mgr,
+            flow,
+            player,
+            overlay_id="baseball_exit",
+            save_map_key="baseball_exit_map",
+            save_pos_key="baseball_exit_pos",
+        )
     elif n == "start_lotus_cross":
         from activities import request_field_activity
 
@@ -2900,55 +3755,14 @@ def apply_dev_runtime_command(cmd, *, ev_mgr, cam, flow, map_id, player, step=No
         except Exception:
             pass
     elif n == "return_from_bullfrog":
-        target_map = ""
-        target_pos = None
-        try:
-            sd = flow.save_data if flow else {}
-            target_map = str(sd.pop("bullfrog_exit_map", "") or "").strip()
-            target_pos = sd.pop("bullfrog_exit_pos", None)
-        except Exception:
-            target_map = ""
-            target_pos = None
-        if not target_map:
-            try:
-                bf = (flow.world_data or {}).get("bg_pond01", {}).get("bullfrog", {})
-                target_map = str(bf.get("exit_map") or "bg_jjangpu").strip()
-                ep = bf.get("exit_pos")
-                if isinstance(ep, (list, tuple)) and len(ep) >= 2:
-                    target_pos = [float(ep[0]), float(ep[1])]
-            except Exception:
-                target_map = "bg_jjangpu"
-                target_pos = [816.0, 2304.0]
-        if not (isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2):
-            target_pos = [816.0, 2304.0]
-        try:
-            ev_mgr.pending_map_change = {
-                "map_id": target_map,
-                "pos": [float(target_pos[0]), float(target_pos[1])],
-            }
-            if flow is not None:
-                flow.save_data["current_map"] = target_map
-                flow.save_data["player_pos"] = [
-                    float(target_pos[0]),
-                    float(target_pos[1]),
-                ]
-                try:
-                    flow.save_game(
-                        target_map,
-                        [float(target_pos[0]), float(target_pos[1])],
-                        ignore_event_guard=True,
-                    )
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            ev_mgr.pending_camera_command = {
-                "mode": "follow_player",
-                "smooth": False,
-            }
-        except Exception:
-            pass
+        _return_from_minigame_cleanup(
+            ev_mgr,
+            flow,
+            player,
+            overlay_id="bullfrog_exit",
+            save_map_key="bullfrog_exit_map",
+            save_pos_key="bullfrog_exit_pos",
+        )
     elif n.startswith("start_activity_"):
         # 범용: start_activity_fishing, start_activity_bullfrog 등
         from activities import request_field_activity

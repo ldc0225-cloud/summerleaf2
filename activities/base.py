@@ -28,6 +28,25 @@ class FieldDrawContext:
     sprite_perspective_q: Optional[float] = None
 
 
+# 캐릭터 선택 그리드에서 고를 수 없는 칸(이미 고른 플레이어 등)을 덮는 알파
+CHAR_PICK_TAKEN_DIM_ALPHA = 130
+
+
+def blit_ui_dim(surf: pygame.Surface, rect: pygame.Rect, alpha: int = CHAR_PICK_TAKEN_DIM_ALPHA) -> None:
+    """UI 칸을 어둡게 덮는다. 야구·레이스 NPC 선택에서 이미 고른 캐릭터 표시에 사용."""
+    if surf is None or rect is None:
+        return
+    try:
+        w, h = int(rect.width), int(rect.height)
+    except Exception:
+        return
+    if w <= 0 or h <= 0:
+        return
+    overlay = pygame.Surface((w, h), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, max(0, min(255, int(alpha)))))
+    surf.blit(overlay, (rect.left, rect.top))
+
+
 class BaseFieldActivity:
     """필드 활동 공통 인터페이스."""
 
@@ -67,6 +86,10 @@ class BaseFieldActivity:
 
     def blocks_field_move(self) -> bool:
         return True
+
+    def freeze_field(self) -> bool:
+        """True면 뒤 월드(이동·애니·오토스크롤)를 정지. 기본은 활동만 입력 차단."""
+        return False
 
     def blocks_zone_confirm(self) -> bool:
         return True

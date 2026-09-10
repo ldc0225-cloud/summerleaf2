@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Tuple
 
 import pygame
 
+import editor_text as ed_txt
+
 from data import (
     CONFIG,
     UI_FONT_FILES,
@@ -47,7 +49,16 @@ def new_state() -> dict:
         "settings_scroll": 0,
         "_edit_field": None,
         "msg": "",
+        "text_edit": ed_txt.EditSession(),
     }
+
+
+def _te(state) -> ed_txt.EditSession:
+    te = state.get("text_edit")
+    if not isinstance(te, ed_txt.EditSession):
+        te = ed_txt.EditSession()
+        state["text_edit"] = te
+    return te
 
 
 def _rgb_to_text(v) -> str:
@@ -345,7 +356,9 @@ def draw_settings_modal(screen, font, state, sw, sh) -> dict:
         active = state.get("_edit_field") == key
         pygame.draw.rect(screen, (255, 215, 0) if active else (110, 130, 160), fr, 1)
         val = str(fields_data.get(key, ""))
-        screen.blit(font.render(val[:36], True, (245, 248, 255)), (fr.x + 4, fr.y + 4))
+        ed_txt.blit_field_value(
+            screen, font, val, fr, active=active, session=_te(state), color=(245, 248, 255), trunc_limit=36
+        )
     for key, lab, _kind in GLOBAL_FIELDS:
         fk = f"g:{key}"
         fr = ui["fields"][fk]
@@ -356,7 +369,9 @@ def draw_settings_modal(screen, font, state, sw, sh) -> dict:
         active = state.get("_edit_field") == fk
         pygame.draw.rect(screen, (255, 215, 0) if active else (110, 130, 160), fr, 1)
         val = str(global_data.get(key, ""))
-        screen.blit(font.render(val[:36], True, (245, 248, 255)), (fr.x + 4, fr.y + 4))
+        ed_txt.blit_field_value(
+            screen, font, val, fr, active=active, session=_te(state), color=(245, 248, 255), trunc_limit=36
+        )
     screen.set_clip(clip)
 
     # 미리보기 — 현재 편집값을 임시 적용 후 렌더
@@ -410,6 +425,12 @@ def handle_settings_modal_click(state, mx, my, ui) -> Optional[str]:
     for key, fr in (ui.get("fields") or {}).items():
         if fr.collidepoint(mx, my):
             state["_edit_field"] = key
+            if str(key).startswith("g:"):
+                gkey = str(key)[2:]
+                cur = str((state.get("global_fields") or {}).get(gkey, ""))
+            else:
+                cur = str((state.get("settings_fields") or {}).get(key, ""))
+            _te(state).focus(cur)
             return None
     return None
 
@@ -432,13 +453,14 @@ def handle_textinput(state, text: str) -> bool:
     ef = state.get("_edit_field")
     if not (ef and state.get("show")):
         return False
+    te = _te(state)
     if str(ef).startswith("g:"):
         gkey = str(ef)[2:]
         gfields = state.setdefault("global_fields", {})
-        gfields[gkey] = str(gfields.get(gkey, "")) + t
+        gfields[gkey] = te.insert(str(gfields.get(gkey, "")), t)
     else:
         fields = state.setdefault("settings_fields", {})
-        fields[ef] = str(fields.get(ef, "")) + t
+        fields[ef] = te.insert(str(fields.get(ef, "")), t)
     return True
 
 
@@ -454,21 +476,26 @@ def handle_keydown(state, event) -> bool:
         return True
     ef = state.get("_edit_field")
     if ef:
+        te = _te(state)
         if str(ef).startswith("g:"):
             gkey = str(ef)[2:]
             gfields = state.setdefault("global_fields", {})
-            if key == pygame.K_BACKSPACE:
-                gfields[gkey] = str(gfields.get(gkey, ""))[:-1]
-                return True
             if key == pygame.K_RETURN:
                 state.pop("_edit_field", None)
                 return True
+            nt, handled = te.keydown(str(gfields.get(gkey, "")), event)
+            if handled:
+                gfields[gkey] = nt
+                return True
+            return True
         else:
             fields = state.setdefault("settings_fields", {})
-            if key == pygame.K_BACKSPACE:
-                fields[ef] = str(fields.get(ef, ""))[:-1]
-                return True
             if key == pygame.K_RETURN:
                 state.pop("_edit_field", None)
                 return True
+            nt, handled = te.keydown(str(fields.get(ef, "")), event)
+            if handled:
+                fields[ef] = nt
+                return True
+            return True
     return False

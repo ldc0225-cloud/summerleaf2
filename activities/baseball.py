@@ -15,11 +15,13 @@ activities.baseball — 야구장 맵 필드 타격 미니게임 (어린이 홈�
 
 [모드 — 메뉴]
   혼자서 하기
-    · NPC와 하기(npc_vs / npc_alt) — 플레이어↔NPC 번갈아 타격, 비거리 승점 + 합계비거리 보너스
+    · NPC와 하기(npc_vs / npc_alt) — 플레이어 선택 후 NPC 선택(이미 고른 캐릭터는 어둡게·탭 무반응),
+      플레이어↔NPC 번갈아 타격, 비거리 승점 + 합계비거리 보너스
     · 기록 갱신하기(record_1p / solo_record) — 5타 합산 → HIGH SCORE
   둘이서 하기
     · 번갈아 하기(record_2p / duo_alt) — 1P↔2P 한 타씩 번갈아, 승점 대결
     · 모아서 하기(record_2p / duo_batch) — 각자 횟수만큼 전부 친 뒤 HR+합계비거리 승부
+    · 2P 선택 시 1P가 고른 캐릭터는 어둡게·탭 무반응 (같은 캐릭터 불가)
   story/demo — 이벤트·데모용 (events.json mode 파라미터)
 """
 
@@ -82,7 +84,7 @@ from render_align import blit_topleft_bottom_center
 from data import BASEBALL_DEFAULTS, CONFIG
 from field_runtime import scale_ui_text_px
 
-from .base import BaseFieldActivity, FieldDrawContext
+from .base import BaseFieldActivity, FieldDrawContext, blit_ui_dim
 from .fishing import _world_to_screen
 
 # --- 상태 ---
@@ -3625,12 +3627,32 @@ class BaseballActivity(BaseFieldActivity):
             return False
 
     def _set_char_opts_for_phase(self, phase: str) -> None:
-        """플레이어/NPC 선택 단계에 맞게 그리드 옵션 구성. NPC 단계는 '?' 랜덤 슬롯 추가."""
+        """플레이어/NPC/2P 선택 단계에 맞게 그리드 옵션 구성.
+        NPC 단계는 '?' 랜덤 슬롯을 붙인다. 이미 고른 캐릭터는 목록에서 빼지 않고
+        그리드에 남겨 어둡게 표시한다 (_char_unavailable_as_opponent).
+        """
         base = [c for c in (self._char_opts_base or self._char_opts or []) if c and c != CHAR_PICK_RANDOM]
         if phase == "npc":
             self._char_opts = list(base[:8]) + [CHAR_PICK_RANDOM]
         else:
             self._char_opts = list(base[:8])
+
+    def _char_unavailable_as_opponent(self, cid: str) -> bool:
+        """상대 선택 단계: 1P가 이미 고른 캐릭터는 고를 수 없음 (그리드에는 어둡게 표시).
+        NPC와 하기의 NPC 단계, 둘이서 하기의 2P 단계 모두 동일.
+        """
+        c = str(cid or "").strip()
+        if not c or c == CHAR_PICK_RANDOM:
+            return False
+        phase = str(self._char_pick_phase or "")
+        p1 = str(self._p1_char or "").strip()
+        if not p1:
+            return False
+        if self.mode == MODE_NPC_VS and phase == "npc":
+            return c == p1
+        if self.mode == MODE_RECORD_2P and phase == "2p":
+            return c == p1
+        return False
 
     def _resolve_random_npc_char(self) -> str:
         """'?' 선택 시 — 잠금·1P 제외 풀에서 랜덤."""
@@ -3895,6 +3917,9 @@ class BaseballActivity(BaseFieldActivity):
         if (not is_random) and pick in (self._char_locked or set()):
             self._msg = "잠긴 캐릭터입니다"
             return False
+        # NPC 단계에서 플레이어 캐릭터는 확인창까지 오지 않지만, 혹시 들어와도 거부
+        if self._char_unavailable_as_opponent(pick):
+            return False
         if self.mode == MODE_DEMO:
             self._apply_batter_char(pick)
             self._start_demo_match()
@@ -4036,6 +4061,7 @@ class BaseballActivity(BaseFieldActivity):
         self._char_pick_phase = phase
         self._char_pick_ix = 0
         self._char_pending_ix = None
+        self._set_char_opts_for_phase(phase)
         self.state = ST_PICK_CHAR
         self._msg = msg
 
@@ -4138,6 +4164,10 @@ class BaseballActivity(BaseFieldActivity):
                 if not opts:
                     return False
                 ix = int(ix) % len(opts)
+                pick = str(opts[ix])
+                # 이미 고른 플레이어 캐릭터 — 클릭해도 확인창을 열지 않음
+                if self._char_unavailable_as_opponent(pick):
+                    return True
                 self._char_pick_ix = ix
                 self._char_pending_ix = ix
                 return True
@@ -4461,10 +4491,9 @@ class BaseballActivity(BaseFieldActivity):
                     sy = rect.centery - int(sprite_h * 0.15)
                     self._blit_idle_frame(surf, frames, (rect.centerx, sy), sprite_h)
                     locked = cid in (self._char_locked or set())
-                    if locked:
-                        dim2 = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-                        dim2.fill((0, 0, 0, 130))
-                        surf.blit(dim2, (rect.left, rect.top))
+                    taken = self._char_unavailable_as_opponent(cid)
+                    if locked or taken:
+                        blit_ui_dim(surf, rect)
                     lbl_txt = "???" if locked else self._char_label(cid)
                     lbl = small.render(lbl_txt, True, (210, 225, 245))
                     ly = rect.bottom - lbl.get_height() - 2

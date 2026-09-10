@@ -35,6 +35,16 @@ class FieldActivityHost:
         except Exception:
             return True
 
+    def freeze_field(self) -> bool:
+        """활성 세션이 월드 시뮬(이동·애니)까지 멈추길 원할 때 True."""
+        if not self.is_active:
+            return False
+        try:
+            fn = getattr(self._session, "freeze_field", None)
+            return bool(fn()) if callable(fn) else False
+        except Exception:
+            return False
+
     def blocks_zone_confirm(self) -> bool:
         if not self.is_active:
             return False

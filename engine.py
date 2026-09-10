@@ -3,7 +3,7 @@ import heapq
 from collections import deque, OrderedDict
 from weakref import WeakKeyDictionary
 
-from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES
+from data import CONFIG, OBJ_ASSETS, CHAR_ASSETS, UI_FONT_FILES, iter_music_assets, music_dir, music_file_relpath
 try:
     from android_fix import resolve_asset_dir, resolve_asset_path
 except Exception:
@@ -17,7 +17,11 @@ except Exception:
         except Exception:
             pass
         return None
-from flow import evaluate_event_step_condition, evaluate_global_condition
+from flow import (
+    condition_step_chain_mode,
+    evaluate_event_step_condition,
+    evaluate_global_condition,
+)
 from render_align import (
     blit_topleft_bottom_center,
     blit_topleft_center_on_pixel,
@@ -768,10 +772,34 @@ def _clamp_wall_angle_deg(v):
     return a
 
 
-def field_wall_angle_active(angle_deg) -> bool:
-    """0°(빌보드)가 아니면 벽 컬럼 렌더 사용."""
+def field_wall_3d_flag(v) -> bool:
+    """
+    world_data/object_defs 의 wall_3d.
+    True면 wall_angle이 0°(+X)여도 벽 컬럼(3D_ROTATE 열 원근)을 쓴다.
+    기본 False — 모든 오브젝트에 열 렌더를 켜면 비용이 커서 인스턴스마다 지정.
+    """
+    if v is True:
+        return True
+    if v is False or v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ("1", "true", "t", "yes", "y", "on")
+
+
+def field_wall_angle_active(angle_deg, force=False) -> bool:
+    """벽 컬럼 렌더: 각도가 0°가 아니거나 wall_3d(force)가 True."""
+    if force:
+        return True
     a = _clamp_wall_angle_deg(angle_deg)
     return min(a, 360.0 - a) > 0.05
+
+
+def field_item_is_wall(obj) -> bool:
+    """FieldItem 벽 컬럼 여부. wall_3d 또는 wall_angle≠0."""
+    if obj is None:
+        return False
+    force = field_wall_3d_flag(getattr(obj, "wall_3d", False))
+    return field_wall_angle_active(getattr(obj, "wall_angle", 0.0), force=force)
 
 
 def field_wall_dir_xy(angle_deg):
@@ -1027,6 +1055,86 @@ def get_cached_scaled_sprite(image, eff_zoom: float, sprite_perspective_q=None, 
     return out
 
 
+def blit_change_ghost_at_feet(
+    screen,
+    ghost,
+    feet_x,
+    feet_y,
+    *,
+    zoom=1.0,
+    sprite_tilt=1.0,
+    sprite_perspective_q=None,
+):
+    """
+    CHANGE 크로스페이드: 교체 직전 스프라이트를 발 앵커로 겹쳐 그린다.
+    ghost = {"img": Surface, "alpha": 0~255, "eff_z": 배율(없으면 zoom)}.
+    """
+    if screen is None or not isinstance(ghost, dict):
+        return
+    img = ghost.get("img")
+    if img is None:
+        return
+    try:
+        a = int(ghost.get("alpha", 0) or 0)
+    except (TypeError, ValueError):
+        a = 0
+    if a <= 0:
+        return
+    try:
+        gz = float(ghost.get("eff_z", zoom) or zoom)
+    except (TypeError, ValueError):
+        gz = float(zoom)
+    if gz <= 1e-6:
+        return
+    render = get_cached_scaled_sprite(
+        img,
+        gz,
+        sprite_perspective_q=sprite_perspective_q,
+        sprite_tilt=float(sprite_tilt),
+    )
+    if render is None:
+        return
+    if a < 255:
+        try:
+            render = render.copy()
+            render.set_alpha(max(0, min(255, a)))
+        except Exception:
+            pass
+    fpx, fpy = int(round(float(feet_x))), int(round(float(feet_y)))
+    dx, dy = blit_topleft_bottom_center(
+        fpx, fpy, render.get_width(), render.get_height()
+    )
+    try:
+        screen.blit(render, (dx, dy))
+    except Exception:
+        pass
+
+
+def snapshot_change_ghost(entity):
+    """CHANGE 직전 프레임을 복사해 크로스페이드 ghost dict 로 남긴다."""
+    img = getattr(entity, "image", None)
+    if img is None:
+        return None
+    try:
+        snap = img.copy()
+    except Exception:
+        snap = img
+    try:
+        a = int(getattr(entity, "alpha", 255) or 255)
+    except (TypeError, ValueError):
+        a = 255
+    return {"img": snap, "alpha": max(0, min(255, a))}
+
+
+def _clear_entity_change_ghost(entity):
+    if entity is None:
+        return
+    try:
+        entity._change_ghost = None
+    except Exception:
+        pass
+
+
 def _normalize_ysort_mode(v):
     """
     y-sorting 기준:
@@ -1042,27 +1150,60 @@ def _normalize_ysort_mode(v):
     return "ground"
 
 
+def _scan_music_folder(rel_dir):
+    """폴더 안의 mp3/ogg/wav → {파일명(확장자 제외): 경로}."""
+    out = {}
+    base_dir = resolve_asset_dir(rel_dir)
+    if not base_dir:
+        return out
+    try:
+        for fn in sorted(os.listdir(base_dir)):
+            if not fn:
+                continue
+            low = fn.lower()
+            if not (low.endswith(".mp3") or low.endswith(".ogg") or low.endswith(".wav")):
+                continue
+            name = os.path.splitext(fn)[0]
+            out[name] = os.path.join(base_dir, fn)
+    except Exception:
+        return out
+    return out
+
+
 def _scan_music_library():
     """
-    assets/musics 폴더를 스캔해서 {display_name: abs_path} 형태로 반환.
-    - display_name: 확장자 제거 파일명
+    BGM 라이브러리 {id: abs_path}.
+    1) data.MUSIC_ASSETS 등록 키 (이벤트 music 필드)
+    2) 파일명 스템 별칭 (예전 이벤트·한글 파일명 호환)
+    3) MUSIC_INCLUDE_UNREGISTERED 이면 폴더에만 있는 곡도 파일명으로
     """
     out = {}
-    for rel in (os.path.join("assets", "musics"), os.path.join("assets", "music")):
-        base_dir = resolve_asset_dir(rel)
-        if not base_dir:
+    try:
+        include_unreg = bool(CONFIG.get("MUSIC_INCLUDE_UNREGISTERED", True))
+    except Exception:
+        include_unreg = True
+
+    for mid, filename, _title in iter_music_assets():
+        rel = music_file_relpath(filename)
+        if not rel:
             continue
+        path = resolve_asset_path(rel)
         try:
-            for fn in sorted(os.listdir(base_dir)):
-                if not fn:
-                    continue
-                low = fn.lower()
-                if not (low.endswith(".mp3") or low.endswith(".ogg") or low.endswith(".wav")):
-                    continue
-                name = os.path.splitext(fn)[0]
-                out[name] = os.path.join(base_dir, fn)
+            ok = bool(path) and os.path.isfile(path)
         except Exception:
+            ok = False
+        if not ok:
             continue
+        out[mid] = path
+        stem = os.path.splitext(os.path.basename(str(filename).replace("\\", "/")))[0]
+        if stem and stem not in out:
+            out[stem] = path
+
+    if include_unreg:
+        for rel in (music_dir(), os.path.join("assets", "music")):
+            for name, path in _scan_music_folder(rel).items():
+                if name not in out:
+                    out[name] = path
     return out
 
 
@@ -1120,6 +1261,32 @@ def vertical_top_shear_merged_plan(surface_h: int, shear_px: int, slice_h: int):
     except Exception:
         pass
     return plan
+
+
+def flip_vertical_top_shear_plan(plan, shear_px):
+    """정상 쉬어 계획(위→오른쪽)을 리버스(위→왼쪽)로 뒤집기.
+
+    정상: top dx=shear_px, bottom dx=0
+    리버스: top dx=0, bottom dx=shear_px
+    blit_x=bg 이면 위가 왼쪽으로 보임. blit_x=bg-shear(뷰포트 확장)여도 상대 방향은 동일.
+    스프라이트 x_offset 은 field_runtime.shear_screen_x_offset 로 blit 방식에 맞춰 계산.
+    """
+    if not plan:
+        return plan
+    try:
+        spx = int(shear_px)
+    except Exception:
+        return plan
+    if spx <= 0:
+        return plan
+    out = []
+    for item in plan:
+        try:
+            yy, hh, dxs = item
+            out.append((int(yy), int(hh), int(spx) - int(dxs)))
+        except Exception:
+            return plan
+    return tuple(out)
 
 
 def apply_vertical_top_shear(dst, src, shear_px, slice_h, *, plan=None, clear_dst=True):
@@ -2823,6 +2990,7 @@ def _shear_surface_by_field_xoffset(
 class MusicManager:
     """
     pygame.mixer.music 기반의 간단 BGM 관리자.
+    트랙 ID는 data.MUSIC_ASSETS (assets/musics). MUSIC_PLAY music 필드와 동일.
     요구 기능:
     - 곡 시작 페이드인
     - 곡 종료/전환 페이드아웃(명령 기반)
@@ -2837,6 +3005,11 @@ class MusicManager:
         self.current_path = None
         self._queued = None  # dict or None: {"name":..., "fade_in_ms":..., "loop":..., "volume":...}
         self._paused = False
+        self._volume = 1.0  # 최근 의도 볼륨 (뮤트 해제 시 복구)
+        self._user_muted = False  # 설정창 "음악 끄고켜기" — 재생은 유지·볼륨만 0
+        # 소프트웨어 페이드인 — SDL Mix_FadeInMusic 이 포맷/플랫폼에서 무시되는 경우가 있어
+        # update() 에서 set_volume 보간. {"t0_ms", "dur_ms", "target"}
+        self._fade_in = None
         try:
             n = len(self.library)
             if n <= 0:
@@ -2865,6 +3038,47 @@ class MusicManager:
     def get_title(self):
         return self.current_name
 
+    def _clear_fade_in(self):
+        self._fade_in = None
+
+    def _fade_in_progress_01(self):
+        """진행 중 페이드인 비율 0~1. 없으면 None."""
+        fi = self._fade_in
+        if not fi:
+            return None
+        try:
+            dur = max(1, int(fi.get("dur_ms") or 1))
+            elapsed = int(pygame.time.get_ticks()) - int(fi.get("t0_ms") or 0)
+            return max(0.0, min(1.0, float(elapsed) / float(dur)))
+        except Exception:
+            return 1.0
+
+    def _intended_play_volume(self):
+        """뮤트 전 의도 출력 볼륨(페이드인 진행 반영)."""
+        u = self._fade_in_progress_01()
+        target = float(self._volume)
+        fi = self._fade_in
+        if fi is not None:
+            try:
+                target = float(fi.get("target", target))
+            except (TypeError, ValueError):
+                pass
+        if u is None:
+            return max(0.0, min(1.0, target))
+        return max(0.0, min(1.0, target * float(u)))
+
+    def _apply_out_volume(self, vol=None):
+        """실제 mixer 볼륨 적용. vol=None 이면 의도 볼륨(+뮤트) 사용."""
+        try:
+            if vol is None:
+                base = self._intended_play_volume()
+            else:
+                base = max(0.0, min(1.0, float(vol)))
+            out = 0.0 if self._user_muted else base
+            pygame.mixer.music.set_volume(max(0.0, min(1.0, out)))
+        except Exception:
+            pass
+
     def _load_and_play(self, name, fade_in_ms=0, loop=False, volume=None):
         path = self.library.get(name)
         if not path:
@@ -2876,8 +3090,20 @@ class MusicManager:
                 return False
             pygame.mixer.music.load(path)
             if volume is not None and volume != "":
-                pygame.mixer.music.set_volume(max(0.0, min(1.0, float(volume))))
-            pygame.mixer.music.play(-1 if loop else 0, fade_ms=max(0, int(fade_in_ms or 0)))
+                self._volume = max(0.0, min(1.0, float(volume)))
+            fade_ms = max(0, int(fade_in_ms or 0))
+            # 볼륨 0에서 시작해 update() 보간 — SDL fade_ms 에 의존하지 않음
+            if fade_ms > 0:
+                self._fade_in = {
+                    "t0_ms": int(pygame.time.get_ticks()),
+                    "dur_ms": fade_ms,
+                    "target": float(self._volume),
+                }
+                self._apply_out_volume(0.0)
+            else:
+                self._clear_fade_in()
+                self._apply_out_volume(float(self._volume))
+            pygame.mixer.music.play(-1 if loop else 0)
             self.current_name = name
             self.current_path = path
             self._paused = False
@@ -2886,9 +3112,31 @@ class MusicManager:
             print(f"[MUSIC] load/play failed: {name} ({e})")
             return False
 
+    def play_if_changed(self, name, fade_in_ms=400, loop=True, volume=None):
+        """같은 곡이 이미 재생 중이면 건드리지 않음. 맵 기본 BGM·이벤트 종료 복귀에 사용."""
+        if not name:
+            return False
+        try:
+            same = str(self.current_name or "") == str(name)
+            busy = bool(pygame.mixer.music.get_busy()) and not self._paused
+        except Exception:
+            same, busy = False, False
+        if same and busy:
+            return True
+        if same and self._paused:
+            self.resume()
+            return True
+        return self.play(
+            name,
+            fade_in_ms=fade_in_ms,
+            loop=bool(loop),
+            volume=volume,
+            queue_after_current=False,
+        )
+
     def play(self, name, fade_in_ms=0, loop=False, volume=None, queue_after_current=True):
         """
-        - queue_after_current=True: 지금 곡이 재생 중이면 끝난 뒤 재생(요구사항)
+        - queue_after_current=True: 지금 곡이 재생 중이면 끝난 뒤 재생
         - queue_after_current=False: 즉시 교체(기존 곡은 stop 후 새 곡 시작)
         """
         if not name:
@@ -2929,6 +3177,7 @@ class MusicManager:
         """페이드아웃 후 정지."""
         self._queued = None
         self._paused = False
+        self._clear_fade_in()
         try:
             pygame.mixer.music.fadeout(max(0, int(fade_out_ms or 0)))
         except Exception:
@@ -2943,6 +3192,7 @@ class MusicManager:
         """즉시 정지."""
         self._queued = None
         self._paused = False
+        self._clear_fade_in()
         try:
             pygame.mixer.music.stop()
         except Exception:
@@ -2964,8 +3214,53 @@ class MusicManager:
         except Exception:
             pass
 
+    def is_user_muted(self) -> bool:
+        """설정창에서 끈 BGM(볼륨 0) 상태."""
+        return bool(self._user_muted)
+
+    def set_user_muted(self, muted: bool) -> bool:
+        """True=음악 끔(볼륨 0), False=이전 볼륨으로 켬. 반환=현재 뮤트 여부."""
+        want = bool(muted)
+        if want == bool(self._user_muted):
+            return bool(self._user_muted)
+        if want:
+            # 페이드인 중이면 중간 볼륨으로 _volume 을 덮지 않음(타깃 유지)
+            if self._fade_in is None:
+                try:
+                    cur = float(pygame.mixer.music.get_volume())
+                    if cur > 1e-6:
+                        self._volume = max(0.0, min(1.0, cur))
+                except Exception:
+                    pass
+            self._user_muted = True
+            self._apply_out_volume(0.0)
+        else:
+            self._user_muted = False
+            self._apply_out_volume()
+        return bool(self._user_muted)
+
+    def toggle_user_muted(self) -> bool:
+        """뮤트 토글. 반환=토글 후 뮤트 여부."""
+        return self.set_user_muted(not bool(self._user_muted))
+
     def update(self):
-        """매 프레임 호출: 곡이 끝났으면 큐된 곡을 시작."""
+        """매 프레임: 페이드인 볼륨 보간 + 큐된 곡 시작."""
+        fi = self._fade_in
+        if fi is not None:
+            u = self._fade_in_progress_01()
+            if u is None or u >= 1.0:
+                try:
+                    self._volume = float(fi.get("target", self._volume))
+                except (TypeError, ValueError):
+                    pass
+                self._clear_fade_in()
+                self._apply_out_volume(float(self._volume))
+            else:
+                try:
+                    target = float(fi.get("target", self._volume))
+                except (TypeError, ValueError):
+                    target = float(self._volume)
+                self._apply_out_volume(target * float(u))
         if not self._queued:
             return
         try:
@@ -3583,17 +3878,27 @@ def load_fishing_overlay_frames(body_type: str, anim_set: str):
     return list(frames) if frames else []
 
 
-def load_racing_overlay_frames(anim_set: str = "moveinchworm_racing"):
+def load_racing_overlay_frames(anim_set: str = "moveinchworm_racing", facing: str = "left"):
     """
-    공용 레이싱 탈것 오버레이 — assets/images/character/racing/<anim_set>_left/
+    공용 레이싱 탈것 오버레이 — assets/images/character/racing/<anim_set>_<facing>/
     몸(seat_idle) 뒤에 붙는 자벌레 등. 캐릭터별 폴더가 아니라 racing/ 공유.
     anim_set: moveinchworm_racing
+    facing:
+      front — 직진(뒤에서보기 기본)
+      left  — 왼쪽 차선으로 옮기는 중. 오른쪽 이동은 이 세트를 좌우 반전해서 씀.
+    front 폴더가 없으면 left 로 폴백.
     """
     st = str(anim_set or "moveinchworm_racing").strip().lower()
     if not st:
         return []
-    path = os.path.join("assets", "images", "character", "racing", f"{st}_left")
+    face = str(facing or "left").strip().lower()
+    if face not in ("left", "front"):
+        face = "left"
+    path = os.path.join("assets", "images", "character", "racing", f"{st}_{face}")
     frames = _load_anim_dir_cached(path)
+    if not frames and face == "front":
+        path = os.path.join("assets", "images", "character", "racing", f"{st}_left")
+        frames = _load_anim_dir_cached(path)
     return list(frames) if frames else []
 
 
@@ -4021,6 +4326,7 @@ class BaseCharacter:
     def __init__(self, name, pos, info):
         self.name=name
         self.alpha = 255
+        self._change_ghost = None
         self.is_visible = True # 가시성 속성 추가 (모든 캐릭터 공통)
         if isinstance(pos, (list, tuple)):
             # 좌표가 꾸러미 (x, y)로 들어온 경우
@@ -4408,7 +4714,13 @@ class BaseCharacter:
             return None
         idx = int(ov.get("idx") or 0) % len(frames)
         img = frames[idx]
-        if str(getattr(self, "direction", "left") or "left") == "right":
+        # flip_x 키가 있으면 엔티티 direction 대신 오버레이가 직접 좌우를 정한다
+        # (레이싱 자벌레: 오른쪽 차선 이동 때 left 세트를 반전).
+        if "flip_x" in ov:
+            do_flip = bool(ov.get("flip_x"))
+        else:
+            do_flip = str(getattr(self, "direction", "left") or "left") == "right"
+        if do_flip:
             try:
                 img = pygame.transform.flip(img, True, False)
             except Exception:
@@ -4598,7 +4910,8 @@ class BaseCharacter:
             a = int(getattr(self, "alpha", 255))
         except (TypeError, ValueError):
             a = 255
-        if a <= 0:
+        ghost = getattr(self, "_change_ghost", None)
+        if a <= 0 and not ghost:
             return
 
         try:
@@ -4744,7 +5057,18 @@ class BaseCharacter:
                 eff,
                 sprite_perspective_q=sprite_perspective_q,
             )
-        screen.blit(render_img, (dx, dy))
+        if ghost:
+            blit_change_ghost_at_feet(
+                screen,
+                ghost,
+                fpx,
+                fpy,
+                zoom=float(eff),
+                sprite_tilt=getattr(self, "sprite_tilt", 1.0),
+                sprite_perspective_q=sprite_perspective_q,
+            )
+        if a > 0:
+            screen.blit(render_img, (dx, dy))
         # 오버레이(앞): 낚시 낚싯대·야구 배트 등
         if isinstance(ov, dict) and not ov.get("behind"):
             self._draw_sprite_overlay(
@@ -4864,9 +5188,17 @@ class MaskWalkingCharacter(BaseCharacter):
         self._path_plan_seq = 0
         self._path_plan_last_tick_ms = 0
         # FOLLOW용: 매 프레임 A*를 돌리지 않기 위한 간단 추종 타겟
-        self._follow_target = None  # (x,y) or None
-        self._follow_slot_goal = None  # 리더 뒤 목표 슬롯; 도랑 점프 경로 덮어쓰기 방지용
+        self._follow_target = None  # (x,y) or None — reconnect A* 목표
+        self._follow_slot_goal = None
         self._follow_last_plan_ms = 0
+        # FOLLOW 트레일: 리더는 _follow_trail 에 발자국, 팔로워는 _follow_next_id 로 따라감
+        self._follow_trail = None  # [(sid, x, y, tag), ...] tag 0=걷기 1=점프착지
+        self._follow_trail_sid = 0
+        self._follow_trail_gen = 0
+        self._follow_trail_was_jump = False
+        self._follow_next_id = 0
+        self._follow_trail_seen_gen = None
+        self._follow_reconnect_ms = 0
         # 캐릭터/오브젝트 자연 회피(동적 A* 재계획) 상태 — 효율 위해 쿨다운/횟수 제한
         self._avoid_block_since_ms = 0   # 현재 막힘이 시작된 시각(0=안 막힘)
         self._avoid_replans = 0          # 연속 막힘 동안 누적 재계획 횟수
@@ -5820,13 +6152,86 @@ class MaskWalkingCharacter(BaseCharacter):
         self.state = "idle"
         return True
 
+    def follow_trail_clear(self):
+        """리더 발자국 트레일 리셋. 맵 전환·순간이동·동행 해제 시."""
+        self._follow_trail = []
+        self._follow_trail_was_jump = False
+        try:
+            self._follow_trail_gen = int(getattr(self, "_follow_trail_gen", 0) or 0) + 1
+        except Exception:
+            self._follow_trail_gen = 1
+
+    def follow_trail_sample(self):
+        """
+        리더가 실제로 서 있는 지면 좌표를 트레일에 남긴다.
+        시간은 쓰지 않고 SAMPLE_PX 이동마다 1점 — FPS/부하와 무관하게 경로 모양이 같다.
+        점프 시작 시 착지점을 tag=1 로 넣어 팔로워가 같은 도랑을 넘게 한다.
+        """
+        try:
+            lx, ly = float(self.pos[0]), float(self.pos[1])
+        except Exception:
+            return
+        trail = getattr(self, "_follow_trail", None)
+        if trail is None:
+            trail = []
+            self._follow_trail = trail
+        try:
+            sample_px = float(CONFIG.get("FOLLOW_TRAIL_SAMPLE_PX", 10) or 10)
+        except Exception:
+            sample_px = 10.0
+        sample_px = max(4.0, sample_px)
+        try:
+            max_n = int(CONFIG.get("FOLLOW_TRAIL_MAX_POINTS", 240) or 240)
+        except Exception:
+            max_n = 240
+        max_n = max(16, max_n)
+        try:
+            break_px = float(CONFIG.get("FOLLOW_TRAIL_BREAK_PX", 96) or 96)
+        except Exception:
+            break_px = 96.0
+
+        def _append(x, y, tag):
+            buf = getattr(self, "_follow_trail", None)
+            if buf is None:
+                buf = []
+                self._follow_trail = buf
+            sid = int(getattr(self, "_follow_trail_sid", 0) or 0)
+            buf.append((sid, float(x), float(y), int(tag)))
+            self._follow_trail_sid = sid + 1
+            while len(buf) > max_n:
+                buf.pop(0)
+
+        jumping = getattr(self, "_jump_arc", None) is not None
+        was = bool(getattr(self, "_follow_trail_was_jump", False))
+        if jumping and not was:
+            ja = getattr(self, "_jump_arc", None) or {}
+            try:
+                _append(float(ja.get("ex", lx)), float(ja.get("ey", ly)), 1)
+            except Exception:
+                _append(lx, ly, 1)
+            self._follow_trail_was_jump = True
+            return
+        if jumping:
+            self._follow_trail_was_jump = True
+            return
+        self._follow_trail_was_jump = False
+        if not trail:
+            _append(lx, ly, 0)
+            return
+        _sid, px, py, _tg = trail[-1]
+        gap = math.hypot(lx - float(px), ly - float(py))
+        if gap >= break_px:
+            self.follow_trail_clear()
+            _append(lx, ly, 0)
+            return
+        if gap < sample_px:
+            return
+        _append(lx, ly, 0)
+
     def follow_step(self, leader_pos, desired_dist, mask_img, objects, npcs, speed_mul=1.0, leader=None):
         """
-        FOLLOW: 리더 뒤 슬롯 (tx, ty)만 목표로 잡고, 이동·도랑 점프는 MOVE와 동일하게
-        set_new_target(A*) + move() 규칙을 사용한다.
-        A*는 FOLLOW_REPLAN_MS / FOLLOW_REPLAN_DIST_PX / 슬롯 양자화로 스로틀한다.
-        자기 점프·점프 태그 경로 중에는 재계획하지 않는다. 리더가 공중(_jump_arc)일 때는
-        슬롯이 프레임마다 크게 튀어 재계획이 폭주하지 않도록 거리 트리거만 끈다(시간만).
+        FOLLOW: 리더 발자국 트레일을 따라 이동. 평소 A* 없음.
+        홀드 직전 몇 점만 path 로 걸어 등속 이동. 홀드에서 멀면 바로 붙음(옛 트레일 되밟기 금지).
         """
         try:
             self.event_speed_mul = float(speed_mul)
@@ -5834,72 +6239,218 @@ class MaskWalkingCharacter(BaseCharacter):
             pass
         if not leader_pos:
             return
-        lx, ly = float(leader_pos[0]), float(leader_pos[1])
-        sx, sy = float(self.pos[0]), float(self.pos[1])
-        dx, dy = lx - sx, ly - sy
-        dnow = math.hypot(dx, dy)
-        if dnow <= float(desired_dist or 0):
-            sm = getattr(self, "stop_moving", None)
-            if callable(sm):
-                sm()
-            return
-
-        # 리더 방향으로 desired_dist 만큼 뒤에 위치한 점을 목표로
-        if dnow < 1e-6:
-            return
-        ux, uy = dx / dnow, dy / dnow
-        tx = lx - ux * float(desired_dist)
-        ty = ly - uy * float(desired_dist)
         try:
-            q = float(CONFIG.get("FOLLOW_SLOT_QUANTIZE_PX", 0) or 0)
+            lx, ly = float(leader_pos[0]), float(leader_pos[1])
         except Exception:
-            q = 0.0
-        if q > 0:
-            tx = round(tx / q) * q
-            ty = round(ty / q) * q
-        self._follow_target = (tx, ty)
-        if abs(tx - sx) > 0.1:
-            self.direction = "left" if tx < sx else "right"
+            return
+        sx, sy = float(self.pos[0]), float(self.pos[1])
+        try:
+            dist = float(desired_dist or 0)
+        except Exception:
+            dist = 0.0
+        try:
+            slot_arrive = float(CONFIG.get("FOLLOW_SLOT_ARRIVE_PX", 12) or 12)
+        except Exception:
+            slot_arrive = 12.0
+        try:
+            on_pt = float(CONFIG.get("FOLLOW_TRAIL_ARRIVE_PX", 2.5) or 2.5)
+        except Exception:
+            on_pt = 2.5
+        on_pt = max(1.5, min(4.0, on_pt))
+        try:
+            reconnect_px = float(CONFIG.get("FOLLOW_TRAIL_RECONNECT_PX", 48) or 48)
+        except Exception:
+            reconnect_px = 48.0
+        try:
+            reconnect_ms = int(CONFIG.get("FOLLOW_TRAIL_RECONNECT_MS", 400) or 400)
+        except Exception:
+            reconnect_ms = 400
+        try:
+            look_n = int(CONFIG.get("FOLLOW_TRAIL_LOOKAHEAD", 6) or 6)
+        except Exception:
+            look_n = 6
+        look_n = max(2, min(16, look_n))
+
+        d_lead = math.hypot(lx - sx, ly - sy)
+        trail = None
+        if leader is not None:
+            trail = getattr(leader, "_follow_trail", None)
+        if not isinstance(trail, list):
+            trail = []
+
+        def _radial_slot():
+            if d_lead < 1e-6:
+                return (sx, sy)
+            ux, uy = (lx - sx) / d_lead, (ly - sy) / d_lead
+            tx = lx - ux * dist
+            ty = ly - uy * dist
+            try:
+                q = float(CONFIG.get("FOLLOW_SLOT_QUANTIZE_PX", 0) or 0)
+            except Exception:
+                q = 0.0
+            if q > 0:
+                tx = round(tx / q) * q
+                ty = round(ty / q) * q
+            return (float(tx), float(ty))
+
+        def _hold_i():
+            n = len(trail)
+            if n <= 0:
+                return None
+            if n == 1 or dist <= 1e-6:
+                return 0
+            acc = 0.0
+            i = n - 1
+            while i > 0:
+                _a, x0, y0, _t0 = trail[i]
+                _b, x1, y1, _t1 = trail[i - 1]
+                acc += math.hypot(float(x0) - float(x1), float(y0) - float(y1))
+                if acc >= dist:
+                    return i - 1
+                i -= 1
+            return 0
+
+        def _trail_arclen():
+            acc = 0.0
+            for i in range(1, len(trail)):
+                _a, x0, y0, _t0 = trail[i]
+                _b, x1, y1, _t1 = trail[i - 1]
+                acc += math.hypot(float(x0) - float(x1), float(y0) - float(y1))
+            return acc
+
+        def _index_for_id(next_id):
+            for i, pt in enumerate(trail):
+                if int(pt[0]) >= int(next_id):
+                    return i
+            return len(trail) - 1 if trail else None
+
+        def _pts_from(i0, i1):
+            out = []
+            hi = min(len(trail), int(i1) + 1)
+            for k in range(max(0, int(i0)), hi):
+                _sid, x, y, tg = trail[k]
+                out.append((float(x), float(y), int(tg)))
+            return out
+
+        def _set_trail_polyline(pts):
+            """남은 트레일을 path 에 이어 넣는다. move()가 CHAR_SPEED 로 등속 이동.
+            첫 점이 같으면 현재 구간을 유지하고 뒤만 갱신(매 프레임 리셋하면 덜컥임)."""
+            if not pts:
+                return
+            path = getattr(self, "path", None) or []
+            if path:
+                pr = path[0]
+                if math.hypot(float(pr[0]) - float(pts[0][0]), float(pr[1]) - float(pts[0][1])) <= 1.5:
+                    self.path = [pr] + list(pts[1:])
+                    last = self.path[-1]
+                    self.target = [float(last[0]), float(last[1])]
+                    return
+            self._path_plan_job = None
+            self.path = list(pts)
+            last = pts[-1]
+            self.target = [float(last[0]), float(last[1])]
+            if abs(float(pts[0][0]) - sx) > 0.1:
+                self.direction = "left" if float(pts[0][0]) < sx else "right"
+            if int(pts[0][2]) != 1:
+                self.state = "run" if str(getattr(self, "_move_mode", "walk")) == "run" else "walk"
+
+        def _reconnect_to(tx, ty, *, force=False):
+            now_ms = pygame.time.get_ticks()
+            if not force and getattr(self, "_path_plan_job", None) is not None:
+                return
+            last = int(getattr(self, "_follow_reconnect_ms", 0) or 0)
+            if not force and (now_ms - last) < reconnect_ms and (getattr(self, "path", None) or []):
+                return
+            self._follow_reconnect_ms = int(now_ms)
+            self._follow_target = (float(tx), float(ty))
+            if mask_img:
+                self.set_new_target(tx, ty, mask_img, objects or [], npcs or [])
+            else:
+                self.path = [(float(tx), float(ty), 0)]
 
         if self._jump_arc is not None:
             return
         path = getattr(self, "path", None) or []
-        if path and any(len(p) >= 3 and int(p[2]) == 1 for p in path):
+        # 지금 점프 중인 웨이포인트만 건드리지 않음 (뒤에 점프가 있어도 앞 구간은 갱신)
+        if path and len(path[0]) >= 3 and int(path[0][2]) == 1:
             return
 
-        # FOLLOW도 일반 이동 규칙(A* + 동일 move/점프)을 그대로 사용.
-        now_ms = pygame.time.get_ticks()
-        replan_ms = int(CONFIG.get("FOLLOW_REPLAN_MS", 180))
-        try:
-            replan_dist = float(CONFIG.get("FOLLOW_REPLAN_DIST_PX", 18.0))
-        except Exception:
-            replan_dist = 18.0
-
-        leader_jumping = leader is not None and getattr(leader, "_jump_arc", None) is not None
-
-        need_plan = False
-        if not path:
-            need_plan = True
-        if (now_ms - int(getattr(self, "_follow_last_plan_ms", 0) or 0)) >= replan_ms:
-            need_plan = True
-        elif self._follow_slot_goal is None:
-            need_plan = True
-        elif not leader_jumping:
-            if math.hypot(
-                float(tx) - float(self._follow_slot_goal[0]), float(ty) - float(self._follow_slot_goal[1])
-            ) >= replan_dist:
-                need_plan = True
-
-        if not need_plan:
+        # 트레일이 짧으면(리더가 아직 dist 만큼 안 움직임) 사거리 안에서는 대기
+        short_trail = (not trail) or (_trail_arclen() < dist * 0.5)
+        if short_trail and d_lead <= dist + slot_arrive:
+            if getattr(self, "_path_plan_job", None) or path:
+                sm = getattr(self, "stop_moving", None)
+                if callable(sm):
+                    sm()
+            return
+        if short_trail:
+            tx, ty = _radial_slot()
+            if math.hypot(tx - sx, ty - sy) <= slot_arrive:
+                return
+            _reconnect_to(tx, ty)
             return
 
-        self._follow_slot_goal = (float(tx), float(ty))
-        self._follow_last_plan_ms = int(now_ms)
-        if mask_img:
-            # 목표만 리더 기반으로 잡고, 이동/점프 법칙은 set_new_target와 동일하게
-            self.set_new_target(tx, ty, mask_img, objects or [], npcs or [])
-        else:
-            self.path = [(float(tx), float(ty), 0)]
+        hold_i = _hold_i()
+        if hold_i is None:
+            return
+        hx, hy = float(trail[hold_i][1]), float(trail[hold_i][2])
+        d_hold = math.hypot(hx - sx, hy - sy)
+
+        gen = int(getattr(leader, "_follow_trail_gen", 0) or 0)
+        if getattr(self, "_follow_trail_seen_gen", None) != gen:
+            self._follow_trail_seen_gen = gen
+            self._follow_next_id = int(trail[hold_i][0])
+
+        # 오래된 점이 잘려도 트레일 맨 앞을 되밟지 않음 — 홀드로 붙음
+        first_sid = int(trail[0][0])
+        if int(getattr(self, "_follow_next_id", 0) or 0) < first_sid:
+            self._follow_next_id = int(trail[hold_i][0])
+
+        i = _index_for_id(self._follow_next_id)
+        if i is None:
+            return
+        if i > hold_i:
+            i = hold_i
+
+        path = getattr(self, "path", None) or []
+        if path:
+            px0, py0 = float(path[0][0]), float(path[0][1])
+            for k in range(i, hold_i + 1):
+                if math.hypot(float(trail[k][1]) - px0, float(trail[k][2]) - py0) <= 1.5:
+                    i = k
+                    self._follow_next_id = int(trail[k][0])
+                    break
+
+        # 홀드가 더 가까우면 앞 트레일을 포기 (리더 근처에서 맵 전체를 되걷지 않음)
+        d_i = math.hypot(float(trail[i][1]) - sx, float(trail[i][2]) - sy)
+        if d_hold + 8.0 < d_i:
+            i = hold_i
+            self._follow_next_id = int(trail[hold_i][0])
+            d_i = d_hold
+
+        # 홀드까지 직선이 멀면 바로 붙기
+        if d_hold > reconnect_px:
+            _reconnect_to(hx, hy, force=True)
+            return
+        if getattr(self, "_path_plan_job", None) is not None:
+            self._path_plan_job = None
+
+        while i < hold_i and math.hypot(float(trail[i][1]) - sx, float(trail[i][2]) - sy) <= on_pt:
+            self._follow_next_id = int(trail[i][0]) + 1
+            i += 1
+
+        # 옛 점을 너무 많이 넣지 않음 — 홀드 직전 look_n 점만 등속 보행
+        if hold_i - i > look_n:
+            i = hold_i - look_n
+            self._follow_next_id = int(trail[i][0])
+
+        if i >= hold_i and d_hold <= on_pt:
+            if path:
+                self.path = []
+                self.state = "idle"
+            return
+
+        _set_trail_polyline(_pts_from(i, hold_i))
 
     def _fire_jump_pad_hooks(self, mask_img, objects, npcs):
         """건반 오브젝트 / 맵 jump_pads 존(미니게임·리듬 확장용)."""
@@ -6497,14 +7048,21 @@ def blit_field_wall_sprite(
     view_w=None,
     alpha=255,
     native_w=None,
+    force=False,
 ):
     """
     맵 XY 임의 각도 밑변 + 세로 픽셀은 화면 위(빌보드와 호환)인 스프라이트 벽.
     wall_angle 0°=+X, 90°=+Y. current_img 는 원본(또는 FX 적용) 비트맵.
+    force=True(wall_3d) 이면 0°여도 컬럼 렌더.
+
+    3D_ROTATE(Mode7): 열마다 월드 점을 투영한다.
+      · 높이 = 그 점의 깊이 스케일 (가까운 쪽 크고 먼 쪽 작음)
+      · 가로 = 인접 열 화면 X 간격 (1px 고정이면 가까운 쪽에 빈 줄이 생김)
+    eff_z 는 카메라 줌×엔티티 줌만. Mode7 깊이는 여기에 넣지 않는다.
     """
     if screen is None or current_img is None:
         return False
-    if not field_wall_angle_active(wall_angle_deg):
+    if not field_wall_angle_active(wall_angle_deg, force=bool(force)):
         return False
     try:
         ez = float(eff_z) if eff_z is not None else float(zoom)
@@ -6594,19 +7152,9 @@ def blit_field_wall_sprite(
     if max_sx < -8 or min_sx > screen_w + 8 or max_sy < -8 or min_sy > screen_h + 8:
         return False
 
-    center_scale = 1.0
-    if mode7_ctx:
-        prc = rotate3d_mode7_project(
-            float(world_x), float(world_y), mode7_ctx, height_off=h_world, zoom=z
-        )
-        if prc and prc.get("valid", prc.get("visible")):
-            try:
-                center_scale = max(0.05, float(prc.get("scale", 1.0) or 1.0))
-            except (TypeError, ValueError):
-                center_scale = 1.0
-
-    blit = screen.blit
-    Rect = pygame.Rect
+    # 열 투영 → 인접 열 화면 간격만큼 가로를 늘린다.
+    # i 가 끊기면(카메라 뒤 등) 그 구간은 늘리지 않는다.
+    samples = []
     for i in range(rw):
         along = -half + (float(i) + 0.5) * (w0 / float(rw))
         wx = float(world_x) + along * c
@@ -6622,9 +7170,8 @@ def blit_field_wall_sprite(
             try:
                 sc = max(0.05, float(pr.get("scale", 1.0) or 1.0))
             except (TypeError, ValueError):
-                sc = center_scale
-            # 열 높이만 깊이 스케일(가로는 열 간격이 이미 투영됨)
-            col_h = max(1, int(round(float(rh) * (sc / center_scale))))
+                sc = 1.0
+            col_h = max(1, int(round(float(rh) * sc)))
         else:
             sx, sy = _field_world_to_screen_anchor(
                 wx,
@@ -6643,15 +7190,32 @@ def blit_field_wall_sprite(
                 view_w=vw,
                 anchor="feet",
             )
-        bx = int(round(float(sx)))
-        by = int(round(float(sy))) - int(col_h)
+        samples.append((i, float(sx), float(sy), int(col_h)))
+
+    blit = screen.blit
+    Rect = pygame.Rect
+    n_s = len(samples)
+    max_col_w = max(1, int(screen_w))
+    for k in range(n_s):
+        i, sx, sy, col_h = samples[k]
+        bx = int(round(sx))
+        col_w = 1
+        if k + 1 < n_s and samples[k + 1][0] == i + 1:
+            x0 = bx
+            x1 = int(round(samples[k + 1][1]))
+            if x1 == x0:
+                col_w = 1
+            else:
+                bx = min(x0, x1)
+                col_w = min(max_col_w, abs(x1 - x0))
+        by = int(round(sy)) - int(col_h)
         try:
-            if col_h == rh:
+            if col_w == 1 and col_h == rh:
                 blit(render_img, (bx, by), area=Rect(i, 0, 1, rh))
             else:
                 col = render_img.subsurface(Rect(i, 0, 1, rh))
-                if col_h != rh:
-                    col = pygame.transform.scale(col, (1, col_h))
+                if col_w != 1 or col_h != rh:
+                    col = pygame.transform.scale(col, (int(col_w), int(col_h)))
                 blit(col, (bx, by))
         except Exception:
             pass
@@ -7995,6 +8559,7 @@ class FieldItem:
         ysort_mode=None,
         layer=None,
         wall_angle=None,
+        wall_3d=None,
         zoom=None,
     ):
         from data import OBJ_ASSETS, CONFIG # CONFIG 추가
@@ -8013,6 +8578,10 @@ class FieldItem:
             self.wall_angle = _clamp_wall_angle_deg(wall_angle)
         else:
             self.wall_angle = _clamp_wall_angle_deg(info.get("wall_angle", 0.0))
+        if wall_3d is not None:
+            self.wall_3d = field_wall_3d_flag(wall_3d)
+        else:
+            self.wall_3d = field_wall_3d_flag(info.get("wall_3d", False))
         
         # layer 기능 도입 (기본값 0)
         # 이제 except_ysorting 대신 self.layer 값을 사용합니다.
@@ -8044,6 +8613,8 @@ class FieldItem:
         
         self.is_holdable = info.get("is_holdable", False)
         self.is_visible = True
+        self.alpha = 255
+        self._change_ghost = None
         # progress→events.json 상호작용 (flow.merge_interact_spec, 맵 인스턴스는 load_map 에서 덮어씀)
         self.interact_instance = {}
         try:
@@ -8375,6 +8946,8 @@ class FieldItem:
             ez = 1.0
         eff_z = float(zoom) * ez
         h_world = float(getattr(self, "height", 0) or 0)
+        wall_ang = _clamp_wall_angle_deg(getattr(self, "wall_angle", 0.0))
+        wall_draw = field_item_is_wall(self)
         if mode7_ctx:
             # Mode7: 카메라 앞이면 투영. 가시성은 스케일 확정 후 스프라이트 사각형으로 재판정.
             m7 = rotate3d_mode7_project(
@@ -8384,10 +8957,17 @@ class FieldItem:
                 height_off=h_world,
                 zoom=float(zoom),
             )
-            if not m7 or not m7.get("valid", m7.get("visible")):
-                return
-            eff_z *= float(m7.get("scale", 1.0) or 1.0)
-            dx_base, dy_base = float(m7["sx"]), float(m7["sy"])
+            if wall_draw and not self.is_slot:
+                # 벽: 중심이 카메라 뒤여도 양 끝은 보일 수 있음. 깊이는 blit 열마다.
+                if m7 and m7.get("valid", m7.get("visible")):
+                    dx_base, dy_base = float(m7["sx"]), float(m7["sy"])
+                else:
+                    dx_base, dy_base = -1e6, -1e6
+            else:
+                if not m7 or not m7.get("valid", m7.get("visible")):
+                    return
+                eff_z *= float(m7.get("scale", 1.0) or 1.0)
+                dx_base, dy_base = float(m7["sx"]), float(m7["sy"])
         else:
             # --- [1. 기본 좌표 계산] — FieldItem·Effect(ANIM_ONCE) 공통 규칙 ---
             dx_base, dy_base = _field_world_to_screen_anchor(
@@ -8424,8 +9004,6 @@ class FieldItem:
         # 실제 그려질 이미지의 너비와 높이 (카메라 줌 × 이벤트 엔티티 배율)
         img_w = int(current_img.get_width() * eff_z)
         img_h = int(current_img.get_height() * eff_z)
-        wall_ang = _clamp_wall_angle_deg(getattr(self, "wall_angle", 0.0))
-        wall_draw = field_wall_angle_active(wall_ang)
 
         asc_pre = getattr(self, "auto_scroll", None)
         tile_hscroll = False
@@ -8556,11 +9134,16 @@ class FieldItem:
                 mode7_ctx=mode7_ctx,
                 view_w=view_w,
                 native_w=current_img.get_width(),
+                force=field_wall_3d_flag(getattr(self, "wall_3d", False)),
             )
             draw_object_text_label(screen, self, dx_base, dy_base, eff_z)
             return
 
         # 줌·쉬어·발 앵커 (Effect/ANIM_ONCE 와 동일 — _prepare_field_sprite_blit)
+        try:
+            item_a = int(getattr(self, "alpha", 255))
+        except (TypeError, ValueError):
+            item_a = 255
         prepared = _prepare_field_sprite_blit(
             current_img,
             dx_base,
@@ -8572,6 +9155,7 @@ class FieldItem:
             shear_lod=shear_lod,
             shear_cache_holder=self,
             anchor="feet",
+            alpha=item_a,
         )
         if prepared is None:
             return
@@ -8604,7 +9188,19 @@ class FieldItem:
             screen.blit(render_img, (x0, fy))
             screen.blit(render_img, (x0 + rw, fy))
         else:
-            screen.blit(render_img, (fx, fy))
+            ghost = getattr(self, "_change_ghost", None)
+            if ghost:
+                blit_change_ghost_at_feet(
+                    screen,
+                    ghost,
+                    dx_base,
+                    dy_base,
+                    zoom=float(eff_z),
+                    sprite_tilt=getattr(self, "sprite_tilt", 1.0),
+                    sprite_perspective_q=sprite_perspective_q,
+                )
+            if item_a > 0:
+                screen.blit(render_img, (fx, fy))
         draw_object_text_label(screen, self, dx_base, dy_base, eff_z)
 
     def update(self, player_pos):
@@ -8730,6 +9326,24 @@ def _parse_step_bool_flag(raw, *, default=False) -> bool:
     return bool(raw)
 
 
+def _parse_optional_step_bool(raw):
+    """SAY show_name 등 3상태. None/빈칸=기본값, JSON false 는 False 유지 (bool 과 int 혼동 주의)."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        s2 = raw.strip().lower()
+        if not s2 or s2 in ("—", "-", "default"):
+            return None
+        if s2 in ("1", "true", "t", "yes", "y", "on"):
+            return True
+        if s2 in ("0", "false", "f", "no", "n", "off"):
+            return False
+        return None
+    return bool(raw)
+
+
 def _frame_sec_to_ends_ms(frame_sec, total_sec=None) -> list:
     """프레임별 길이(초) → 누적 종료 시각(ms). total_sec 있으면 비율 유지 스케일."""
     secs: list = []
@@ -8780,13 +9394,173 @@ def _resolve_action_anim_frame_sec(step, anim_name: str):
             items = [float(x) for x in str(raw).split(",") if str(x).strip()]
         except (TypeError, ValueError):
             return None
-    secs = []
-    for x in items:
+    try:
+        secs = [max(0.01, float(x)) for x in items]
+    except (TypeError, ValueError):
+        return None
+    return secs if secs else None
+
+
+def action_anim_persist_spec_from_step(step) -> dict | None:
+    """ACTION_ANIM persist 세이브용 스펙. anim 없으면 None."""
+    if not isinstance(step, dict):
+        return None
+    anim = (step.get("anim") or step.get("name") or step.get("state") or "").strip()
+    if not anim:
+        return None
+    mode = (step.get("mode") or "hold").strip().lower() or "hold"
+    if mode not in ("once", "hold"):
+        mode = "hold"
+    release = (step.get("release") or "idle").strip().lower() or "idle"
+    if release not in ("idle", "stop"):
+        release = "idle"
+    spec = {"anim": anim, "mode": mode, "release": release}
+    if "loop" in step:
+        raw = step.get("loop")
+        if isinstance(raw, str):
+            spec["loop"] = raw.strip().lower() not in ("0", "false", "f", "no", "n", "off", "")
+        else:
+            spec["loop"] = bool(raw)
+    d = (step.get("dir") or step.get("face") or "").strip().lower()
+    if d in ("left", "l"):
+        spec["dir"] = "left"
+    elif d in ("right", "r"):
+        spec["dir"] = "right"
+    if "height" in step and step.get("height") is not None and str(step.get("height")).strip() != "":
         try:
-            secs.append(max(0.0, float(x)))
+            spec["height"] = float(step.get("height"))
         except (TypeError, ValueError):
-            continue
-    return secs or None
+            pass
+    return spec
+
+
+def apply_persisted_action_anim(ent, spec, *, mask=None, objs=None, npcs=None) -> bool:
+    """
+    placed/세이브 action_anim 또는 ACTION_ANIM persist 스펙을 엔티티에 적용.
+    jump+hold 는 가능하면 start_hop(repeat), 아니면 play_anim hold.
+    """
+    if ent is None or not isinstance(spec, dict):
+        return False
+    anim = (spec.get("anim") or spec.get("name") or spec.get("state") or "").strip()
+    if not anim:
+        return False
+    mode = (spec.get("mode") or "hold").strip().lower() or "hold"
+    if mode not in ("once", "hold"):
+        mode = "hold"
+    release = (spec.get("release") or "idle").strip().lower() or "idle"
+    if release not in ("idle", "stop"):
+        release = "idle"
+    anim_l = anim.lower()
+    if "loop" in spec:
+        loop = bool(spec.get("loop"))
+    elif mode == "hold":
+        loop = True
+    else:
+        loop = False
+    d = (spec.get("dir") or "").strip().lower()
+    if d in ("left", "l") and hasattr(ent, "direction"):
+        ent.direction = "left"
+        try:
+            _event_refresh_facing_image(ent)
+        except Exception:
+            pass
+    elif d in ("right", "r") and hasattr(ent, "direction"):
+        ent.direction = "right"
+        try:
+            _event_refresh_facing_image(ent)
+        except Exception:
+            pass
+
+    hop_h = None
+    if anim_l == "jump":
+        if "height" in spec and spec.get("height") is not None:
+            try:
+                hop_h = float(spec.get("height"))
+            except (TypeError, ValueError):
+                hop_h = None
+        if hop_h is None:
+            try:
+                hop_h = float(CONFIG.get("JUMP_ARC_HEIGHT", 50) or 50)
+            except Exception:
+                hop_h = 50.0
+
+    used_hop = False
+    if (
+        anim_l == "jump"
+        and mode == "hold"
+        and hasattr(ent, "start_hop")
+        and callable(getattr(ent, "start_hop", None))
+    ):
+        try:
+            ent.start_hop(
+                arc_h=hop_h,
+                dur_ms=None,
+                land=None,
+                repeat=bool(loop),
+                mask=mask,
+                objs=objs,
+                npcs=npcs,
+            )
+            used_hop = True
+        except Exception as e:
+            print(f"[action_anim persist hop] {e}")
+            used_hop = False
+    if not used_hop:
+        pa = getattr(ent, "play_anim", None)
+        if callable(pa):
+            pa(
+                anim,
+                duration_ms=0 if mode == "hold" else max(50, int(float(spec.get("val") or 1.0) * 1000)),
+                loop=loop if mode == "hold" else False,
+                release=release,
+                temp_height=hop_h if anim_l == "jump" else None,
+            )
+        elif hasattr(ent, "state"):
+            ent.state = anim_l
+
+    clean = {
+        "anim": anim,
+        "mode": mode,
+        "release": release,
+        "loop": bool(loop),
+    }
+    if d in ("left", "right"):
+        clean["dir"] = d
+    if hop_h is not None and anim_l == "jump":
+        clean["height"] = float(hop_h)
+    try:
+        ent._action_anim_persist = True
+        ent._persisted_action_anim = clean
+    except Exception:
+        pass
+    return True
+
+
+def clear_persisted_action_anim(ent) -> None:
+    """ACTION_ANIM persist 해제 + hop/오버라이드 정리."""
+    if ent is None:
+        return
+    try:
+        ent._action_anim_persist = False
+        ent._persisted_action_anim = None
+    except Exception:
+        pass
+    try:
+        if getattr(ent, "_hop_repeat", None):
+            ent._hop_repeat = None
+    except Exception:
+        pass
+    cao = getattr(ent, "clear_anim_override", None)
+    if callable(cao):
+        try:
+            cao()
+        except Exception:
+            pass
+    if hasattr(ent, "state"):
+        try:
+            ent.state = "idle"
+        except Exception:
+            pass
 
 
 def _action_anim_hold_last(step, anim_name: str) -> bool:
@@ -8831,12 +9605,33 @@ def _effect_anim_delay_from_step(step, *, obj_name=None):
 
 
 def _anim_once_pos_from_step(step):
-    """ANIM_ONCE: pos [x,y] 만 사용 (target/anchor 없음)."""
+    """ANIM_ONCE 첫 좌표 (하위 호환)."""
+    pts = _anim_once_positions_from_step(step)
+    return pts[0] if pts else (0.0, 0.0)
+
+
+def _anim_once_positions_from_step(step):
+    """
+    ANIM_ONCE pos:
+    - [x, y] → 한 곳
+    - [[x, y], [x, y], ...] → 같은 애니를 여러 곳에 동시 재생
+    """
     raw = step.get("pos", [0, 0])
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return [(0.0, 0.0)]
+    first = raw[0]
+    if isinstance(first, (list, tuple)):
+        out = []
+        for p in raw:
+            try:
+                out.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return out or [(0.0, 0.0)]
     try:
-        return float(raw[0]), float(raw[1])
+        return [(float(raw[0]), float(raw[1]))]
     except (TypeError, ValueError, IndexError):
-        return 0.0, 0.0
+        return [(0.0, 0.0)]
 
 
 def _parse_carry_step_action(step) -> str:
@@ -8880,9 +9675,16 @@ def _entity_matches_event_target(ent, tn: str) -> bool:
     if iid and iid == t:
         return True
     try:
-        return str(getattr(ent, "name", "") or "") == t
+        if str(getattr(ent, "name", "") or "") == t:
+            return True
     except Exception:
-        return False
+        pass
+    # CHANGE persist 없이 외형만 바뀐 경우 — placed 세이브 키로도 찾는다
+    try:
+        save_nm = str(getattr(ent, "_placed_save_name", "") or "").strip()
+    except Exception:
+        save_nm = ""
+    return bool(save_nm) and save_nm == t
 
 
 def _event_resolve_entity(name, player, npcs, objs):
@@ -9411,10 +10213,20 @@ class Camera:
         ):
             self._cam_blend_elapsed_sec = float(getattr(self, "_cam_blend_elapsed_sec", 0.0) or 0.0) + dt_vis
         # 새 월드 줌 시스템(main.py)로 전환:
-        # - 카메라 줌/양자화/스냅은 사용하지 않는다.
-        # - 카메라는 "월드 좌표계에서 무엇을 볼지"만 담당하고, 화면 확대/축소는 후처리로 한 장을 스케일한다.
-        self.current_zoom = 1.0
-        self.target_zoom = 1.0
+        # - 기본: 카메라 줌=1, 확대/축소는 후처리(world_zoom_draw)로 한 장을 스케일.
+        # - _force_view_zoom 이 있으면(논리 320 고정+줌아웃) 카메라 시야만 넓혀
+        #   320 버퍼를 꽉 채운다. 후처리 축소는 검은 테두리가 생긴다.
+        fz = getattr(self, "_force_view_zoom", None)
+        if fz is not None:
+            try:
+                z_use = max(1e-6, float(fz))
+            except (TypeError, ValueError):
+                z_use = 1.0
+            self.current_zoom = z_use
+            self.target_zoom = z_use
+        else:
+            self.current_zoom = 1.0
+            self.target_zoom = 1.0
 
         view_w = float(self.width) / float(self.current_zoom)
         view_h = float(self.height) / float(self.current_zoom)
@@ -9725,6 +10537,10 @@ def _trim_ui_font_cache() -> None:
 
 
 def _effective_outline_px(font: pygame.font.Font, outline_px: int) -> int:
+    """요청 테두리 두께를 글자 높이에 맞게 줄임.
+    예전엔 h<=12 에서 0 으로 꺼 버려서 SELECTBOX 안내(12px 흰 글자)가 필드 위에서 안 보였음.
+    작은 글자도 1px 은 유지. 8px 이하만 글리프가 잠기므로 생략.
+    """
     try:
         px = int(outline_px)
     except Exception:
@@ -9736,10 +10552,8 @@ def _effective_outline_px(font: pygame.font.Font, outline_px: int) -> int:
         h = int(font.get_height())
     except Exception:
         return px
-    if h <= 12:
+    if h <= 8:
         return 0
-    if h <= 18:
-        return min(px, 1)
     if h <= 26:
         return min(px, 1)
     return px
@@ -10313,10 +11127,15 @@ def _build_overlay_surface_from_step(step: dict):
 
 
 def _wrap_text_by_pixels(text: str, font: pygame.font.Font, max_w: int):
-    """CJK 포함: 문자 단위 줄바꿈(예측 가능 우선)."""
+    """CJK 포함: 문자 단위 줄바꿈(예측 가능 우선).
+    실제 개행과 리터럴 \\n(JSON/에디터 한 줄 표기) 모두 줄바꿈으로 본다.
+    """
     if text is None:
         text = ""
-    s = str(text).replace("\r\n", "\n")
+    s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    # events.json 등에서 "\\n" 으로 쓴 경우(파싱 후 두 글자 \\ + n)
+    if "\\" in s:
+        s = s.replace("\\n", "\n").replace("\\r", "")
     chunks = s.split("\n")
     lines = []
     for chunk in chunks:
@@ -10739,6 +11558,7 @@ class EventManager:
         self.active_event = None
         self.step_idx = 0
         self.is_talking = False
+        self.is_notice = False  # NOTICE: 중앙 안내창 (SAY 대화창과 별도)
         self.is_busy = False    
         self.wait_timer = 0
         self.current_who = ""
@@ -10774,16 +11594,20 @@ class EventManager:
         self.fade_color = (0, 0, 0)  # FADEIN/FADEOUT 오버레이 RGB (기본 검정)
         self.is_fading = False   # 현재 페이드 연출 중인가?
         self._say_ui_fade_elapsed = 0.0
+        # NOTICE 자동 닫기: auto=true 이면 타자 완료 후 val초 뒤 페이드아웃
+        self._notice_auto = False
+        self._notice_auto_val = 0.0
+        self._notice_title = ""
         self._pending_fade_in_after_fadeout_sec = None  # 페이드아웃 완료 직후 페이드인(초)
         self.active_effects = [] # 현재 화면에 떠 있는 이펙트들
         self._effect_wait_ref = None  # EFFECT wait:true — 재생 끝날 때까지 next_step 보류
-        self._change_fade = None  # CHANGE fade — 디졸브 진행 상태 dict (완료 시 next_step)
+        self._change_fade = None  # CHANGE speed/fade — 크로스페이드 진행 dict (완료 시 next_step)
         self._carry_wait_item = None  # CARRY wait — fly 중인 FieldItem (완료 시 next_step)
         self.active_event_result = None  # events.json의 result (종료 시 적용)
         self._progress_refresh_pending = False
         # SCREEN overlay (인트로/슬라이드 같은 화면 덮개)
         self.active_screen = None  # dict or None
-        # SCREEN hi_res: main.py가 640x480 전환 전 출력 상태를 보관·복구
+        # SCREEN 오버레이는 출력 모드를 바꾸지 않음 (이미지는 현재 논리 화면에 스케일)
         self.screen_hi_res_snapshot = None
         # UI 오버레이 (로고/텍스트, 논리 해상도 좌표)
         self._ui_overlays = []  # list of dict, see _apply_overlay_ui_step
@@ -10796,8 +11620,17 @@ class EventManager:
         self.game_debug_button_visible = False
         self._game_debug_button_visible_snapshot = False
         self._game_debug_button_persist = False
+        self.game_options_button_visible = False  # GAME_OPTIONS_BUTTON 으로 표시
+        self._game_options_button_visible_snapshot = False
+        self._game_options_button_persist = False
         self.cursor_visible = True # 커서 가시성 제어 추가
-        self._cursor_visible_persist = False  # True면 이벤트 종료 후에도 cursor_visible 유지
+        self._cursor_visible_persist = False  # True면 이번 이벤트 CURSOR_VISIBLE 을 종료 후에도 유지
+        self._cursor_visible_snapshot = True  # 이벤트 시작 직전 커서 표시 상태
+        self._event_music_touched = False  # 이번 이벤트에서 MUSIC_PLAY/STOP/END 를 씀
+        self._event_music_persist = False  # True면 종료 후에도 그 BGM(또는 무음) 유지
+        self._map_default_music = ""
+        self._map_default_music_loop = True
+        self._map_default_music_volume = None
         self.last_ended_event_id = None  # 직전에 끝난 이벤트 ID (온보딩 후 스폰 등)
         self._loop_end_to_head = {}
         self._loop_pairs = []
@@ -10907,6 +11740,8 @@ class EventManager:
         self.step_idx = 0
         self.is_busy = False
         self.is_talking = False
+        self.is_notice = False
+        self._notice_auto = False
         self._say_ui_fade_phase = None
         # FOLLOW_START 동행은 새 이벤트 시작 시에도 유지 (FOLLOW_STOP / 탈출에서만 해제)
         self._move_sync_group = None
@@ -10914,12 +11749,22 @@ class EventManager:
         self._game_exit_button_persist = False
         self._game_debug_button_visible_snapshot = bool(getattr(self, "game_debug_button_visible", False))
         self._game_debug_button_persist = False
+        self._game_options_button_visible_snapshot = bool(getattr(self, "game_options_button_visible", False))
+        self._game_options_button_persist = False
+        # 커서: 시작 시점 상태를 기억. persist 없는 CURSOR_VISIBLE 은 종료 시 여기로 복구.
+        # (예전처럼 종료 때마다 True 로 강제하면, 숨긴 뒤 다른 이벤트만 끝나도 커서가 다시 뜸)
+        self._cursor_visible_snapshot = bool(getattr(self, "cursor_visible", True))
         self._cursor_visible_persist = False
+        self._event_music_touched = False
+        self._event_music_persist = False
+        # 이전 이벤트의 FADE color(흰색 등)가 다음 이벤트에 남지 않게
+        self.fade_color = (0, 0, 0)
         self._loop_end_to_head, self._loop_pairs = _parse_loop_jump_table(event_list)
         self._selectbox_jump = _parse_selectbox_jump_table(event_list)
         self._selectbox_is_selecting = False
         self._selectbox_pending_step_idx = None
         self._event_skip_depth = 0
+        self._event_if_taken = False  # CONDITION if/elif 체인: 앞에서 맞은 분기 있음
         # (정책 변경) 이벤트 옵션(escape)로 중도 스탑/탈출을 설정하지 않는다.
         # 대신 스텝(EVT_STOP_BEGIN/EVT_STOP_END)으로 "언제부터/언제까지" 스탑 입력을 받을지 제어한다.
         self._escape_mode = "none"
@@ -11103,7 +11948,10 @@ class EventManager:
         return max(0.0, v)
 
     def _apply_fade_color_from_step(self, step):
-        """FADEIN/FADEOUT color/rgb → fade_color. 비어 있으면 검정 유지(덮어쓰지 않음)."""
+        """FADEIN/FADEOUT color/rgb → fade_color.
+        비어 있으면 이번 이벤트 안에서 직전에 쓴 색 유지(같은 이벤트 FADEOUT→FADEIN 짝).
+        새 이벤트 시작 시 fade_color 는 검정으로 리셋됨.
+        """
         if not isinstance(step, dict):
             return
         raw = step.get("color")
@@ -11380,30 +12228,46 @@ class EventManager:
             if not matched:
                 self._ui_overlays = [o for o in (self._ui_overlays or []) if o.get("id") != rid]
             return
-        surf = _build_overlay_surface_from_step(step)
+
+        # text/button: {progress_status} 등 세이브·세션 변수 치환 (SAY 와 동일 expand_story_text)
+        step_use = step
+        ct_pre = (step.get("content") or step.get("content_type") or "text").strip().lower()
+        if ct_pre in ("text", "button", ""):
+            raw_txt = step.get("text")
+            if raw_txt is None:
+                raw_txt = step.get("label")
+            expanded = self._expand_overlay_ui_text(raw_txt)
+            if str(expanded) != str(raw_txt or ""):
+                step_use = dict(step)
+                step_use["text"] = expanded
+            # 순수 텍스트이고 치환 결과가 비면 show 하지 않음 (boot 복원 시 빈 진행 문구)
+            if ct_pre in ("text", "") and not str(expanded or "").strip():
+                return
+
+        surf = _build_overlay_surface_from_step(step_use)
         if surf is None:
             return
         sw = int(CONFIG.get("WIDTH", 320))
         sh = int(CONFIG.get("HEIGHT", 240))
         w, h = surf.get_size()
-        anchor = step.get("anchor") or "center"
-        mx = _overlay_ui_px(float(step.get("margin_x") or 0), screen_w=sw, step=step)
-        my = _overlay_ui_px(float(step.get("margin_y") or 0), screen_w=sw, step=step)
+        anchor = step_use.get("anchor") or "center"
+        mx = _overlay_ui_px(float(step_use.get("margin_x") or 0), screen_w=sw, step=step_use)
+        my = _overlay_ui_px(float(step_use.get("margin_y") or 0), screen_w=sw, step=step_use)
         rx, ry = _overlay_anchor_xy(anchor, w, h, mx, my, sw, sh)
-        mode = (step.get("mode") or "fade").strip().lower()
+        mode = (step_use.get("mode") or "fade").strip().lower()
         if mode not in ("fade", "scroll"):
             mode = "fade"
-        scroll_enter = (step.get("scroll_enter") or step.get("from") or "left").strip().lower()
+        scroll_enter = (step_use.get("scroll_enter") or step_use.get("from") or "left").strip().lower()
         try:
-            appear = float(step.get("appear") if step.get("appear") is not None else step.get("appear_sec", 0.5))
+            appear = float(step_use.get("appear") if step_use.get("appear") is not None else step_use.get("appear_sec", 0.5))
         except Exception:
             appear = 0.5
         try:
-            disappear = float(step.get("disappear") if step.get("disappear") is not None else step.get("disappear_sec", 0.5))
+            disappear = float(step_use.get("disappear") if step_use.get("disappear") is not None else step_use.get("disappear_sec", 0.5))
         except Exception:
             disappear = 0.5
-        hold_forever = bool(step.get("hold_forever") or step.get("infinite_hold"))
-        hold_raw = step.get("hold") if "hold" in step else step.get("hold_sec")
+        hold_forever = bool(step_use.get("hold_forever") or step_use.get("infinite_hold"))
+        hold_raw = step_use.get("hold") if "hold" in step_use else step_use.get("hold_sec")
         if hold_forever:
             t_hold_ms = None
         else:
@@ -11425,15 +12289,15 @@ class EventManager:
                 hs = 2.0
             t_hold_sec = max(0.0, float(hs))
 
-        oid = (step.get("overlay_id") or step.get("id") or "").strip()
+        oid = (step_use.get("overlay_id") or step_use.get("id") or "").strip()
         if not oid:
             oid = "ov_" + uuid.uuid4().hex[:10]
-        persist = bool(step.get("persist", False))
+        persist = bool(step_use.get("persist", False))
 
         sx, sy = _scroll_enter_delta(scroll_enter, w, h, sw, sh)
         ex, ey = _scroll_exit_delta(scroll_enter, w, h, sw, sh)
 
-        ct = (step.get("content") or step.get("content_type") or "text").strip().lower()
+        ct = (step_use.get("content") or step_use.get("content_type") or "text").strip().lower()
         now = pygame.time.get_ticks()
         ov = {
             "id": oid,
@@ -11465,9 +12329,9 @@ class EventManager:
             "draw_dx": 0.0,
             "draw_dy": 0.0,
             "clickable": bool(
-                step.get("clickable") or step.get("button") or ct == "button"
+                step_use.get("clickable") or step_use.get("button") or ct == "button"
             ),
-            "click_action": (step.get("click_action") or step.get("on_click") or "").strip(),
+            "click_action": (step_use.get("click_action") or step_use.get("on_click") or "").strip(),
         }
         if mode == "scroll":
             ov["draw_dx"] = float(sx)
@@ -11475,6 +12339,23 @@ class EventManager:
             ov["draw_alpha"] = 255
         self._ui_overlays = [o for o in (self._ui_overlays or []) if o.get("id") != oid]
         self._ui_overlays.append(ov)
+
+    def _expand_overlay_ui_text(self, text):
+        """OVERLAY_UI text — SAY 와 같은 템플릿 + 세션 변수 덮어쓰기."""
+        try:
+            from data import expand_story_text
+            from flow import eval_session_vars
+
+            sd = dict(self._story_save_data())
+            try:
+                sp = eval_session_vars(getattr(self, "flow", None))
+                if isinstance(sp, dict) and sp:
+                    sd.update(sp)
+            except Exception:
+                pass
+            return expand_story_text(text, sd)
+        except Exception:
+            return str(text or "")
 
     def _tick_ui_overlays(self, dt_sec=1.0 / 60.0):
         """OVERLAY_UI 페이드/스크롤 — 실제 경과 초(dt_sec) 기준."""
@@ -11584,9 +12465,16 @@ class EventManager:
         - action:remove → 이름별로 placed 에서 삭제 (persist 여부 무관 — 정리)
         - persist:true → upsert (맵·좌표·dir·behavior·travel)
         - persist 없음 → 세이브에 쓰지 않음 (런타임 1회성)
+        인트로/데모(boot_phase<2)에서도 메모리 upsert 는 허용(새게임 꽃 등).
+        디스크 기록은 main 온보딩 세이브 가드가 막는다.
         """
         from field_runtime import parse_step_bool, parse_step_persist
-        from flow import remove_placed_entity, upsert_placed_entity
+        from flow import (
+            clear_entity_placed_persist,
+            mark_entity_placed_persist,
+            remove_placed_entity,
+            upsert_placed_entity,
+        )
 
         sd = self._story_save_data()
         mid = str(sd.get("current_map") or "")
@@ -11603,11 +12491,11 @@ class EventManager:
             if not nm:
                 continue
             if is_remove:
+                save_nm = str(getattr(target, "_placed_save_name", "") or "").strip()
                 remove_placed_entity(sd, nm)
-                try:
-                    target._placed_persist = False
-                except Exception:
-                    pass
+                if save_nm and save_nm != nm:
+                    remove_placed_entity(sd, save_nm)
+                clear_entity_placed_persist(target)
                 continue
             if not want_persist:
                 continue
@@ -11638,10 +12526,7 @@ class EventManager:
                 radius=step.get("radius"),
                 interval_ms=step.get("interval_ms"),
             )
-            try:
-                target._placed_persist = True
-            except Exception:
-                pass
+            mark_entity_placed_persist(target, nm)
 
     def _sync_behavior_to_placed(self, target, mode, step) -> None:
         """BEHAVIOR 스텝 — 이미 placed 인 NPC 의 behavior/follow 를 세이브에 반영."""
@@ -11676,10 +12561,9 @@ class EventManager:
                     radius=step.get("radius"),
                     interval_ms=step.get("interval_ms"),
                 )
-                try:
-                    target._placed_persist = True
-                except Exception:
-                    pass
+                from flow import mark_entity_placed_persist
+
+                mark_entity_placed_persist(target, nm)
                 return
             if entry is None:
                 return
@@ -11774,9 +12658,14 @@ class EventManager:
         try:
             from data import expand_story_text
 
-            return expand_story_text(text, self._story_save_data())
+            expanded = expand_story_text(text, self._story_save_data())
         except Exception:
-            return str(text or "")
+            expanded = str(text or "")
+        # JSON/에디터 한 줄의 \\n → 실제 개행 (타자·줄바꿈 공통)
+        s = str(expanded or "").replace("\r\n", "\n").replace("\r", "\n")
+        if "\\" in s:
+            s = s.replace("\\n", "\n").replace("\\r", "")
+        return s
 
     def _resolve_story_who_label(self, who):
         """SAY who → 대화창 이름: char_defs.name (player·ally 별칭·summer_k 등 char id)."""
@@ -11803,8 +12692,11 @@ class EventManager:
         return None
 
     def _say_ui_fade_alpha_for_overlays(self):
-        """SAY 텍스트박스와 동일 페이드 알파(대화 중이 아니면 255)."""
-        if not bool(getattr(self, "is_talking", False)):
+        """SAY 텍스트박스 / NOTICE 패널과 동일 페이드 알파(대화·안내 중이 아니면 255)."""
+        if not (
+            bool(getattr(self, "is_talking", False))
+            or bool(getattr(self, "is_notice", False))
+        ):
             return 255
         try:
             fade_en = bool(CONFIG.get("SAY_UI_FADE_ENABLED", True))
@@ -12143,6 +13035,12 @@ class EventManager:
                 self._draw_head_attached_ui(screen, head_ctx)
             except Exception:
                 pass
+        # NOTICE: 화면 어둡게 + 중앙 안내 패널 (SAY 대화창과 별도)
+        if draw_dialog and bool(getattr(self, "is_notice", False)):
+            try:
+                self._draw_notice_panel(screen)
+            except Exception:
+                pass
         # SAY 텍스트박스 (events.json SAY)
         if draw_dialog and bool(getattr(self, "is_talking", False)) and bool(CONFIG.get("SAY_USE_TEXTBOX_UI", True)):
             try:
@@ -12385,7 +13283,10 @@ class EventManager:
                 screen.blit(tmp, (x, y))
 
     def _tick_say_typewriter(self):
-        if not bool(getattr(self, "is_talking", False)):
+        if not (
+            bool(getattr(self, "is_talking", False))
+            or bool(getattr(self, "is_notice", False))
+        ):
             return
         # 페이드아웃 중만 타자 정지. 페이드인 중에도 글자가 나오도록 해서
         # OPEN 보호(0.5초) 후 터치→전체출력이 체감과 맞게 동작한다.
@@ -12400,7 +13301,19 @@ class EventManager:
             self._say_full_text = ""
             self._say_visible_n = 0
             self._say_done = True
-            self._say_can_close_at_ms = 0
+            try:
+                now_empty = int(pygame.time.get_ticks())
+            except Exception:
+                now_empty = 0
+            try:
+                hold = float(CONFIG.get("SAY_MIN_CLOSE_DELAY_SEC", 0.5) or 0.5)
+            except Exception:
+                hold = 0.5
+            hold_ms = int(max(0.0, min(3.0, hold)) * 1000.0)
+            if bool(getattr(self, "is_notice", False)):
+                self._arm_dialog_close_timer(now_empty, hold_ms)
+            else:
+                self._say_can_close_at_ms = 0
             return
         try:
             if bool(self._say_done):
@@ -12442,7 +13355,19 @@ class EventManager:
             except Exception:
                 hold = 0.5
             hold_ms = int(max(0.0, min(3.0, hold)) * 1000.0)
-            self._say_can_close_at_ms = now + hold_ms
+            self._arm_dialog_close_timer(now, hold_ms)
+
+    def _arm_dialog_close_timer(self, now_ms, hold_ms):
+        """타자 완료 후 닫기 가능 시각. NOTICE auto 면 val초와 최소 대기 중 큰 값."""
+        close_ms = int(now_ms) + int(max(0, hold_ms))
+        if bool(getattr(self, "is_notice", False)) and bool(getattr(self, "_notice_auto", False)):
+            try:
+                extra = float(getattr(self, "_notice_auto_val", 0.0) or 0.0)
+            except Exception:
+                extra = 0.0
+            extra_ms = int(max(0.0, min(120.0, extra)) * 1000.0)
+            close_ms = int(now_ms) + max(int(hold_ms), extra_ms)
+        self._say_can_close_at_ms = close_ms
 
     def _say_peek_next_is_say(self):
         """현재 스텝 직후가 SAY이면 True (연속 대사 체인용)."""
@@ -12484,19 +13409,7 @@ class EventManager:
             self._say_full_text = str(expanded or "")
         except Exception:
             self._say_full_text = ""
-        sn = step.get("show_name", None)
-        if isinstance(sn, str):
-            s2 = sn.strip().lower()
-            if s2 in ("1", "true", "t", "yes", "y", "on"):
-                self._say_show_name = True
-            elif s2 in ("0", "false", "f", "no", "n", "off"):
-                self._say_show_name = False
-            else:
-                self._say_show_name = None
-        elif sn is None:
-            self._say_show_name = None
-        else:
-            self._say_show_name = bool(sn)
+        self._say_show_name = _parse_optional_step_bool(step.get("show_name", None))
         self._say_visible_n = 0
         self._say_last_char_ms = 0
         self._say_done = False
@@ -12539,6 +13452,233 @@ class EventManager:
             self._refresh_say_cam_avoid()
         except Exception:
             pass
+
+    def _apply_notice_step(self, step):
+        """NOTICE: 화면을 어둡게 하고 중앙 패널에 설명글. SAY 타자·페이드를 재사용."""
+        self.is_notice = True
+        self.is_talking = False
+        self._say_bubble = None
+        self._say_bubbles = []
+        self._say_who_raw = ""
+        self._say_show_name = False
+        self.current_who = ""
+        try:
+            self._notice_title = str(step.get("name") or step.get("title") or "").strip()
+        except Exception:
+            self._notice_title = ""
+        raw_text = step.get("text", "")
+        try:
+            expanded = self._expand_story_say_text(raw_text)
+        except Exception:
+            expanded = str(raw_text or "")
+        self.current_text = expanded
+        try:
+            self._say_full_text = str(expanded or "")
+        except Exception:
+            self._say_full_text = ""
+        self._say_visible_n = 0
+        self._say_last_char_ms = 0
+        self._say_done = False
+        self._say_can_close_at_ms = 0
+        self._notice_auto = self._parse_step_bool(step.get("auto", False), default=False)
+        try:
+            self._notice_auto_val = float(step.get("val") if step.get("val") is not None else 0.0)
+        except (TypeError, ValueError):
+            self._notice_auto_val = 0.0
+        self._notice_auto_val = max(0.0, min(120.0, float(self._notice_auto_val)))
+        try:
+            hold_open = float(CONFIG.get("SAY_MIN_OPEN_DELAY_SEC", 0.5) or 0.5)
+        except Exception:
+            hold_open = 0.5
+        hold_open_ms = int(max(0.0, min(5.0, hold_open)) * 1000.0)
+        try:
+            now = int(pygame.time.get_ticks())
+        except Exception:
+            now = 0
+        self._say_ignore_input_until_ms = (int(now) + hold_open_ms) if now else 0
+        try:
+            fade_en = bool(CONFIG.get("SAY_UI_FADE_ENABLED", True))
+        except Exception:
+            fade_en = True
+        try:
+            fin_sec = float(CONFIG.get("SAY_UI_FADE_IN_SEC", 0.5) or 0.5)
+        except Exception:
+            fin_sec = 0.5
+        fin_ms = max(0, min(5000, int(fin_sec * 1000)))
+        if fade_en and fin_ms > 0:
+            self._say_ui_fade_phase = "in"
+            self._say_ui_fade_t0_ms = int(now) if now else 0
+            self._say_ui_fade_elapsed = 0.0
+        else:
+            self._say_ui_fade_phase = "visible"
+            self._say_ui_fade_t0_ms = int(now) if now else 0
+        try:
+            self._clear_say_cam_avoid(immediate=False)
+        except Exception:
+            pass
+
+    def _draw_notice_panel(self, screen):
+        """NOTICE 딤 + 중앙 패널 + 타자 텍스트 (논리 해상도 서피스)."""
+        try:
+            w = int(screen.get_width())
+            h = int(screen.get_height())
+        except Exception:
+            try:
+                w = int(CONFIG.get("WIDTH", 320) or 320)
+                h = int(CONFIG.get("HEIGHT", 240) or 240)
+            except Exception:
+                w, h = 320, 240
+        say_alpha = int(self._say_ui_fade_alpha_for_overlays())
+        say_alpha = max(0, min(255, say_alpha))
+        if say_alpha <= 0:
+            return
+        try:
+            dim0 = int(CONFIG.get("NOTICE_DIM_ALPHA", 180) or 180)
+        except Exception:
+            dim0 = 180
+        dim0 = max(0, min(255, dim0))
+        dim_a = int(round(dim0 * (say_alpha / 255.0)))
+        if dim_a > 0:
+            dim = pygame.Surface((w, h), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, dim_a))
+            screen.blit(dim, (0, 0))
+
+        def _cfg_px(key, default):
+            try:
+                v = float(CONFIG.get(key, default) or default)
+            except Exception:
+                v = float(default)
+            return int(round(_scale_px_from_320(v, screen_w=w)))
+
+        panel_w = max(80, min(w - 16, _cfg_px("NOTICE_PANEL_W_320", 248)))
+        pad = max(6, _cfg_px("NOTICE_PANEL_PAD_320", 12))
+        max_h = max(48, min(h - 16, _cfg_px("NOTICE_PANEL_MAX_H_320", 180)))
+        line_gap = max(1, _cfg_px("NOTICE_LINE_GAP_PX_320", 3))
+        try:
+            fs0 = float(CONFIG.get("NOTICE_FONT_SIZE_320", 11) or 11)
+        except Exception:
+            fs0 = 11.0
+        try:
+            nfs0 = float(CONFIG.get("NOTICE_TITLE_SIZE_320", 13) or 13)
+        except Exception:
+            nfs0 = 13.0
+        fs = max(6, int(round(_scale_px_from_320(fs0, screen_w=w))))
+        nfs = max(6, int(round(_scale_px_from_320(nfs0, screen_w=w))))
+        body_p = get_font_profile("dialog")
+        fkey = str(body_p.get("font_key") or CONFIG.get("SAY_FONT_KEY", "dialog") or "dialog").strip() or "dialog"
+        font = _resolve_ui_font(fkey, fs, outlined=False)
+        title_font = _resolve_ui_font(fkey, nfs, outlined=False)
+        text_col = _normalize_rgb_color(CONFIG.get("NOTICE_TEXT_COLOR", (235, 240, 250)))
+        title_col = _normalize_rgb_color(CONFIG.get("NOTICE_TITLE_COLOR", (255, 248, 220)))
+        bg = _normalize_rgb_color(CONFIG.get("NOTICE_PANEL_BG", (22, 30, 48)))
+        border = _normalize_rgb_color(CONFIG.get("NOTICE_PANEL_BORDER", (150, 175, 210)))
+        try:
+            ol_on = bool(body_p.get("outline_enabled", CONFIG.get("SAY_FONT_OUTLINE_ENABLED", True)))
+        except Exception:
+            ol_on = True
+        try:
+            ol_px0 = float(body_p.get("outline_px_320", CONFIG.get("SAY_FONT_OUTLINE_PX_320", 1)) or 1)
+        except Exception:
+            ol_px0 = 1.0
+        ol_px = int(round(_scale_px_from_320(ol_px0, screen_w=w))) if ol_on else 0
+        ol_col = _normalize_rgb_color(
+            body_p.get("outline_color", CONFIG.get("SAY_FONT_OUTLINE_COLOR", (255, 255, 255)))
+        )
+        try:
+            full = str(getattr(self, "_say_full_text", getattr(self, "current_text", "")) or "")
+        except Exception:
+            full = ""
+        try:
+            nvis = int(getattr(self, "_say_visible_n", len(full)))
+        except Exception:
+            nvis = len(full)
+        vis = full[: max(0, min(len(full), nvis))]
+        inner_w = max(8, panel_w - pad * 2)
+        title = str(getattr(self, "_notice_title", "") or "").strip()
+        title_h = 0
+        if title:
+            try:
+                _tw, title_h = title_font.size(title)
+            except Exception:
+                title_h = nfs + 2
+            title_h = int(title_h) + line_gap + 2
+        lines = _wrap_text_by_pixels(vis, font, inner_w)
+        body_h = 0
+        line_hs = []
+        for ln in lines:
+            try:
+                _lw, lh = font.size(ln if ln else " ")
+            except Exception:
+                lh = fs + 2
+            line_hs.append(int(lh))
+            body_h += int(lh) + line_gap
+        if line_hs:
+            body_h -= line_gap
+        panel_h = min(max_h, max(36, title_h + body_h + pad * 2))
+        px = (w - panel_w) // 2
+        py = (h - panel_h) // 2
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        br = max(4, int(round(_scale_px_from_320(6, screen_w=w))))
+        pygame.draw.rect(panel, (*bg, 235), (0, 0, panel_w, panel_h), border_radius=br)
+        pygame.draw.rect(panel, (*border, 255), (0, 0, panel_w, panel_h), max(1, int(round(_scale_px_from_320(1, screen_w=w)))), border_radius=br)
+        if say_alpha < 255:
+            panel.set_alpha(say_alpha)
+        screen.blit(panel, (px, py))
+        clip_prev = screen.get_clip()
+        screen.set_clip(pygame.Rect(px + pad, py + pad, inner_w, max(1, panel_h - pad * 2)))
+        cur_y = py + pad
+        if title:
+            try:
+                if ol_px > 0:
+                    _blit_text_with_outline(
+                        screen,
+                        title_font,
+                        title,
+                        px + pad,
+                        cur_y,
+                        color=title_col,
+                        outline_color=ol_col,
+                        outline_px=ol_px,
+                        alpha=say_alpha,
+                        resolve_fill=False,
+                    )
+                else:
+                    ts = title_font.render(title, True, title_col)
+                    if say_alpha < 255:
+                        ts = ts.copy()
+                        ts.set_alpha(say_alpha)
+                    screen.blit(ts, (px + pad, cur_y))
+            except Exception:
+                pass
+            cur_y += title_h
+        for i, ln in enumerate(lines):
+            if cur_y >= py + panel_h - pad:
+                break
+            try:
+                if ol_px > 0:
+                    _blit_text_with_outline(
+                        screen,
+                        font,
+                        ln,
+                        px + pad,
+                        cur_y,
+                        color=text_col,
+                        outline_color=ol_col,
+                        outline_px=ol_px,
+                        alpha=say_alpha,
+                        resolve_fill=False,
+                    )
+                else:
+                    s_ln = font.render(ln, True, text_col)
+                    if say_alpha < 255:
+                        s_ln = s_ln.copy()
+                        s_ln.set_alpha(say_alpha)
+                    screen.blit(s_ln, (px + pad, cur_y))
+            except Exception:
+                break
+            lh = line_hs[i] if i < len(line_hs) else fs
+            cur_y += int(lh) + line_gap
+        screen.set_clip(clip_prev)
 
     def _clear_say_cam_avoid(self, *, immediate=False):
         cam = getattr(self, "_last_camera", None)
@@ -12777,8 +13917,22 @@ class EventManager:
         self._apply_say_step(dict(say_step or {}), chain=False)
 
     def _say_finish_after_fade_out(self):
-        """SAY 페이드아웃 완료 후 정리하고 다음 스텝으로."""
+        """SAY/NOTICE 페이드아웃 완료 후 정리하고 다음 스텝으로."""
         self._say_ui_fade_phase = None
+        was_notice = bool(getattr(self, "is_notice", False))
+        if was_notice:
+            self.is_notice = False
+            self._notice_auto = False
+            self._notice_title = ""
+            self.current_who = ""
+            self.current_text = ""
+            self._say_full_text = ""
+            self._say_visible_n = 0
+            self._say_last_char_ms = 0
+            self._say_done = True
+            self._say_can_close_at_ms = 0
+            self.next_step()
+            return
         if self._try_advance_say_chain():
             return
         cb = getattr(self, "_free_say_on_finish", None)
@@ -12823,7 +13977,10 @@ class EventManager:
         self.next_step()
 
     def _tick_say_ui_fade(self, dt_sec=1.0 / 60.0):
-        if not bool(getattr(self, "is_talking", False)):
+        if not (
+            bool(getattr(self, "is_talking", False))
+            or bool(getattr(self, "is_notice", False))
+        ):
             return
         ph = getattr(self, "_say_ui_fade_phase", None)
         if ph not in ("in", "out"):
@@ -12870,7 +14027,7 @@ class EventManager:
             em["awaiting_click"] = False
             self.next_step()
             return
-        if bool(getattr(self, "is_talking", False)):
+        if bool(getattr(self, "is_talking", False)) or bool(getattr(self, "is_notice", False)):
             try:
                 full = str(self._say_full_text or self.current_text or "")
             except Exception:
@@ -12901,7 +14058,7 @@ class EventManager:
                 except Exception:
                     hold = 0.5
                 hold_ms = int(max(0.0, min(3.0, hold)) * 1000.0)
-                self._say_can_close_at_ms = int(now) + hold_ms
+                self._arm_dialog_close_timer(now, hold_ms)
                 return
 
             # 2) 전체 표시 상태면: CLOSE 보호가 지나야 닫기
@@ -12912,30 +14069,58 @@ class EventManager:
             if can_ms and now and int(now) < int(can_ms):
                 return
 
-            # 연속 SAY: 박스 닫지 않고 다음 대사만 적용
-            if self._say_peek_next_is_say() and self._try_advance_say_chain():
-                return
+            # 연속 SAY: 박스 닫지 않고 다음 대사만 적용 (NOTICE 는 체인 없음)
+            if not bool(getattr(self, "is_notice", False)):
+                if self._say_peek_next_is_say() and self._try_advance_say_chain():
+                    return
 
-            # close (페이드아웃 후 next_step)
-            try:
-                fade_en = bool(CONFIG.get("SAY_UI_FADE_ENABLED", True))
-            except Exception:
-                fade_en = True
-            try:
-                fout_sec = float(CONFIG.get("SAY_UI_FADE_OUT_SEC", 0.5) or 0.5)
-            except Exception:
-                fout_sec = 0.5
-            fout_ms = max(0, min(5000, int(fout_sec * 1000)))
-            if fade_en and fout_ms > 0:
-                self._say_ui_fade_phase = "out"
-                self._say_ui_fade_t0_ms = int(now) if now else 0
-                self._say_ui_fade_elapsed = 0.0
-            else:
-                self._say_finish_after_fade_out()
+            self._begin_dialog_ui_fade_out(now)
             return
 
         if self.try_advance_screen():
             return
+
+    def _begin_dialog_ui_fade_out(self, now_ms=0):
+        """SAY/NOTICE 창 닫기 페이드아웃 시작."""
+        try:
+            fade_en = bool(CONFIG.get("SAY_UI_FADE_ENABLED", True))
+        except Exception:
+            fade_en = True
+        try:
+            fout_sec = float(CONFIG.get("SAY_UI_FADE_OUT_SEC", 0.5) or 0.5)
+        except Exception:
+            fout_sec = 0.5
+        fout_ms = max(0, min(5000, int(fout_sec * 1000)))
+        if fade_en and fout_ms > 0:
+            self._say_ui_fade_phase = "out"
+            self._say_ui_fade_t0_ms = int(now_ms) if now_ms else 0
+            self._say_ui_fade_elapsed = 0.0
+        else:
+            self._say_finish_after_fade_out()
+
+    def _tick_notice_auto(self):
+        """NOTICE auto=true: 타자 완료+val 후 자동 닫기."""
+        if not bool(getattr(self, "is_notice", False)):
+            return
+        if not bool(getattr(self, "_notice_auto", False)):
+            return
+        if getattr(self, "_say_ui_fade_phase", None) == "out":
+            return
+        if not bool(getattr(self, "_say_done", False)):
+            return
+        try:
+            now = int(pygame.time.get_ticks())
+        except Exception:
+            return
+        try:
+            can_ms = int(self._say_can_close_at_ms or 0)
+        except Exception:
+            can_ms = 0
+        if can_ms and now and int(now) < int(can_ms):
+            return
+        if not can_ms:
+            return
+        self._begin_dialog_ui_fade_out(now)
 
     def _reindex_follow_slots_for_leader(self, leader_name):
         """같은 leader 를 따르는 follower 들에 slot/slots 를 다시 매긴다 (다중 대형용)."""
@@ -12948,9 +14133,8 @@ class EventManager:
 
     def _follow_formation_goal(self, lead, dist, slot, slots):
         """
-        리더 뒤쪽 대형 슬롯 좌표.
-        - facing(left/right) 기준 뒤로 dist
-        - slot 만큼 세로(Y)로 벌림 → 여러 명이 한 점에 몰리지 않음
+        (레거시) 리더 facing 기준 대형 슬롯 좌표.
+        현재 동행은 트레일 위 slot*FOLLOW_MULTI_SPACING 만큼 뒤로 밀어 같은 길을 따라간다.
         """
         try:
             lx, ly = float(lead.pos[0]), float(lead.pos[1])
@@ -12983,7 +14167,9 @@ class EventManager:
     def _tick_event_followers(self, player, npcs, objs):
         """
         FOLLOW_START 추종 — 이벤트 중이 아니어도 매 프레임 갱신.
-        (end_event 에서 목록을 비우지 않음 → 컷신 후에도 동행 유지, FOLLOW_STOP 으로 해제)
+        리더 발자국을 한 번만 샘플하고, 팔로워는 그 트레일을 따라간다 (A* 없음).
+        기본 속도는 리더 sync 속도 × FOLLOW speed.
+        hold 거리보다 벌어지면 FOLLOW_CATCHUP_* 로 잠깐 가속해 간격을 좁힌다.
         """
         if not self._followers:
             return
@@ -13004,11 +14190,55 @@ class EventManager:
                 ent[str(iid)] = x
         m = self._event_mask_img
         try:
-            arrive = float(CONFIG.get("FOLLOW_SLOT_ARRIVE_PX", 12) or 12)
+            spacing = float(CONFIG.get("FOLLOW_MULTI_SPACING_PX", 18) or 18)
         except Exception:
-            arrive = 12.0
+            spacing = 18.0
+        try:
+            catch_start = float(CONFIG.get("FOLLOW_CATCHUP_START_PX", 10) or 10)
+        except Exception:
+            catch_start = 10.0
+        try:
+            catch_sync = float(CONFIG.get("FOLLOW_CATCHUP_SYNC_PX", 4) or 4)
+        except Exception:
+            catch_sync = 4.0
+        try:
+            catch_mul = float(CONFIG.get("FOLLOW_CATCHUP_SPEED_MUL", 1.35) or 1.35)
+        except Exception:
+            catch_mul = 1.35
+        catch_start = max(0.0, catch_start)
+        catch_sync = max(0.0, min(catch_start, catch_sync))
+        catch_mul = max(1.0, catch_mul)
 
+        sampled = set()
         for f in list(self._followers):
+            lead = ent.get(f.get("leader"))
+            if lead is None:
+                continue
+            kid = id(lead)
+            if kid in sampled:
+                continue
+            sampled.add(kid)
+            sampler = getattr(lead, "follow_trail_sample", None)
+            if callable(sampler):
+                try:
+                    sampler()
+                except Exception:
+                    pass
+
+        # 체인(A→B→C): 리더가 팔로워가 아닌 쪽부터 속도를 맞춰야 한 프레임에 전파됨
+        fol_ids = set()
+        for f in list(self._followers):
+            e = ent.get(f.get("follower"))
+            if e is not None:
+                fol_ids.add(id(e))
+
+        def _follow_tick_rank(row):
+            lead_e = ent.get((row or {}).get("leader"))
+            if lead_e is not None and id(lead_e) in fol_ids:
+                return 1
+            return 0
+
+        for f in sorted(list(self._followers), key=_follow_tick_rank):
             fol = ent.get(f.get("follower"))
             lead = ent.get(f.get("leader"))
             if not fol or not lead:
@@ -13018,60 +14248,63 @@ class EventManager:
             except Exception:
                 dist = 40.0
             try:
-                spm = float(f.get("speed", 1.0))
+                rel = float(f.get("speed", 1.0) or 1.0)
             except Exception:
-                spm = 1.0
+                rel = 1.0
+            # 리더의 catch-up 가속은 빼고 sync 기준만 물려받음 (체인 배율 폭주 방지)
             try:
-                fol.event_speed_mul = spm
+                lead_sync = getattr(lead, "_follow_sync_speed_mul", None)
+                if lead_sync is None:
+                    lead_sync = getattr(lead, "event_speed_mul", 1.0)
+                lead_mul = float(lead_sync or 1.0)
+            except Exception:
+                lead_mul = 1.0
+            base = max(0.0, lead_mul * rel)
+            try:
+                fol._follow_sync_speed_mul = base
             except Exception:
                 pass
 
-            # 다중 슬롯: 리더 뒤 대형 목표. 단일(slots<=1)은 기존 radial follow.
+            hold_dist = dist
             try:
                 slots_n = int(f.get("slots", 1) or 1)
             except Exception:
                 slots_n = 1
-            use_formation = slots_n > 1 and f.get("slot") is not None
-            if use_formation:
-                goal = self._follow_formation_goal(lead, dist, f.get("slot", 0), slots_n)
-                if not goal:
-                    continue
+            if slots_n > 1 and f.get("slot") is not None:
                 try:
-                    dnow = math.dist(fol.pos, goal)
+                    hold_dist = dist + float(f.get("slot", 0) or 0) * spacing
                 except Exception:
-                    dnow = 9999.0
-                if dnow <= arrive:
-                    sm = getattr(fol, "stop_moving", None)
-                    if callable(sm):
-                        sm()
-                    continue
-                if isinstance(fol, MaskWalkingCharacter):
-                    try:
-                        fol.follow_step(goal, arrive, m, objs, npcs, speed_mul=spm, leader=lead)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        fol.set_new_target(goal[0], goal[1])
-                    except Exception:
-                        pass
-                continue
+                    hold_dist = dist
 
             try:
-                dnow = math.dist(fol.pos, lead.pos)
+                d_lead = math.hypot(
+                    float(lead.pos[0]) - float(fol.pos[0]),
+                    float(lead.pos[1]) - float(fol.pos[1]),
+                )
             except Exception:
-                dnow = 9999.0
-            if dnow <= dist:
-                sm = getattr(fol, "stop_moving", None)
-                if callable(sm):
-                    sm()
-                continue
+                d_lead = hold_dist
+            slack = d_lead - hold_dist
+            catching = bool(getattr(fol, "_follow_catching_up", False))
+            if slack > catch_start:
+                catching = True
+            elif slack <= catch_sync:
+                catching = False
+            try:
+                fol._follow_catching_up = catching
+            except Exception:
+                pass
+            spm = base * catch_mul if catching else base
+
             if isinstance(fol, MaskWalkingCharacter):
                 try:
-                    fol.follow_step(lead.pos, dist, m, objs, npcs, speed_mul=spm, leader=lead)
+                    fol.follow_step(lead.pos, hold_dist, m, objs, npcs, speed_mul=spm, leader=lead)
                 except Exception:
                     pass
             else:
+                try:
+                    fol.event_speed_mul = spm
+                except Exception:
+                    pass
                 try:
                     fol.set_new_target(lead.pos[0], lead.pos[1])
                 except Exception:
@@ -13098,6 +14331,8 @@ class EventManager:
             ents.extend(objs)
         except Exception:
             pass
+        self._runtime_npcs = npcs
+        self._runtime_objs = objs
         self._last_camera = camera
         # 0. 화면 전체 페이드 (fade_color 오버레이) — FADEIN/FADEOUT의 val은 초(duration), dt_sec 기준
         if self.is_fading and float(getattr(self, "fade_duration_sec", 0.0) or 0.0) > 0.0:
@@ -13149,6 +14384,10 @@ class EventManager:
             self._tick_say_typewriter()
         except Exception:
             pass
+        try:
+            self._tick_notice_auto()
+        except Exception:
+            pass
         # SAY 중 하단 박스 회피 카메라 — 매 프레임 화자 위치 재계산
         try:
             if bool(getattr(self, "is_talking", False)):
@@ -13189,7 +14428,12 @@ class EventManager:
 
         if self._escape_mode == "condition" and self._escape_condition:
             ctx = dict(self.flow.save_data)
-            ctx["gamestart"] = self.flow.boot_phase
+            try:
+                from flow import eval_session_vars
+
+                ctx.update(eval_session_vars(self.flow))
+            except Exception:
+                ctx["gamestart"] = self.flow.boot_phase
             if evaluate_global_condition(self._escape_condition, ctx):
                 self._trigger_event_escape()
 
@@ -13229,13 +14473,32 @@ class EventManager:
                     continue
 
                 if st == "CONDITION":
-                    ctx = dict(self.flow.save_data) if self.flow else {}
-                    try:
-                        ctx["gamestart"] = self.flow.boot_phase
-                    except Exception:
-                        pass
-                    if not evaluate_event_step_condition(step, ctx):
+                    # if: 매번 평가 (연쇄). elif/else: 앞에서 맞았으면 이 블록은 SKIP 까지 건너뜀.
+                    chain = condition_step_chain_mode(step)
+                    taken = bool(getattr(self, "_event_if_taken", False))
+                    if chain in ("elif", "else") and taken:
                         skip_depth += 1
+                    else:
+                        if chain == "else":
+                            ok = True
+                        else:
+                            ctx = dict(self.flow.save_data) if self.flow else {}
+                            try:
+                                from flow import eval_session_vars
+
+                                ctx.update(eval_session_vars(self.flow))
+                            except Exception:
+                                try:
+                                    ctx["gamestart"] = self.flow.boot_phase
+                                except Exception:
+                                    pass
+                            ok = evaluate_event_step_condition(step, ctx)
+                        if not ok:
+                            skip_depth += 1
+                        if chain == "if":
+                            self._event_if_taken = bool(ok)
+                        elif ok:
+                            self._event_if_taken = True
                     self._event_skip_depth = skip_depth
                     self.next_step()
                     burst += 1
@@ -13547,6 +14810,33 @@ class EventManager:
             except Exception:
                 pass
 
+        # ACTION_ANIM persist:true → 이벤트 종료·세이브(placed)에도 유지
+        try:
+            from field_runtime import parse_step_persist
+
+            if "persist" in step or "keep_after_event" in step or "hold_after_event" in step:
+                want_persist = bool(parse_step_persist(step, default=False))
+                if want_persist:
+                    spec = action_anim_persist_spec_from_step(step)
+                    if spec:
+                        for target in targets:
+                            if target is player:
+                                continue
+                            try:
+                                target._action_anim_persist = True
+                                target._persisted_action_anim = dict(spec)
+                            except Exception:
+                                pass
+                            self._sync_action_anim_to_placed(target, spec)
+                else:
+                    for target in targets:
+                        if target is player:
+                            continue
+                        clear_persisted_action_anim(target)
+                        self._sync_action_anim_to_placed(target, None)
+        except Exception as e:
+            print(f"[ACTION_ANIM persist] {e}")
+
         # once+wait: 점프 arc 시간과 val 중 더 긴 쪽까지 대기
         wait_ms = duration_ms
         if anim_name == "jump" and max_hop_ms > 0:
@@ -13556,6 +14846,40 @@ class EventManager:
         else:
             self._anim_wait_end_ms = 0
             self.next_step()
+
+    def _sync_action_anim_to_placed(self, target, spec) -> None:
+        """ACTION_ANIM persist → save_data['placed'][].action_anim 동기화."""
+        if target is None:
+            return
+        nm = str(getattr(target, "name", "") or "").strip()
+        if not nm or nm.lower() == "player":
+            return
+        try:
+            from flow import find_placed_entry, upsert_placed_entity
+
+            sd = self._story_save_data()
+            entry = find_placed_entry(sd, nm)
+            if entry is None:
+                if not bool(getattr(target, "_placed_persist", False)):
+                    return
+                # PLACE persist 된 대상이면 entry 보장
+                mid = str(sd.get("current_map") or "")
+                upsert_placed_entity(
+                    sd,
+                    name=nm,
+                    map_id=mid,
+                    pos=getattr(target, "pos", None),
+                    dir=getattr(target, "direction", None),
+                )
+                entry = find_placed_entry(sd, nm)
+            if entry is None:
+                return
+            if isinstance(spec, dict) and (spec.get("anim") or spec.get("name")):
+                entry["action_anim"] = dict(spec)
+            else:
+                entry.pop("action_anim", None)
+        except Exception as e:
+            print(f"[placed action_anim] {e}")
 
     def _event_move_start_on_target(self, fragment, target, player, npcs, objs, wait_for_finish):
         """
@@ -13674,22 +14998,39 @@ class EventManager:
 
     def _spawn_anim_once(self, step):
         """
-        ANIM_ONCE: object_defs 키(name) + 월드 pos — 애니 1회 재생, 끝날 때까지 다음 스텝 대기.
-        (내부적으로 Effect + _effect_wait_ref, EFFECT wait:true 와 동일한 완료 처리)
+        ANIM_ONCE: object_defs 키(name) + 월드 pos — 애니 1회 재생.
+        pos 가 [[x,y], ...] 이면 같은 프레임에 여러 곳. 기본은 전부 끝날 때까지 대기.
+        wait:false 면 즉시 다음 스텝 (연속 ANIM_ONCE 는 한 프레임에 같이 시작).
 
         JSON 필드:
-          name, pos — 필수
+          name, pos — 필수 (pos 는 [x,y] 또는 [[x,y],[x,y],...])
           frame_ms / anim_delay_ms — 프레임 간격(ms, 비우면 object_defs 기본)
           speed / anim_speed — 재생 배율 (2=2배 빠름). frame_ms와 함께 쓰면 배율 적용
+          wait — 재생 끝까지 대기 (기본 true)
         """
         e_name = (step.get("name") or "").strip()
         if not e_name:
             return False
-        px, py = _anim_once_pos_from_step(step)
+        positions = _anim_once_positions_from_step(step)
         delay = _effect_anim_delay_from_step(step, obj_name=e_name)
-        new_effect = Effect(e_name, px, py, loop=False, anchor="feet", anim_delay_ms=delay)
-        self.active_effects.append(new_effect)
-        self._effect_wait_ref = new_effect
+        spawned = []
+        for px, py in positions:
+            new_effect = Effect(
+                e_name, px, py, loop=False, anchor="feet", anim_delay_ms=delay
+            )
+            self.active_effects.append(new_effect)
+            spawned.append(new_effect)
+        if not spawned:
+            return False
+        wait_done = True
+        if step.get("wait") is not None:
+            wait_done = _parse_effect_step_wait(step)
+        if wait_done:
+            self._effect_wait_refs = list(spawned)
+            self._effect_wait_ref = spawned[-1]
+        else:
+            self._effect_wait_refs = None
+            self._effect_wait_ref = None
         return True
 
     def _execute_carry_step(self, step, player, npcs, objs):
@@ -13793,14 +15134,21 @@ class EventManager:
     def _execute_change_step(self, step, player, npcs, objs):
         """
         [CHANGE] FieldItem/캐릭터 외형 교체. target 다중·all_npcs 지원.
-        held/@held 는 단일만. fade 는 단일 대상일 때만 디졸브.
+        held/@held 는 단일만.
+        speed(초)=변신 시간(옛·새 스프라이트 겹침). fade 도 같은 크로스페이드.
+        speed 가 있으면 speed, 없으면 fade. 둘 다 0이면 즉시. 다중 대상은 즉시.
+        persist:true 이면 save_data.placed 의 name 을 to 키로 바꿔 재시작 후에도 외형을 유지.
+        object_defs ↔ char_defs 교차 교체도 가능 (시든 꽃 오브젝트 → 요정 캐릭터).
         """
+        from field_runtime import parse_step_persist
+
         tgt_raw = step.get("target") or step.get("from") or ""
         new_name = (step.get("to") or step.get("new_name") or step.get("name") or "").strip()
         if not new_name:
-            print("[CHANGE] to(새 object_defs 키) 필요")
+            print("[CHANGE] to(새 object_defs / char_defs 키) 필요")
             self.next_step()
             return
+        want_persist = parse_step_persist(step, default=False)
 
         tokens = _split_event_target_tokens(tgt_raw)
         items = []
@@ -13845,40 +15193,245 @@ class EventManager:
             fade_sec = float(step.get("fade", step.get("fade_sec", 0)) or 0)
         except (TypeError, ValueError):
             fade_sec = 0.0
+        try:
+            speed_sec = float(step.get("speed", step.get("speed_sec", 0)) or 0)
+        except (TypeError, ValueError):
+            speed_sec = 0.0
+        morph_sec = speed_sec if speed_sec > 0.0 else fade_sec
 
-        # 다중 대상은 즉시 교체 (fade 는 단일만)
-        if fade_sec > 0.0 and len(items) == 1 and isinstance(items[0], (BaseCharacter, FieldItem)):
+        # 다중 대상은 즉시 교체 (speed/fade 는 단일만)
+        if morph_sec > 0.0 and len(items) == 1 and isinstance(items[0], (BaseCharacter, FieldItem)):
             item = items[0]
+            try:
+                start_a = int(getattr(item, "alpha", 255) or 255)
+            except (TypeError, ValueError):
+                start_a = 255
+            start_a = max(0, min(255, start_a))
+            if start_a <= 0:
+                start_a = 255
+            ghost = snapshot_change_ghost(item)
+            item = self._apply_change_retarget(
+                item, new_name, persist=want_persist, player=player, npcs=npcs, objs=objs
+            )
+            if item is None:
+                self.next_step()
+                return
+            item.alpha = 0
+            if ghost:
+                ghost["alpha"] = start_a
+                item._change_ghost = ghost
+            else:
+                item._change_ghost = None
             self._change_fade = {
                 "item": item,
                 "new_name": new_name,
-                "phase": "out",
-                "half_sec": max(0.05, fade_sec / 2.0),
-                "start_alpha": int(getattr(item, "alpha", 255)),
-                "applied": False,
+                "applied": True,
+                "persist": want_persist,
+                "sec": max(0.05, float(morph_sec)),
+                "elapsed": 0.0,
+                "start_alpha": start_a,
             }
             self.is_busy = True
             return
 
         for item in items:
-            self._apply_change_retarget(item, new_name)
+            _clear_entity_change_ghost(item)
+            self._apply_change_retarget(
+                item, new_name, persist=want_persist, player=player, npcs=npcs, objs=objs
+            )
         self.next_step()
 
-    def _apply_change_retarget(self, item, new_name):
-        """CHANGE 외형 교체 실제 적용 (즉시/디졸브 공통)."""
-        old = getattr(item, "name", "?")
-        if isinstance(item, BaseCharacter):
-            if item.retarget_char_def(new_name):
-                print(f"[CHANGE] {old} -> {new_name} (char)")
-            else:
-                print(f"[CHANGE] 실패: to='{new_name}' 없음(char_defs)")
-        elif isinstance(item, FieldItem):
-            if item.retarget_object_def(new_name):
-                print(f"[CHANGE] {old} -> {new_name}")
-            else:
-                print(f"[CHANGE] 실패: to='{new_name}' 없음(object_defs)")
+    def _change_def_kind(self, name: str):
+        """CHANGE to 키가 오브젝트인지 캐릭터인지. 둘 다 아니면 None."""
+        key = str(name or "").strip()
+        if not key:
+            return None
+        if key in OBJ_ASSETS:
+            return "obj"
+        if key in CHAR_ASSETS:
+            return "char"
+        return None
+
+    def _spawn_entity_for_change(self, name, pos, src):
+        """CHANGE 교차 교체용 스폰. PLACE 와 같은 FieldItem / BaseCharacter 경로."""
+        try:
+            pos_xy = [float(pos[0]), float(pos[1])]
+        except (TypeError, ValueError, IndexError):
+            pos_xy = [0.0, 0.0]
+        st = getattr(src, "sprite_tilt", None)
+        h = getattr(src, "height", None)
+        ys = getattr(src, "ysort_mode", None)
+        ly = getattr(src, "layer", None)
+        if name in OBJ_ASSETS:
+            return FieldItem(
+                name,
+                pos_xy[0],
+                pos_xy[1],
+                sprite_tilt=st if st is not None else 1.0,
+                height=h,
+                ysort_mode=ys,
+                layer=ly,
+            )
+        ch_info = {}
+        if st is not None:
+            ch_info["sprite_tilt"] = st
+        if h is not None:
+            ch_info["height"] = h
+        if ys is not None:
+            ch_info["ysort"] = ys
+        if ly is not None:
+            ch_info["layer"] = ly
+        from char_behavior import attach_npc_from_entry, spawn_as_mask_walker
+
+        entry = {"name": name, "pos": list(pos_xy)[:2]}
+        if spawn_as_mask_walker(name, entry):
+            ent = MaskWalkingCharacter(name, pos_xy, ch_info)
         else:
+            ent = BaseCharacter(name, pos_xy, ch_info)
+        try:
+            attach_npc_from_entry(ent, entry)
+        except Exception:
+            pass
+        return ent
+
+    def _swap_change_entity_in_scene(self, old_ent, new_ent, npcs, objs, player=None):
+        """objs/npcs/_active_entities 에서 old 를 빼고 new 를 넣는다."""
+        if old_ent is None or new_ent is None or old_ent is new_ent:
+            return
+        if player is not None and getattr(player, "held_item", None) is old_ent:
+            try:
+                player.held_item = None
+            except Exception:
+                pass
+        for lst in (objs, npcs):
+            if lst is None:
+                continue
+            try:
+                while old_ent in lst:
+                    lst.remove(old_ent)
+            except Exception:
+                pass
+        dest = objs if isinstance(new_ent, FieldItem) else npcs
+        if dest is not None and new_ent not in dest:
+            dest.append(new_ent)
+        ae = getattr(self, "_active_entities", None)
+        if isinstance(ae, list):
+            replaced = False
+            for i, x in enumerate(ae):
+                if x is old_ent:
+                    ae[i] = new_ent
+                    replaced = True
+            if not replaced:
+                ae.append(new_ent)
+        fols = getattr(self, "_followers", None)
+        if isinstance(fols, list):
+            for f in fols:
+                if not isinstance(f, dict):
+                    continue
+                if f.get("ent") is old_ent:
+                    f["ent"] = new_ent
+                if str(f.get("follower") or "") == str(getattr(old_ent, "name", "") or ""):
+                    f["follower"] = str(getattr(new_ent, "name", "") or "")
+
+    def _sync_change_persist(self, item, old_name, new_name) -> None:
+        """CHANGE persist:true — placed 항목 이름을 to 키로 맞추고 좌표를 갱신한다."""
+        from flow import (
+            mark_entity_placed_persist,
+            rename_placed_entity,
+            upsert_placed_entity,
+        )
+
+        sd = self._story_save_data()
+        if not isinstance(sd, dict):
+            return
+        new_nm = str(new_name or "").strip()
+        if not new_nm:
+            return
+        mid = str(sd.get("current_map") or "")
+        old_nm = str(old_name or "").strip()
+        entry = rename_placed_entity(sd, old_nm, new_nm)
+        upsert_placed_entity(
+            sd,
+            name=new_nm,
+            map_id=mid,
+            pos=getattr(item, "pos", None),
+            dir=getattr(item, "direction", None),
+            sprite_tilt=getattr(item, "sprite_tilt", None),
+            height=getattr(item, "height", None),
+            ysort=getattr(item, "ysort_mode", None),
+            layer=getattr(item, "layer", None),
+        )
+        if not entry:
+            print(f"[CHANGE persist] placed 신규: {old_nm or '?'} -> {new_nm}")
+        else:
+            print(f"[CHANGE persist] placed {old_nm or entry.get('name')} -> {new_nm}")
+        mark_entity_placed_persist(item, new_nm)
+
+    def _apply_change_retarget(
+        self, item, new_name, *, persist=False, player=None, npcs=None, objs=None
+    ):
+        """CHANGE 외형 교체. 같은 종류면 retarget, 오브젝트↔캐릭터면 엔티티를 교체.
+
+        성공 시 현재 엔티티(교체됐으면 새 인스턴스)를 반환. 실패 시 None.
+        """
+        if item is None:
+            return None
+        old = getattr(item, "name", "?")
+        new_nm = str(new_name or "").strip()
+        new_kind = self._change_def_kind(new_nm)
+        if new_kind is None:
+            print(f"[CHANGE] 실패: to='{new_nm}' 이 object_defs/char_defs 에 없음")
+            return None
+        old_kind = "char" if isinstance(item, BaseCharacter) else (
+            "obj" if isinstance(item, FieldItem) else None
+        )
+        if old_kind is None:
             print("[CHANGE] 대상이 FieldItem/캐릭터 가 아님")
+            return None
+
+        live = item
+        if old_kind == new_kind:
+            if old_kind == "char":
+                ok = bool(item.retarget_char_def(new_nm))
+                tag = "char"
+            else:
+                ok = bool(item.retarget_object_def(new_nm))
+                tag = "obj"
+            if not ok:
+                print(f"[CHANGE] 실패: to='{new_nm}' 없음({tag})")
+                return None
+            print(f"[CHANGE] {old} -> {new_nm} ({tag})")
+        else:
+            if player is not None and getattr(player, "held_item", None) is item and new_kind == "char":
+                print("[CHANGE] 들고 있는 물건을 캐릭터로 바꿀 수 없음")
+                return None
+            new_ent = self._spawn_entity_for_change(new_nm, getattr(item, "pos", [0, 0]), item)
+            if new_ent is None:
+                print(f"[CHANGE] 실패: {old} -> {new_nm} 스폰")
+                return None
+            d = str(getattr(item, "direction", "") or "").strip().lower()
+            if d in ("left", "right") and hasattr(new_ent, "direction"):
+                new_ent.direction = d
+                try:
+                    _event_refresh_facing_image(new_ent)
+                except Exception:
+                    pass
+            save_key = str(getattr(item, "_placed_save_name", "") or "").strip()
+            was_placed = bool(getattr(item, "_placed_persist", False))
+            self._swap_change_entity_in_scene(item, new_ent, npcs, objs, player=player)
+            live = new_ent
+            print(f"[CHANGE] {old} -> {new_nm} ({old_kind}→{new_kind})")
+            if was_placed and not persist:
+                from flow import mark_entity_placed_persist
+
+                mark_entity_placed_persist(live, save_key or old)
+
+        if persist:
+            try:
+                self._sync_change_persist(live, old, new_nm)
+            except Exception as e:
+                print(f"[CHANGE persist] {e}")
+        return live
 
     def _execute_step(self, step, player, camera, npcs, objs):
         s_type = step["type"]
@@ -13887,6 +15440,9 @@ class EventManager:
         if s_type == "SAY":
             # 대화는 클릭할 때까지 busy 유지 (main에서 처리)
             self._apply_say_step(step, chain=False)
+        elif s_type == "NOTICE":
+            # 화면을 어둡게 하고 중앙 안내창. 클릭/A 또는 auto+val 로 닫기.
+            self._apply_notice_step(step)
         elif s_type == "EMOTE":
             # 대화창 없이 머리 위 말풍선만 (SAY bubble 세트 공유)
             # action: show | clear/remove
@@ -14227,6 +15783,9 @@ class EventManager:
             }
             if pt["instant"]:
                 tc["instant_once"] = True
+            # reverse_tilt 명시 시에만 기록 → 생략이면 맵 field.reverse_tilt 유지
+            if pt.get("reverse_tilt") is not None:
+                tc["reverse_tilt"] = bool(pt["reverse_tilt"])
             self.tilt_control = tc
             self.next_step()
 
@@ -14409,12 +15968,15 @@ class EventManager:
         elif s_type in ("RESULT", "APPLY_RESULT", "SET_PROGRESS"):
             # 헤더 result 와 동일 키로 세이브/진행 갱신. CONDITION 성공 구간 등 원하는 시점에 배치.
             # 헤더 result 는 이벤트 종료 시 별도로 계속 적용됨.
-            from field_runtime import parse_result_step
+            from field_runtime import parse_result_step, result_step_is_session
 
             patch = parse_result_step(step if isinstance(step, dict) else {})
             if patch:
                 self._apply_event_result_to_save(
-                    patch, self.active_event_id, source="step"
+                    patch,
+                    self.active_event_id,
+                    source="step",
+                    session=result_step_is_session(step if isinstance(step, dict) else {}),
                 )
                 self._progress_refresh_pending = True
             else:
@@ -14451,10 +16013,14 @@ class EventManager:
                     "event_id": self.active_event_id,
                     "result": self.active_event_result,
                     "return_idx": int(self.step_idx) + 1,
+                    "skip_depth": int(getattr(self, "_event_skip_depth", 0) or 0),
+                    "if_taken": bool(getattr(self, "_event_if_taken", False)),
                 }
             )
             self._fragment_call_depth += 1
             self._fragment_call_set.add(call_id)
+            self._event_skip_depth = 0
+            self._event_if_taken = False
             self.active_event = callee_steps
             parent_id = self.active_event_id or "?"
             self.active_event_id = f"{parent_id}::{call_id}"
@@ -14472,7 +16038,7 @@ class EventManager:
             return
 
         elif s_type == "FOLLOW_START":
-            # 컷신용 A* follow. persist:true 이면 ambient follow + save_data.placed 에도 기록
+            # 컷신용 트레일 follow. persist:true 이면 ambient follow + save_data.placed 에도 기록
             # (이벤트 종료 후에도 필드에서 따라다니고, 맵 이동·세이브에 유지)
             # follower: 한 명 또는 쉼표 여러 명 ("ally1,ally2,ally3") — 같은 leader/dist/speed
             # 여러 명이면 slot 대형으로 벌림. 목록은 end_event 후에도 유지(FOLLOW_STOP 으로 해제).
@@ -14538,7 +16104,9 @@ class EventManager:
                             from char_behavior import set_npc_behavior
 
                             set_npc_behavior(fol_ent, "follow")
-                            fol_ent._placed_persist = True
+                            from flow import mark_entity_placed_persist
+
+                            mark_entity_placed_persist(fol_ent)
                         except Exception:
                             pass
                 # 같은 leader 동행들에게 slot 재부여 (겹침 완화)
@@ -14601,6 +16169,21 @@ class EventManager:
                     pass
             else:
                 self._followers = []
+            try:
+                used_leads = {str(x.get("leader") or "").strip() for x in self._followers}
+                for e in [player] + list(npcs or []) + list(objs or []):
+                    if e is None:
+                        continue
+                    nm = str(getattr(e, "name", "") or "").strip()
+                    iid = str(getattr(e, "instance_id", "") or "").strip()
+                    if (nm and nm in used_leads) or (iid and iid in used_leads):
+                        continue
+                    if getattr(e, "_follow_trail", None):
+                        clr = getattr(e, "follow_trail_clear", None)
+                        if callable(clr):
+                            clr()
+            except Exception:
+                pass
             # 세이브 동행 목록:
             # · 본편(boot>=2)에서만 디스크/메모리 세이브 갱신
             # · 데모 FOLLOW_STOP 은 런타임만 끊음 (이어하기 파티를 지우지 않음)
@@ -14686,18 +16269,17 @@ class EventManager:
 
         elif s_type == "CURSOR_VISIBLE":
             # val: True/False 또는 0/1, "0"/"1" 등도 허용
+            from field_runtime import parse_step_bool, parse_step_persist
+
             v = step.get("val", True)
-            if isinstance(v, str):
-                is_visible = v.strip().lower() not in ("0", "false", "f", "no", "n", "off", "")
+            is_visible = parse_step_bool(v, True)
+            self.cursor_visible = bool(is_visible)
+            # persist:true → 이벤트 종료 후에도 유지. 없으면 종료 시 시작 직전 스냅샷으로 복구.
+            if "persist" in step or "keep_after_event" in step or "hold_after_event" in step:
+                self._cursor_visible_persist = bool(parse_step_persist(step, default=False))
             else:
-                is_visible = bool(v)
-            self.cursor_visible = is_visible
-            # persist:true면 이 이벤트가 끝나도 상태를 유지한다.
-            p = step.get("persist", False)
-            if isinstance(p, str):
-                self._cursor_visible_persist = p.strip().lower() not in ("0", "false", "f", "no", "n", "off", "")
-            else:
-                self._cursor_visible_persist = bool(p)
+                # persist 키 생략 = 이 이벤트 안에서만 (종료 시 스냅샷 복구)
+                self._cursor_visible_persist = False
             self.next_step()
 
         elif s_type == "GAME_EXIT_BUTTON":
@@ -14720,6 +16302,18 @@ class EventManager:
             )
             persist = parse_step_persist(step, default=False)
             set_game_debug_button_visible(self, bool(visible), persist=bool(persist))
+            self.next_step()
+
+        elif s_type == "GAME_OPTIONS_BUTTON":
+            # 설정(option) 버튼 — 클릭 시 음악/새로시작/끝내기 메뉴
+            from field_runtime import parse_step_bool, parse_step_persist, set_game_options_button_visible
+
+            visible = parse_step_bool(
+                step.get("val", step.get("on", step.get("show", True))),
+                True,
+            )
+            persist = parse_step_persist(step, default=False)
+            set_game_options_button_visible(self, bool(visible), persist=bool(persist))
             self.next_step()
 
         elif s_type == "PLACE":
@@ -15074,8 +16668,12 @@ class EventManager:
                 self.next_step()
 
         elif s_type == "ANIM_ONCE":
-            # 지정 좌표 + object_defs 애니 1회 (옵션 없음). 재생 끝까지 wait.
+            # 지정 좌표 + object_defs 애니 1회. pos 여러 곳이면 동시. 기본 wait.
             if not self._spawn_anim_once(step):
+                self.next_step()
+            elif not getattr(self, "_effect_wait_refs", None) and getattr(
+                self, "_effect_wait_ref", None
+            ) is None:
                 self.next_step()
 
         elif s_type == "CARRY":
@@ -15199,10 +16797,22 @@ class EventManager:
                     now_t=now_t,
                 )
 
-            # 음악 재생(지정된 경우)
+            # 음악 재생(지정된 경우) — MUSIC_ASSETS 키 또는 파일명/경로
             if music:
                 try:
-                    if not os.path.isabs(music) and not music.replace("\\", "/").startswith("assets/"):
+                    path = None
+                    if self.music:
+                        lib = getattr(self.music, "library", None) or {}
+                        if music not in lib:
+                            try:
+                                self.music.refresh_library()
+                                lib = getattr(self.music, "library", None) or {}
+                            except Exception:
+                                pass
+                        path = lib.get(music)
+                    if path:
+                        music = path
+                    elif not os.path.isabs(music) and not music.replace("\\", "/").startswith("assets/"):
                         # 기본: assets/musics (프로젝트 표준)
                         cand = os.path.join("assets", "musics", music)
                         # 구형 호환: assets/music
@@ -15255,6 +16865,7 @@ class EventManager:
                 volume=vol,
                 queue_after_current=bool(q),
             )
+            self._mark_event_music_persist(step)
             self.next_step()
 
         elif s_type == "MUSIC_STOP":
@@ -15264,11 +16875,13 @@ class EventManager:
                 except Exception:
                     fout = 0.2
                 self.music.stop(fade_out_ms=int(max(0.0, fout) * 1000.0))
+            self._mark_event_music_persist(step)
             self.next_step()
 
         elif s_type == "MUSIC_END":
             if self.music:
                 self.music.end_now()
+            self._mark_event_music_persist(step)
             self.next_step()
 
         elif s_type == "MUSIC_PAUSE":
@@ -15281,6 +16894,31 @@ class EventManager:
                 self.music.resume()
             self.next_step()
 
+    def _mark_event_music_persist(self, step):
+        """MUSIC_PLAY/STOP/END 가 이번 이벤트에서 BGM을 건드렸음을 기록.
+
+        persist:true  → 이벤트 끝나도 지금 곡(또는 무음) 유지
+        persist:false/생략 → 이벤트 종료 시 맵 field.music 으로 복귀
+        같은 이벤트에서 여러 번 쓰면 마지막 MUSIC_* 의 persist 가 이긴다.
+        """
+        self._event_music_touched = True
+        try:
+            from field_runtime import parse_step_persist
+
+            self._event_music_persist = bool(parse_step_persist(step, default=False))
+        except Exception:
+            raw = (step or {}).get("persist") if isinstance(step, dict) else None
+            if isinstance(raw, str):
+                self._event_music_persist = raw.strip().lower() in (
+                    "1",
+                    "true",
+                    "t",
+                    "yes",
+                    "y",
+                    "on",
+                )
+            else:
+                self._event_music_persist = bool(raw)
 
     def apply_selectbox_choice(self, choice: str) -> None:
         """SELECTBOX 선택 결과 적용.
@@ -15391,21 +17029,23 @@ class EventManager:
                 self.next_step()
                 return
             item = cf["item"]
-            delta = fade_alpha_delta(255.0, float(cf["half_sec"]), dt_sec)
-            if cf["phase"] == "out":
-                item.alpha = max(0, int(getattr(item, "alpha", 255)) - int(round(delta)))
-                if item.alpha <= 0:
-                    item.alpha = 0
-                    if not cf["applied"]:
-                        self._apply_change_retarget(item, cf["new_name"])
-                        cf["applied"] = True
-                    cf["phase"] = "in"
-            else:  # in
-                item.alpha = min(255, int(getattr(item, "alpha", 0)) + int(round(delta)))
-                if item.alpha >= 255:
-                    item.alpha = 255
-                    self._change_fade = None
-                    self.next_step()
+            sec = max(0.05, float(cf.get("sec") or 0.05))
+            cf["elapsed"] = float(cf.get("elapsed") or 0.0) + float(dt_sec)
+            u = min(1.0, float(cf["elapsed"]) / sec)
+            try:
+                start_a = int(cf.get("start_alpha", 255) or 255)
+            except (TypeError, ValueError):
+                start_a = 255
+            start_a = max(0, min(255, start_a))
+            item.alpha = int(round(start_a * u))
+            ghost = getattr(item, "_change_ghost", None)
+            if isinstance(ghost, dict):
+                ghost["alpha"] = int(round(start_a * (1.0 - u)))
+            if u >= 1.0:
+                item.alpha = start_a
+                _clear_entity_change_ghost(item)
+                self._change_fade = None
+                self.next_step()
             return
 
         if s_type in ("EFFECT", "ANIM_ONCE"):
@@ -15668,6 +17308,8 @@ class EventManager:
         self.is_busy = False
         was_talking = bool(getattr(self, "is_talking", False))
         self.is_talking = False
+        self.is_notice = False
+        self._notice_auto = False
         self._say_ui_fade_phase = None
         if was_talking:
             try:
@@ -15692,6 +17334,8 @@ class EventManager:
             self.is_waiting_for_appear = False
         self.is_busy = False
         self.is_talking = False
+        self.is_notice = False
+        self._notice_auto = False
         self._say_ui_fade_phase = None
         if not preserve_locomotion:
             self._followers = []
@@ -15781,49 +17425,73 @@ class EventManager:
         self._trigger_event_escape()
         return True
 
-    def _apply_event_result_to_save(self, results, event_id=None, *, source="end"):
-        """이벤트 result / RESULT 스텝 patch → flow.save_data.
+    def _apply_event_result_to_save(self, results, event_id=None, *, source="end", session=False):
+        """이벤트 result / RESULT 스텝 patch → flow.save_data 또는 session_progress.
 
         source:
           - "end": 이벤트·CALL_EVENT 종료 시 헤더 result
           - "step": RESULT 이벤트 스텝 (중간 적용)
+        session=True: 세이브 파일에 안 씀. 이번 실행만 (휘발 마커·미완료 점유).
+          이후 같은 키를 일반 RESULT 로 쓰면 세션 값을 지우고 세이브에 확정한다.
         """
         if not results or not getattr(self, "flow", None):
             return
         eid = event_id or self.active_event_id
+        if session:
+            if not isinstance(getattr(self.flow, "session_progress", None), dict):
+                self.flow.session_progress = {}
+            dest = self.flow.session_progress
+            tag = "세션"
+        else:
+            dest = self.flow.save_data
+            tag = "세이브"
+        written = []
         new_prog = results.get("mainprogress", None)
         if new_prog is not None and str(new_prog) != "":
-            self.flow.save_data["mainprogress"] = new_prog
-            print(f"[진행도 변경] -> {new_prog}")
+            dest["mainprogress"] = new_prog
+            written.append("mainprogress")
+            print(f"[진행도 변경{'' if not session else '·세션'}] -> {new_prog}")
         if "add_laugh_point" in results:
+            # 웃음 포인트는 세션이어도 세이브에 가산 (휘발이면 포인트만 날아가 버림)
             points_to_add = results["add_laugh_point"]
-            current_points = self.flow.save_data.get("laugh_point", 0)
-            self.flow.save_data["laugh_point"] = current_points + points_to_add
-            print(f"[포인트 획득] +{points_to_add} (총: {self.flow.save_data['laugh_point']})")
+            laugh_dest = self.flow.save_data
+            current_points = laugh_dest.get("laugh_point", 0)
+            laugh_dest["laugh_point"] = current_points + points_to_add
+            print(f"[포인트 획득] +{points_to_add} (총: {laugh_dest['laugh_point']})")
         for rk, rv in results.items():
-            if rk in ("mainprogress", "add_laugh_point", "gamestart"):
+            if rk in ("mainprogress", "add_laugh_point", "gamestart", "session"):
                 continue
             if rv is None or (isinstance(rv, str) and str(rv).strip() == ""):
                 continue
-            # RESULT 스텝 연산자 +=  → 숫자 가산
             if isinstance(rk, str) and rk.startswith("+="):
                 base = rk[2:].strip()
                 if not base:
                     continue
                 try:
-                    cur = self.flow.save_data.get(base, 0)
-                    self.flow.save_data[base] = float(cur or 0) + float(rv)
-                    if float(self.flow.save_data[base]) == int(self.flow.save_data[base]):
-                        self.flow.save_data[base] = int(self.flow.save_data[base])
+                    cur = dest.get(base)
+                    if cur is None and not session:
+                        cur = 0
+                    elif cur is None:
+                        cur = self.flow.save_data.get(base, 0)
+                    dest[base] = float(cur or 0) + float(rv)
+                    if float(dest[base]) == int(dest[base]):
+                        dest[base] = int(dest[base])
                 except (TypeError, ValueError):
-                    self.flow.save_data[base] = rv
-                print(f"[세이브 가산] {base} += {rv} → {self.flow.save_data.get(base)}")
+                    dest[base] = rv
+                written.append(base)
+                print(f"[{tag} 가산] {base} += {rv} → {dest.get(base)}")
                 continue
-            self.flow.save_data[rk] = rv
-            print(f"[세이브 갱신] {rk} = {rv}")
+            dest[rk] = rv
+            written.append(rk)
+            print(f"[{tag} 갱신] {rk} = {rv}")
+        if not session:
+            sp = getattr(self.flow, "session_progress", None)
+            if isinstance(sp, dict):
+                for k in written:
+                    sp.pop(k, None)
         if eid:
             if str(source or "end") == "step":
-                print(f"[RESULT 스텝] ID: {eid}")
+                print(f"[RESULT 스텝{'·session' if session else ''}] ID: {eid}")
             else:
                 print(f"[이벤트 종료] ID: {eid}")
 
@@ -15845,9 +17513,12 @@ class EventManager:
             self.step_idx = int(frame["return_idx"])
             self.is_busy = False
             self.is_talking = False
+            self.is_notice = False
+            self._notice_auto = False
             self._say_ui_fade_phase = None
             self._loop_end_to_head, self._loop_pairs = _parse_loop_jump_table(self.active_event)
-            self._event_skip_depth = 0
+            self._event_skip_depth = int(frame.get("skip_depth", 0) or 0)
+            self._event_if_taken = bool(frame.get("if_taken", False))
             print(f"[CALL_EVENT] return -> {self.active_event_id}")
             return
 
@@ -15857,9 +17528,11 @@ class EventManager:
                 ent.event_waypoints = None
             except Exception:
                 pass
-            # ACTION_ANIM jump loop hop 정리
+            # ACTION_ANIM jump loop hop 정리 (persist 는 유지)
             try:
-                if getattr(ent, "_hop_repeat", None):
+                if getattr(ent, "_hop_repeat", None) and not bool(
+                    getattr(ent, "_action_anim_persist", False)
+                ):
                     ent._hop_repeat = None
                     sm = getattr(ent, "stop_moving", None)
                     if callable(sm):
@@ -15890,6 +17563,8 @@ class EventManager:
         self._is_sync_event = False
         self.is_busy = False
         self.is_talking = False
+        self.is_notice = False
+        self._notice_auto = False
         self._say_ui_fade_phase = None
         self._say_bubble = None
         self._say_bubbles = []
@@ -15903,13 +17578,26 @@ class EventManager:
                 self.flow.clear_pre_event_checkpoint()
         except Exception:
             pass
-        # CHANGE 디졸브가 끝나기 전에 이벤트가 종료되면 외형 교체를 마저 적용하고 alpha 복구
+        # CHANGE 크로스페이드가 끝나기 전에 이벤트가 종료되면 외형 교체를 마저 적용하고 alpha 복구
         cf_end = getattr(self, "_change_fade", None)
         if cf_end:
             try:
-                if not cf_end.get("applied"):
-                    self._apply_change_retarget(cf_end["item"], cf_end["new_name"])
-                cf_end["item"].alpha = 255
+                item_end = cf_end.get("item")
+                if item_end is not None:
+                    if not cf_end.get("applied"):
+                        self._apply_change_retarget(
+                            item_end,
+                            cf_end["new_name"],
+                            persist=bool(cf_end.get("persist")),
+                            player=getattr(self, "_runtime_player", None),
+                            npcs=getattr(self, "_runtime_npcs", None),
+                            objs=getattr(self, "_runtime_objs", None),
+                        )
+                    try:
+                        item_end.alpha = int(cf_end.get("start_alpha", 255) or 255)
+                    except (TypeError, ValueError):
+                        item_end.alpha = 255
+                    _clear_entity_change_ghost(item_end)
             except Exception:
                 pass
             self._change_fade = None
@@ -15928,10 +17616,11 @@ class EventManager:
             self.shear_control = None
         self.world_zoom_step_speed = None
         self.world_zoom_timed = None
-        # 기본 동작: 이벤트가 끝나면 커서는 다시 보이게 복구.
-        # 단, CURSOR_VISIBLE에 persist:true가 지정되면 상태를 유지한다.
+        # 커서: persist 없으면 이벤트 시작 직전 상태로 복구 (무조건 True 강제 금지).
+        # persist:true 인 CURSOR_VISIBLE 이 있었으면 현재 값 유지.
         if not bool(getattr(self, "_cursor_visible_persist", False)):
-            self.cursor_visible = True
+            self.cursor_visible = bool(getattr(self, "_cursor_visible_snapshot", True))
+        self._cursor_visible_persist = False
         if not bool(getattr(self, "_game_exit_button_persist", False)):
             from field_runtime import set_game_exit_button_visible
 
@@ -15949,8 +17638,28 @@ class EventManager:
                 bool(getattr(self, "_game_debug_button_visible_snapshot", False)),
                 persist=False,
             )
+        if not bool(getattr(self, "_game_options_button_persist", False)):
+            from field_runtime import set_game_options_button_visible
+
+            set_game_options_button_visible(
+                self,
+                bool(getattr(self, "_game_options_button_visible_snapshot", False)),
+                persist=False,
+            )
         self._commit_persisted_entity_event_zooms()
         self._restore_entity_event_visuals()
+        # BGM: MUSIC_* 를 썼고 persist 가 아니면 맵 기본 음악으로 복귀
+        try:
+            touched = bool(getattr(self, "_event_music_touched", False))
+            keep = bool(getattr(self, "_event_music_persist", False))
+            self._event_music_touched = False
+            self._event_music_persist = False
+            if touched and not keep:
+                from field_runtime import restore_map_default_music
+
+                restore_map_default_music(self, map_id=getattr(self, "_runtime_map_id", None))
+        except Exception as e:
+            print(f"[MUSIC] restore map default failed: {e}")
 
     def _tick_entity_fx_on_entities(self, player, npcs, objs, dt_sec):
         """entity_fx pulse phase 갱신 (필드·이벤트 공통)."""
@@ -16055,7 +17764,8 @@ class EventManager:
             "text_show_delay_sec": float(text_delay),
             "force": bool(force),
             "auto": bool(auto),
-            "hi_res": self._parse_step_bool(step.get("hi_res", False), default=False),
+            # hi_res 는 무시. 예전엔 NATIVE_640 전환이었으나 이미지는 현재 논리 화면에 스케일.
+            "hi_res": False,
         }
 
     def try_advance_screen(self) -> bool:

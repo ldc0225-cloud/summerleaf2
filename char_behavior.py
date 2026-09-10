@@ -256,13 +256,25 @@ def attach_npc_from_entry(npc, world_entry: dict):
 
 
 def npc_interact_enabled(npc) -> bool:
-    from flow import entity_interact_enabled
+    """
+    NPC 클릭 후보.
+    권장: interact.enabled + bindings(event_id).
+    talk.lines 는 구형 폴백(이벤트 바인딩이 없을 때만).
+    """
+    from flow import entity_interact_enabled, entity_interact_spec, entity_is_interact_visible
 
+    if not entity_is_interact_visible(npc):
+        return False
+    if entity_interact_enabled(npc):
+        return True
+    # 구형: enabled 없이 talk 만 있는 경우(마이그레이션 전)
+    spec = entity_interact_spec(npc)
+    binds = spec.get("bindings") or []
+    if binds:
+        return False
     cdef = getattr(npc, "char_def", None) or {}
     talk = cdef.get("talk") or {}
-    if talk.get("lines") or talk.get("fallback"):
-        return True
-    return entity_interact_enabled(npc)
+    return bool(talk.get("lines") or talk.get("fallback"))
 
 
 def get_interact_range(npc) -> float:
@@ -759,12 +771,17 @@ def apply_entity_fx_from_def(entity, ndef: dict, *, spawn=None, rule=None) -> No
 
 
 def apply_entity_progress_state(entity, save_data: dict, *, session_vars=None) -> bool:
-    """spawn_state → progress_apply 순 적용. spawn:false 면 True."""
+    """spawn_state → progress_apply 순 적용. spawn:false 면 True.
+
+    PLACE persist(_placed_persist) 엔티티는 세이브 배치가 기준이라
+    spawn_state(맵 초기 숨김)로 덮어쓰지 않는다. progress_apply 는 그대로 적용.
+    """
     ndef = entity_progress_def(entity)
     ctx = build_eval_ctx(save_data or {}, session_vars)
 
     spawn = ndef.get("spawn_state")
-    if isinstance(spawn, dict) and spawn:
+    placed = bool(getattr(entity, "_placed_persist", False))
+    if isinstance(spawn, dict) and spawn and not placed:
         if apply_state_patch(entity, spawn):
             return True
 
@@ -817,6 +834,17 @@ def _say_step_from_line(line: dict, npc) -> dict:
 
 
 def start_npc_talk(npc, player, flow, ev_mgr, map_id: str, *, session_vars=None) -> bool:
+    """
+    구형 talk.lines 짧은 SAY.
+    interact.bindings 가 있으면 이벤트 경로만 쓰고 여기로 폴백하지 않는다.
+    """
+    from flow import entity_interact_spec, entity_is_interact_visible
+
+    if not entity_is_interact_visible(npc):
+        return False
+    spec = entity_interact_spec(npc)
+    if spec.get("bindings"):
+        return False
     if ev_mgr and (ev_mgr.active_event or ev_mgr.is_talking):
         return False
     line = pick_talk_line(npc, flow, map_id, player.pos, session_vars=session_vars)
@@ -1193,6 +1221,26 @@ def _tick_flee(npc, player, mask, objs, npcs, now_ms: int):
         setter(tx, ty, mask, objs, npcs)
 
 
+def _npc_is_event_follower(npc, ev_mgr) -> bool:
+    """FOLLOW_START 목록에 있으면 True. ambient follow A* 와 트레일 추종이 겹치지 않게."""
+    if npc is None or ev_mgr is None:
+        return False
+    names = set()
+    nm = str(getattr(npc, "name", "") or "").strip()
+    if nm:
+        names.add(nm)
+    iid = str(getattr(npc, "instance_id", "") or "").strip()
+    if iid:
+        names.add(iid)
+    if not names:
+        return False
+    for row in list(getattr(ev_mgr, "_followers", None) or []):
+        tok = str((row or {}).get("follower") or "").strip()
+        if tok and tok in names:
+            return True
+    return False
+
+
 def tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id: str = ""):
     """
     ambient AI 틱.
@@ -1229,6 +1277,9 @@ def tick_npc_behaviors(npcs, player, mask, objs, ev_mgr, map_id: str = ""):
         elif mode == "randomplay":
             _tick_randomplay(npc, mask, objs, npcs, now_ms)
         elif mode == "follow":
+            # FOLLOW_START 동행은 트레일 추종(_tick_event_followers)이 담당. 여기 A* 다가가기는 스킵.
+            if ev_mgr is not None and _npc_is_event_follower(npc, ev_mgr):
+                continue
             _tick_follow(npc, player, mask, objs, npcs, now_ms)
         elif mode == "flee":
             _tick_flee(npc, player, mask, objs, npcs, now_ms)
@@ -1305,4 +1356,8 @@ def npc_entry_from_instance(npc) -> dict:
         d["spawn_state"] = dict(we["spawn_state"])
     if isinstance(we.get("progress_apply"), list) and we["progress_apply"]:
         d["progress_apply"] = list(we["progress_apply"])
+    # 맵 인스턴스 대화 — world_data npcs[].talk (타입 char_defs.talk 와 병합)
+    talk = we.get("talk")
+    if isinstance(talk, dict) and talk:
+        d["talk"] = copy.deepcopy(talk)
     return d

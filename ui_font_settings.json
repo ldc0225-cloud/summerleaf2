@@ -158,12 +158,12 @@
         255,
         0
       ],
-      "outline_enabled": false,
-      "outline_px_320": 1.0,
+      "outline_enabled": true,
+      "outline_px_320": 2.0,
       "outline_color": [
-        255,
-        255,
-        255
+        40,
+        20,
+        0
       ],
       "force_color": true,
       "antialias": false,

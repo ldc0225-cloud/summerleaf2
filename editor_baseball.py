@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pygame
 
+import editor_text as ed_txt
+
 from activities.baseball_zones import (
     BASEBALL_EDITOR_SCALAR_KEYS,
     BASEBALL_EDITOR_TEXT_KEYS,
@@ -52,7 +54,16 @@ def new_state() -> dict:
         "settings_scroll": 0,
         "settings_sb_drag": False,
         "zone_modal_scroll": 0,
+        "text_edit": ed_txt.EditSession(),
     }
+
+
+def _te(state) -> ed_txt.EditSession:
+    te = state.get("text_edit")
+    if not isinstance(te, ed_txt.EditSession):
+        te = ed_txt.EditSession()
+        state["text_edit"] = te
+    return te
 
 
 def is_baseball_map(map_id: str) -> bool:
@@ -756,9 +767,12 @@ def draw_settings_modal(screen, font, state, sw, sh):
             if fr is not None:
                 pygame.draw.rect(screen, (50, 50, 60), fr)
                 val = str(fields.get(key, ""))
-                if state.get("_edit_field") == key:
+                active = state.get("_edit_field") == key
+                if active:
                     pygame.draw.rect(screen, (255, 215, 0), fr, 2)
-                screen.blit(font.render(val[:28], True, (255, 255, 255)), (fr.x + 4, fr.y + 4))
+                ed_txt.blit_field_value(
+                    screen, font, val, fr, active=active, session=_te(state), trunc_limit=28
+                )
             if kind == "xy":
                 pr = ui["picks"].get(key)
                 if pr is not None:
@@ -801,7 +815,14 @@ def draw_zone_modal(screen, font, state, sw, sh):
         pygame.draw.rect(screen, (50, 60, 50), fr)
         if edit_key == key:
             pygame.draw.rect(screen, (255, 215, 0), fr, 2)
-        screen.blit(font.render(str(zf.get(key, "")), True, (255, 255, 255)), (fr.x + 4, fr.y + 4))
+        ed_txt.blit_field_value(
+            screen,
+            font,
+            zf.get(key, ""),
+            fr,
+            active=(edit_key == key),
+            session=_te(state),
+        )
         rects[key] = fr
         y += EDITOR_BB_MODAL_ROW_H + 4
     if zf.get("mode") == "mode":
@@ -894,6 +915,7 @@ def handle_settings_modal_click(state, mx, my, ui, flow, map_id) -> bool:
     for key, fr in (ui.get("fields") or {}).items():
         if fr.collidepoint(mx, my):
             state["_edit_field"] = key
+            _te(state).focus(str((state.get("settings_fields") or {}).get(key, "")))
             return True
     return ui["panel"].collidepoint(mx, my)
 
@@ -919,6 +941,7 @@ def handle_zone_modal_click(state, mx, my, ui, objs) -> Optional[str]:
     for key, fr in (ui.get("fields") or {}).items():
         if fr.collidepoint(mx, my):
             state["_edit_zone_field"] = key
+            _te(state).focus(str((state.get("zone_fields") or {}).get(key, "")))
             return None
     return None
 
@@ -993,15 +1016,16 @@ def handle_textinput(state, text: str, flow, map_id) -> bool:
     t = str(text or "")
     if not t:
         return False
+    te = _te(state)
     ef = state.get("_edit_field")
     if ef and state.get("show_settings"):
         fields = state.setdefault("settings_fields", {})
-        fields[ef] = str(fields.get(ef, "")) + t
+        fields[ef] = te.insert(str(fields.get(ef, "")), t)
         return True
     zef = state.get("_edit_zone_field")
     if zef and state.get("show_zone_modal"):
         zf = state.setdefault("zone_fields", {})
-        zf[zef] = str(zf.get(zef, "")) + t
+        zf[zef] = te.insert(str(zf.get(zef, "")), t)
         return True
     return False
 
@@ -1022,21 +1046,20 @@ def handle_keydown(state, event, flow, map_id) -> bool:
             state["show_zone_modal"] = False
             return True
         return False
-    if key == pygame.K_BACKSPACE:
-        for slot in ("_edit_field", "_edit_zone_field"):
-            ef = state.get(slot)
-            if not ef:
-                continue
-            if slot == "_edit_field":
-                fields = state.setdefault("settings_fields", {})
-                fields[ef] = str(fields.get(ef, ""))[:-1]
-            else:
-                zf = state.setdefault("zone_fields", {})
-                zf[ef] = str(zf.get(ef, ""))[:-1]
+    te = _te(state)
+    for slot, store_key in (("_edit_field", "settings_fields"), ("_edit_zone_field", "zone_fields")):
+        ef = state.get(slot)
+        if not ef:
+            continue
+        fields = state.setdefault(store_key, {})
+        if key == pygame.K_RETURN:
+            state.pop("_edit_field", None)
+            state.pop("_edit_zone_field", None)
             return True
-    if key == pygame.K_RETURN:
-        state.pop("_edit_field", None)
-        state.pop("_edit_zone_field", None)
+        nt, handled = te.keydown(str(fields.get(ef, "")), event)
+        if handled:
+            fields[ef] = nt
+            return True
         return True
     return False
 

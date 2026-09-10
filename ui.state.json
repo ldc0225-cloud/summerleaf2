@@ -157,16 +157,16 @@
       "font_key": "logo",
       "size_320": 32.0,
       "color": [
+        100,
         255,
-        255,
-        0
+        100
       ],
-      "outline_enabled": false,
+      "outline_enabled": true,
       "outline_px_320": 1.0,
       "outline_color": [
-        255,
-        255,
-        255
+        40,
+        20,
+        0
       ],
       "force_color": true,
       "antialias": false,
@@ -201,6 +201,13 @@
       284,
       52
     ],
+    "SAY_TEXTBOX_RECT_TOP_320": [
+      48,
+      38,
+      302,
+      70
+    ],
+    "SAY_TEXTBOX_TOP_BLIT_Y_PX_320": 14,
     "SAY_LINE_GAP_PX_320": 2,
     "SAY_NAME_GAP_PX_320": 4,
     "SAY_BUBBLE_OFFSET_X_PX_320": 10,
@@ -223,6 +230,12 @@
     "fishing": {
       "hud_max_px": 14.0,
       "success_max_px": 18.0
+    },
+    "bullfrog": {
+      "hud_px_320": 11.0,
+      "announce_px_320": 16.0,
+      "result_px_320": 22.0,
+      "title_px_320": 32.0
     }
   },
   "overlay_defaults": {
